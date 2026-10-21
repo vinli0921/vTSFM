@@ -1,0 +1,30 @@
+name: CPU checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpu:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up the same CPU environment as teammates
+        run: ./scripts/setup.sh --cpu
+      - name: Check the CPU environment
+        run: ./scripts/doctor.sh --cpu
+      - name: Run CPU tests
+        run: .venv/bin/python -m pytest -m 'not gpu'
+      - name: Check shell syntax
+        shell: bash
+        run: |
+          for script in scripts/*.sh; do
+            bash -n "$script"
+          done
