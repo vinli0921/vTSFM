@@ -10,6 +10,9 @@ in [the README](../README.md#reproducible-baseline).
   environment checks and repeat setup passed without replacing global tools.
   An isolated Linux GPU checkout installed the serving dependencies and passed
   CUDA environment checks on an A100-SXM4-40GB.
+- Publication: a fresh clone from GitHub completed the documented CPU setup,
+  environment checks, and all 34 tests on macOS. The first [GitHub Actions run](https://github.com/vinli0921/vTSFM/actions/runs/39532045316)
+  also passed the same setup, CPU tests, and shell syntax checks on Ubuntu.
 - Packaging: the wheel built successfully and contained the model adapter and
   both vLLM plugin entry points.
 - GPU integration: separate `native vtsfm` and `native chronos2` smoke comparisons

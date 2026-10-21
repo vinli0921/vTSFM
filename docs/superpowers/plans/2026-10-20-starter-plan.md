@@ -31,7 +31,7 @@ per-clone `.venv`; CPU mode installs `.[dev,benchmark]` and GPU mode installs
   numerical example request and clearly labeled historical baseline CSV.
 - [x] Integrate and test: full CPU tests, packaging, isolated GPU smoke comparing
   native/community/vtsfm, independent review and final Git/secret/artifact audit.
-- [ ] Initialize and commit repository, then publish to the user's destination
+- [x] Initialize and commit repository, then publish to the user's destination
   when provided; verify a fresh clone and clean working tree.
 
 ## Shared interfaces
