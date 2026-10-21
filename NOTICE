@@ -1,0 +1,11 @@
+vTSFM
+Copyright 2026 vTSFM contributors.
+
+This project extends the Chronos-2 vLLM integration from the
+amazon-science/chronos-forecasting project, pinned at
+ba47d25a04aedac33af2fb9780609afd54744d5e, licensed under Apache-2.0.
+
+The optional benchmark data is derived from IBM AssetOpsBench and its
+MetroPT-3 compressor fixture. Dataset attribution and license terms,
+including MetroPT-3's CC BY 4.0 license and our preprocessing changes,
+are documented in THIRD_PARTY_NOTICES.md. Data is downloaded separately.

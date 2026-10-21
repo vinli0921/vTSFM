@@ -1,0 +1,44 @@
+# Per-checkout environments, tools, and credentials
+.venv/
+.venv-*/
+venv/
+.tools/
+.cache/
+.env
+.env.*
+!.env.example
+
+# Python development/build output
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+.superpowers/
+
+# Downloaded inputs, model weights, and generated measurements
+/data/
+/artifacts/
+/results/
+/results-*/
+/logs/
+*.log
+*.npz
+*.npy
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+
+# Local editor / platform files
+.DS_Store
+._*
+.idea/
+.vscode/

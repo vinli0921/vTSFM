@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vtsfm"
+version = "0.1.0"
+description = "An external vLLM plugin starter for time-series foundation models"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = "Apache-2.0"
+dependencies = []
+
+[project.optional-dependencies]
+serve = [
+  "vllm==0.16.0",
+  "torch==2.9.1",
+  "transformers==4.57.6",
+  "pandas==2.3.3",
+  "chronos-forecasting @ git+https://github.com/amazon-science/chronos-forecasting.git@ba47d25a04aedac33af2fb9780609afd54744d5e",
+]
+benchmark = [
+  "numpy==2.2.6",
+  "requests==2.34.2",
+  "nvidia-ml-py==13.615.71",
+  "matplotlib==3.11.2",
+  "fastapi==0.156.2",
+  "uvicorn==0.54.0",
+]
+dev = ["pytest==8.4.2", "build>=1.2,<2"]
+
+[project.scripts]
+vtsfm = "vtsfm.cli:main"
+
+[project.entry-points."vllm.general_plugins"]
+vtsfm = "vtsfm.plugin:register_models"
+
+[project.entry-points."vllm.io_processor_plugins"]
+vtsfm = "vtsfm.plugin:get_io_processor"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vtsfm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = ["gpu: opt-in integration checks requiring Linux, CUDA, and serving dependencies"]
