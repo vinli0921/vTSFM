@@ -43,6 +43,8 @@ CI's CPU checks do not substitute for numerical and serving validation.
    revision, architecture names, importable model and IO class paths, upstream IO
    plugin, native server module, vLLM arguments, and an honest group-attention
    capability flag. Keep model-family pins and execution settings here.
+   Declare and pin required optional runtime dependencies in package metadata and
+   the setup extras before claiming that adapter can be installed and served.
 2. Add the descriptor to `adapters/registry.py`. Discovery, `list_adapters()`,
    `get_adapter(name)`, CLI help, `adapters`, and serving dry-runs must work without
    importing Torch, vLLM, or model packages. Keep both `vtsfm` plugin entry points

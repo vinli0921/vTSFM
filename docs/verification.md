@@ -39,6 +39,8 @@ work.
   routed example groups, and constructed the serving command without GPU packages.
 - Independent code review found no important issues. Native forecasting functions
   were preserved during relocation; launch settings and model pins are unchanged.
+- The feature branch's push and pull-request GitHub Actions checks passed,
+  including fresh CPU setup and the full test suite.
 - GPU startup was not rerun because the existing VM did not respond to SSH.
   The earlier GPU smoke results above apply to the original starter, not a new
   GPU verification of this refactor. No remote service was interrupted.

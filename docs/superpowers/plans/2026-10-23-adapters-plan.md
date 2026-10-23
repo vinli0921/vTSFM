@@ -33,7 +33,8 @@ new kernels, or GPU speedup claims. No shared VM service interruption.
   settings through metadata, add `adapters` CLI listing and run existing tests.
   Descriptor fields: name, model_id, model_revision, architectures, model_class,
   io_processor_class, upstream_io_plugin, native_server_module, vllm_args,
-  supports_group_attention=False. Registry: list_adapters(), get_adapter(name).
+  supports_group_attention (default false, true for Chronos-2's inherited
+  capability). Registry: list_adapters(), get_adapter(name).
 - [x] Shared batching (scoped implementer): tests first for compatible grouping,
   mixed keys, budgets, globally unique group IDs, FIFO ordering, output routing,
   duplicate IDs, invalid metadata and oversized atomic requests. Implement the
@@ -43,7 +44,7 @@ new kernels, or GPU speedup claims. No shared VM service interruption.
   an adapter, planning-only batching, first adapter limitations and future work.
 - [x] Verify: full CPU suite, wheel, lazy CPU commands, independent code review,
   fresh install; GPU check only if an idle separate GPU is available.
-- [ ] Commit and publish a feature branch/PR without changing shared main.
+- [x] Commit and publish a feature branch/PR without changing shared main.
 
 ## Implementation choices
 
@@ -61,3 +62,5 @@ found no important issues. Benchmark archives now capture all adapter/shared sou
 GPU startup was not rerun: SSH to the existing instance timed out; no remote
 service or environment was changed. `upstream` is a generic backend alias, while
 `chronos2` remains accepted for backward compatibility.
+Published as [draft PR #1](https://github.com/vinli0921/vTSFM/pull/1); the branch's
+push and pull-request CPU checks both passed.
