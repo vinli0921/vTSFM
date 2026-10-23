@@ -1,15 +1,16 @@
 # Architecture
 
-vTSFM is an external vLLM plugin starter. Its model and IO adapters inherit the
-pinned community Chronos-2 integration. The project owns the registration and
-extension points; inference still delegates to upstream behavior.
+vTSFM is a general TSFM extension for vLLM. Chronos-2 is the first and only
+implemented adapter, and its model and IO classes inherit the pinned community
+integration. The project owns adapter discovery, plugin registration, and a
+separate metadata batching planner; inference still delegates to upstream behavior.
 
 ```mermaid
 flowchart LR
     C[Numeric HTTP client] --> V[vLLM pooling endpoint]
     C --> N[Native HTTP comparator]
-    V --> I[vTSFM IO adapter]
-    I --> M[vTSFM model adapter]
+    V --> I[Selected adapter IO]
+    I --> M[Selected adapter model]
     M --> U[Pinned Chronos-2 implementation]
     N --> P[Official Chronos pipeline]
 ```
@@ -21,34 +22,83 @@ They are alternatives in this diagram, not simultaneous resident services.
 
 | File / directory | Responsibility |
 | --- | --- |
-| `src/vtsfm/config.py` | Pure constants, environment pins, model revision, default port |
-| `src/vtsfm/plugin.py` | Lazy model registration and IO factory for the `vtsfm` entry points |
-| `src/vtsfm/models/chronos2.py` | Thin upstream model subclass and explicit multimodal processor registration |
-| `src/vtsfm/io_processor.py` | Thin upstream numerical IO subclass |
+| `src/vtsfm/adapters/base.py` | Immutable, CPU-safe `AdapterSpec` metadata and lazy implementation paths |
+| `src/vtsfm/adapters/registry.py` | `list_adapters()` and `get_adapter(name)` without model runtime imports |
+| `src/vtsfm/adapters/chronos2/` | Chronos-2 pins, launch settings, model, numerical IO, and native comparator |
+| `src/vtsfm/batching.py` | Runtime-independent reference planner for compatible prepared work and output routing |
+| `src/vtsfm/config.py` | Shared dependency pins/defaults and compatibility aliases for Chronos-2 model pins |
+| `src/vtsfm/plugin.py` | Lazy architecture registration and adapter-selected IO factory for the `vtsfm` entry points |
 | `src/vtsfm/cli.py` | Build commands/environments and start the selected backend without GPU imports for help |
-| `src/vtsfm/native_server.py` | Official Chronos pipeline behind the comparable HTTP boundary |
+| `src/vtsfm/models/chronos2.py`, `src/vtsfm/io_processor.py`, `src/vtsfm/native_server.py` | Compatibility shims for the previous implementation paths |
 | `src/vtsfm/benchmark_memory.py` | Optional worker memory counters used in benchmark mode |
 | `benchmarks/` | Data preparation, payloads, process ownership, metrics, raw results, plots |
 | `scripts/` | Per-checkout setup, environment checks, serving, requests, smoke runs |
-| `tests/` | CPU behavior checks and opt-in GPU integration checks |
+| `tests/` | CPU behavior checks; GPU serving verification runs separately |
 
-## Plugin selection
+## Adapter and plugin selection
+
+An `AdapterSpec` describes a model family using its name, model ID/revision,
+architectures, model and IO class paths, upstream IO plugin, native server module,
+vLLM arguments, and group-attention capability. Descriptors contain metadata only;
+listing adapters and resolving a descriptor must not import Torch, vLLM, or model
+packages. Chronos-2's `supports_group_attention` is true: this describes the
+inherited architecture, not a new vTSFM optimization.
+
+`serve --adapter chronos2` selects the family independently of the backend
+(`vtsfm`, `upstream`, or `native`; `chronos2` remains a legacy comparator alias).
+The CLI sets `VTSFM_ADAPTER` explicitly; the IO
+factory uses it to choose an implementation, defaulting to `chronos2`. Unknown
+adapters fail before launching a server. `vtsfm adapters` lists descriptors as
+CPU-safe JSON. These boundaries support extension, but do not yet define a common
+public HTTP schema across model families.
 
 The project registers `vtsfm` in the model plugin and IO processor entry-point
 groups. The pinned Chronos package also registers `chronos2`. Serving must select
 the intended entry point explicitly, so discovery order does not overwrite the
 project's adapter with the community comparator.
 
-The project model subclass has its own multimodal processor registration. This
+The model plugin registers all descriptor architecture targets lazily. The
+Chronos-2 model subclass has its own multimodal processor registration. This
 registration is attached to the concrete model class and cannot be assumed to
 follow ordinary Python subclass inheritance. Keep registration lazy so a CPU
 checkout can import the package and inspect commands without importing vLLM or
 Torch.
 
-The serving command uses the pinned model revision, pooling runner, numerical IO,
-FP32, and eager execution. Development RPC and memory hooks are enabled only in
-benchmark mode, not normal serving. Bind to loopback unless access from another
+The Chronos-2 descriptor retains the pinned model revision, pooling runner,
+numerical IO, FP32, eager execution, disabled prefix caching, and `max_num_seqs=1`.
+Development RPC and memory hooks are enabled only in benchmark mode, not normal
+serving. Bind to loopback unless access from another
 machine is deliberately configured.
+
+## Shared batching and model-specific execution
+
+`batching.py` plans already prepared work using standard-library metadata. It has
+no model-runtime dependency and does not import adapters. A `BatchKey` contains
+the adapter, checkpoint ID/revision, context length, prediction length, quantile
+levels, and dtype. Keys must match exactly; differing shapes or settings remain
+separate, even where a future adapter might safely combine them.
+An empty quantile tuple represents point-only forecasts; shared planning does
+not require an attention backbone or probabilistic model outputs.
+
+A `BatchRequest` identifies a request and gives the prepared row count for each
+independent attention group. `plan_batches(requests, max_rows=..., max_requests=...)`
+produces FIFO contiguous plans, flushing on an incompatible key or a budget limit.
+Requests and groups are atomic: an individually oversized request is rejected,
+not split. Plans assign unique group IDs across requests, record request slices,
+and `split_outputs(outputs)` routes row-aligned results back to those requests.
+Invalid metadata and duplicate request IDs are rejected.
+
+Each adapter owns normalization, patching, covariates, group formation (including
+cross-learning semantics), and conversion between prepared rows and its public
+outputs. Target/covariate filtering stays in adapter IO. Shared scheduling can
+use the resulting compatibility keys, row counts, and group boundaries; it cannot
+infer those numerical semantics. Attention kernels and other model execution
+optimizations likewise belong inside the relevant adapter.
+
+The planner is a CPU-testable reference for later scheduler/worker integration.
+It is not connected to the vLLM serving path and adds no queue admission, tensor
+packing, multi-prompt transport, GPU execution, or attention kernels. Its group
+IDs do not enable cross-request grouped execution in the Chronos-2 runtime.
 
 ## Benchmark contract
 
@@ -59,9 +109,11 @@ the timed interval. Cancellation must release owned children and preserve partia
 results for inspection.
 
 Requests use matching numerical inputs, prediction length 96, quantiles 0.1/0.5/0.9,
-and `cross_learning=false`. B is the number of sensor/history windows in one
-request. The reference experiment has one outstanding HTTP request, so it
-measures request batching rather than concurrent-client scalability.
+and `cross_learning=false`. B is the number of univariate sensor/history windows
+in one request. The reference experiment sends sequential requests with one
+outstanding HTTP request. It measures within-request batching; it does not test
+cross-request planning/execution, grouped or covariate workloads, or
+concurrent-client scalability.
 
 End-to-end latency covers submitting a pre-encoded request through receiving and
 decoding its response. Summary p95 pools the raw samples rather than averaging
@@ -99,8 +151,9 @@ Synthetic numerical inputs are permitted only for explicitly labeled smoke tests
 
 ## Future research boundaries
 
-Cross-request packing, grouped attention kernels, TimesFM support, and MCP
-integration are not implemented in this starter. Keep proposed changes behind
-clear boundaries and demonstrate numerical parity before interpreting performance.
+Live cross-request batching, tensor packing, grouped attention kernels, another
+model adapter (including TimesFM), a common public numerical HTTP schema, and MCP
+integration are not implemented. Keep proposed changes behind clear boundaries
+and demonstrate numerical parity before interpreting performance.
 Any dependency, precision, scheduler, or IO change needs a separately labeled
 baseline so results from different configurations do not become interchangeable.

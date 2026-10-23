@@ -1,12 +1,16 @@
 # vTSFM
 
-A team starter for serving time-series forecasts through an external vLLM
-plugin. The `vtsfm` plugin wraps the existing Chronos-2 integration and provides
-separate model and IO entry points for development. The original `chronos2`
+A general time-series foundation model (TSFM) extension for vLLM, with
+Chronos-2 as its first and only implemented adapter. CPU-safe adapter metadata
+selects each model family's implementation, numerical IO, and serving settings.
+The `vtsfm` plugin uses the pinned Chronos-2 integration; the original `chronos2`
 plugin remains available as a comparator.
 
-This starter does not implement new batching or attention optimizations.
-Cross-request packing and grouped attention kernels are future work. The
+Shared batching has a CPU-only reference planner for compatibility, request and
+row budgets, independent attention groups, and output routing. It is not connected
+to live serving and does not pack tensors or execute GPU work. Model-specific
+normalization, patching, covariates, group semantics, and future attention kernels
+belong to each adapter. There are no new batching or attention speedups here. The
 [historical results](docs/baselines/2026-10-20/README.md) measure the community
 Chronos plugin against native inference, before vTSFM-specific optimization.
 
@@ -30,8 +34,12 @@ loading CUDA:
 
 ```bash
 .venv/bin/python -m vtsfm.cli --help
+.venv/bin/python -m vtsfm.cli adapters
+.venv/bin/python -m vtsfm.cli serve --adapter chronos2 --dry-run
 .venv/bin/python -m benchmarks.run --help
 ```
+
+`adapters` prints JSON metadata without loading Torch, vLLM, or model packages.
 
 ## Serve on a GPU
 
@@ -43,7 +51,7 @@ network access and disk space; keep weights outside Git.
 ```bash
 ./scripts/setup.sh
 ./scripts/doctor.sh
-./scripts/serve.sh --backend vtsfm --port 8001
+./scripts/serve.sh --adapter chronos2 --backend vtsfm --port 8001
 ```
 
 From another terminal in this checkout:
@@ -63,9 +71,15 @@ Choose one backend per server process:
 ./scripts/serve.sh --backend native --port 8001
 ```
 
+`--backend upstream` selects the chosen adapter's upstream plugin; `chronos2`
+remains an equivalent name for the first adapter's comparator.
+
 Stop the previous server before starting another. `vtsfm` selects this project's
 adapter, `chronos2` selects the pinned community adapter, and `native` uses the
 official Chronos pipeline behind the same HTTP request/response boundary.
+`--adapter` selects the model family independently of `--backend`; it defaults to
+`chronos2`, so existing commands keep their behavior. No other model family or
+common public numerical HTTP schema is implemented yet.
 
 ## Run a comparison
 
@@ -105,6 +119,10 @@ directory. Raw timing samples, payload hashes, configuration, numerical parity
 checks, summaries, and GPU memory measurements make comparisons auditable.
 Reports retain failed and incomplete configurations.
 
+The current runner sends sequential requests containing batches of univariate
+sensor/history windows, with `cross_learning=false`. It does not benchmark live
+cross-request batching, grouped or covariate workloads, or concurrent clients.
+
 The fixture has seven analog channels over 5,116 hourly grid positions; 560 rows
 are wholly missing. Preparation causally forward-fills those rows, preserves
 observed values before conversion to FP32, and records source checksums and every
@@ -130,18 +148,24 @@ a separate result set. CPU CI does not verify GPU compatibility or performance.
 See the [starter verification record](docs/verification.md) for the initial CPU
 and GPU checks.
 
-## Where to work first
+## Extension boundaries
 
-| Area | Entry points | Initial responsibility |
+| Area | Entry points | Responsibility |
 | --- | --- | --- |
-| Model integration | `src/vtsfm/plugin.py`, `src/vtsfm/models/chronos2.py` | Keep lazy discovery and numerical parity intact |
-| Numerical IO | `src/vtsfm/io_processor.py` | Preserve input grouping, horizon, and quantile output schema |
-| Scheduling research | vLLM/plugin integration boundaries | Design cross-request packing; not implemented yet |
-| Kernel research | model attention boundary | Profile and propose grouped kernels; not implemented yet |
+| Adapter metadata and discovery | `src/vtsfm/adapters/base.py`, `src/vtsfm/adapters/registry.py` | Describe and resolve model families without importing runtimes |
+| Chronos-2 model and numerical IO | `src/vtsfm/adapters/chronos2/` | Own model pins, preparation, group semantics, native comparison, and numerical parity |
+| Shared batching | `src/vtsfm/batching.py` | Plan compatible prepared rows and route results; execution integration remains future work |
+| Plugin integration | `src/vtsfm/plugin.py`, `src/vtsfm/cli.py` | Register lazy targets and select adapter/backend settings |
+| Kernel research | Adapter model attention boundary | Profile and implement family-specific kernels; not implemented yet |
 | Measurement | `benchmarks/`, `src/vtsfm/benchmark_memory.py` | Reproduce native/community/vTSFM comparisons and review raw samples |
 
-During the first week, have everyone run CPU checks, reproduce the untouched GPU
-smoke comparison on an idle machine, and save a baseline before changing behavior.
+The former model, IO, and native module paths remain compatibility shims. To add a
+model family, provide its metadata and implementations, register the descriptor,
+and validate its preparation and output contract; see
+[adding an adapter](CONTRIBUTING.md#adding-an-adapter).
+
+Run CPU checks, reproduce the untouched GPU smoke comparison on an idle machine,
+and save a baseline before changing behavior.
 Assign each proposed optimization a numerical check and a measurable target.
 Read [architecture](docs/architecture.md) and [contribution guidance](CONTRIBUTING.md)
 before changing plugin discovery or the serving contract.

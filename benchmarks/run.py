@@ -460,6 +460,16 @@ def measure_point(session, url, engine, block, batch, context, encoded, digest,
         append(record_path, record)
 
 
+def snapshot_sources(output):
+    """Archive all adapter/shared code, not just the previous entry-point files."""
+    harness = output / 'harness'
+    harness.mkdir()
+    for source in Path(__file__).resolve().parent.glob('*.py'):
+        shutil.copy2(source, harness / source.name)
+    shutil.copytree(REPO_ROOT / 'src' / 'vtsfm', harness / 'vtsfm',
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+
+
 def main(argv=None):
     args = parse_args(argv)
     # Do this before importing GPU dependencies or creating a backend process.
@@ -470,13 +480,7 @@ def main(argv=None):
     output = resolve_path(args.output)
     output.mkdir(parents=True, exist_ok=False)
     (output / "references").mkdir()
-    (output / "harness").mkdir()
-    for source in Path(__file__).resolve().parent.glob("*.py"):
-        shutil.copy2(source, output / "harness" / source.name)
-    for name in ("native_server.py", "benchmark_memory.py"):
-        source = REPO_ROOT / "src" / "vtsfm" / name
-        if source.exists():
-            shutil.copy2(source, output / "harness" / name)
+    snapshot_sources(output)
     data_path, manifest = prepare_inputs(args, output)
     plugin = args.backends[1]
     config = vars(args).copy()
