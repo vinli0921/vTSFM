@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import importlib.metadata
 import importlib.util
 import json
@@ -11,9 +12,10 @@ import platform
 import sys
 
 from vtsfm.config import (
-    DEFAULT_PORT, MODEL_ID, MODEL_REVISION, PYTHON_VERSION, TORCH_VERSION,
+    DEFAULT_PORT, PYTHON_VERSION, TORCH_VERSION,
     TRANSFORMERS_VERSION, VLLM_VERSION,
 )
+from vtsfm.adapters import get_adapter, list_adapters
 
 
 def _check_address(host: str, port: int, benchmark: bool) -> None:
@@ -34,20 +36,23 @@ def _environment(benchmark: bool = False) -> dict[str, str]:
 
 
 def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
-                       port: int = DEFAULT_PORT, benchmark: bool = False
+                       port: int = DEFAULT_PORT, benchmark: bool = False,
+                       adapter: str = 'chronos2'
                        ) -> tuple[list[str], dict[str, str]]:
-    if backend not in ('vtsfm', 'chronos2'):
-        raise ValueError('backend must be vtsfm or chronos2')
+    selected = get_adapter(adapter)
+    if backend == 'vtsfm':
+        plugin = 'vtsfm'
+    elif backend in ('upstream', selected.upstream_io_plugin) and selected.upstream_io_plugin:
+        plugin = selected.upstream_io_plugin
+    else:
+        raise ValueError(f'Backend {backend!r} is unavailable for adapter {adapter!r}')
     _check_address(host, port, benchmark)
     environment = _environment(benchmark)
-    environment['VLLM_PLUGINS'] = backend
-    command = [str(Path(sys.executable).with_name('vllm')), 'serve', MODEL_ID,
-               '--revision', MODEL_REVISION, '--host', host, '--port', str(port),
-               '--io-processor-plugin', backend, '--runner', 'pooling',
-               '--enforce-eager', '--no-enable-prefix-caching',
-               '--skip-tokenizer-init', '--enable-mm-embeds', '--dtype', 'float32',
-               '--max-model-len', '8192', '--max-num-batched-tokens', '8192',
-               '--max-num-seqs', '1']
+    environment['VLLM_PLUGINS'] = plugin
+    environment['VTSFM_ADAPTER'] = selected.name
+    command = [str(Path(sys.executable).with_name('vllm')), 'serve', selected.model_id,
+               '--revision', selected.model_revision, '--host', host, '--port', str(port),
+               '--io-processor-plugin', plugin, *selected.vllm_args]
     if benchmark:
         environment['VLLM_SERVER_DEV_MODE'] = '1'
         command += ['--worker-extension-cls', 'vtsfm.benchmark_memory.MemoryMetrics']
@@ -55,16 +60,22 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
 
 
 def build_native_command(host: str = '127.0.0.1', port: int = DEFAULT_PORT,
-                         benchmark: bool = False) -> tuple[list[str], dict[str, str]]:
+                         benchmark: bool = False, adapter: str = 'chronos2'
+                         ) -> tuple[list[str], dict[str, str]]:
+    selected = get_adapter(adapter)
+    if selected.native_server_module is None:
+        raise ValueError(f'Adapter {adapter!r} has no native comparator')
     _check_address(host, port, benchmark)
     environment = _environment(benchmark)
     environment['VLLM_PLUGINS'] = ''
-    return ([sys.executable, '-m', 'uvicorn', 'vtsfm.native_server:app',
+    environment['VTSFM_ADAPTER'] = selected.name
+    return ([sys.executable, '-m', 'uvicorn', f'{selected.native_server_module}:app',
              '--host', host, '--port', str(port), '--workers', '1',
              '--log-level', 'warning'], environment)
 
 
-def doctor(cpu: bool = False) -> tuple[dict, bool]:
+def doctor(cpu: bool = False, adapter: str = 'chronos2') -> tuple[dict, bool]:
+    selected = get_adapter(adapter)
     packages = {}
     for name in ('vtsfm', 'numpy', 'requests', 'torch', 'vllm', 'transformers', 'chronos-forecasting'):
         try:
@@ -73,7 +84,8 @@ def doctor(cpu: bool = False) -> tuple[dict, bool]:
             packages[name] = None
     result = {'mode': 'cpu' if cpu else 'gpu', 'python': platform.python_version(),
               'reference_python': PYTHON_VERSION, 'packages': packages,
-              'model': MODEL_ID, 'model_revision': MODEL_REVISION}
+              'adapter': selected.name, 'model': selected.model_id,
+              'model_revision': selected.model_revision}
     if cpu:
         result['ready'] = packages['vtsfm'] is not None
         return result, result['ready']
@@ -100,28 +112,39 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='action', required=True)
     serve = commands.add_parser('serve', help='Serve a numerical forecasting backend')
-    serve.add_argument('--backend', choices=('vtsfm', 'chronos2', 'native'), default='vtsfm')
+    serve.add_argument('--backend', choices=('vtsfm', 'upstream', 'chronos2', 'native'), default='vtsfm')
+    serve.add_argument('--adapter', default='chronos2', help='Model adapter; use the adapters command to list support')
     serve.add_argument('--host', default='127.0.0.1')
     serve.add_argument('--port', type=int, default=DEFAULT_PORT)
     serve.add_argument('--benchmark', action='store_true', help='Enable local benchmark-only diagnostics')
     serve.add_argument('--dry-run', action='store_true', help='Print a command without starting a server')
     diagnostic = commands.add_parser('doctor', help='Check the installed environment')
     diagnostic.add_argument('--cpu', action='store_true', help='Skip imports and checks of GPU dependencies')
+    diagnostic.add_argument('--adapter', default='chronos2')
+    commands.add_parser('adapters', help='List registered model adapters without loading model runtimes')
     args = parser.parse_args(argv)
+    if args.action == 'adapters':
+        print(json.dumps({'adapters': [asdict(adapter) for adapter in list_adapters()]}, indent=2))
+        return 0
     if args.action == 'doctor':
-        result, ready = doctor(args.cpu)
+        try:
+            result, ready = doctor(args.cpu, args.adapter)
+        except ValueError as error:
+            parser.error(str(error))
         print(json.dumps(result, indent=2))
         return 0 if ready else 1
     try:
         builder = build_native_command if args.backend == 'native' else build_vllm_command
-        kwargs = {'host': args.host, 'port': args.port, 'benchmark': args.benchmark}
+        kwargs = {'host': args.host, 'port': args.port, 'benchmark': args.benchmark,
+                  'adapter': args.adapter}
         if args.backend != 'native':
             kwargs['backend'] = args.backend
         command, environment = builder(**kwargs)
     except ValueError as error:
         parser.error(str(error))
     if args.dry_run:
-        keys = ('VLLM_PLUGINS', 'VLLM_SERVER_DEV_MODE', 'OMP_NUM_THREADS', 'HF_HUB_DISABLE_TELEMETRY')
+        keys = ('VTSFM_ADAPTER', 'VLLM_PLUGINS', 'VLLM_SERVER_DEV_MODE',
+                'OMP_NUM_THREADS', 'HF_HUB_DISABLE_TELEMETRY')
         print(json.dumps({'command': command, 'environment': {
             key: environment[key] for key in keys if key in environment}}, indent=2))
         return 0

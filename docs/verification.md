@@ -29,3 +29,21 @@ counts do not establish performance gains. The [historical baseline](baselines/2
 is a separate, larger experiment measuring the community plugin. New attention
 kernels, cross-request batching, and AssetOpsBench MCP integration remain future
 work.
+
+## Adapter refactor — 2026-10-23
+
+- All 150 CPU tests passed on Python 3.11.17, including the existing suite and
+  new adapter selection, group planning/routing, and source snapshot checks.
+- The wheel built with all adapter modules and the shared planner. A fresh
+  wheel-only environment loaded both entry points, listed adapters, planned and
+  routed example groups, and constructed the serving command without GPU packages.
+- Independent code review found no important issues. Native forecasting functions
+  were preserved during relocation; launch settings and model pins are unchanged.
+- The feature branch's push and pull-request GitHub Actions checks passed,
+  including fresh CPU setup and the full test suite.
+- GPU startup was not rerun because the existing VM did not respond to SSH.
+  The earlier GPU smoke results above apply to the original starter, not a new
+  GPU verification of this refactor. No remote service was interrupted.
+
+Shared batching in this version plans metadata only. It is not connected to
+vLLM execution and introduces no measured throughput or latency improvement.

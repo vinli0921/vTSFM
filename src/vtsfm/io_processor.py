@@ -1,11 +1,5 @@
-"""Numerical forecast IO extension point, preserving the upstream schema."""
+"""Compatibility import for the original Chronos-2 IO class path."""
 
-from chronos.chronos2.vllm.io_processor import Chronos2IOProcessor
+from vtsfm.adapters.chronos2.io_processor import VTSFMChronos2IOProcessor as VTSFMIOProcessor
 
-
-class VTSFMIOProcessor(Chronos2IOProcessor):
-    """Inherit tested preprocessing, covariates, grouping, and quantile outputs.
-
-    Future bounded batching and cross-request packing must preserve task groups
-    and target-to-response mappings. This starter implements neither change.
-    """
+__all__ = ['VTSFMIOProcessor']

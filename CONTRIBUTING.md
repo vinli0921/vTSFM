@@ -1,9 +1,10 @@
 # Contributing
 
-Start from the approved [starter design](docs/superpowers/specs/2026-10-20-starter-design.md)
-and [implementation plan](docs/superpowers/plans/2026-10-20-starter-plan.md).
-The starter delegates to the pinned Chronos integration; do not describe an
-optimization as implemented until code, numerical checks, and measurements exist.
+Start with the [architecture guide](docs/architecture.md).
+Chronos-2 is the first and only implemented adapter and delegates to the pinned
+Chronos integration. Shared batching is a metadata planner outside live serving;
+do not describe an optimization as implemented until code, numerical checks, and
+measurements exist.
 
 ## Local checks
 
@@ -20,8 +21,9 @@ CI's CPU checks do not substitute for numerical and serving validation.
 
 ## Change boundaries
 
-- Keep model/revision and dependency pins in `src/vtsfm/config.py` and package
-  metadata consistent. Record any intentional baseline change.
+- Keep model/revision pins in the adapter descriptor, compatibility aliases in
+  `src/vtsfm/config.py`, and dependency pins in package metadata consistent. Record
+  any intentional baseline change.
 - Register the `vtsfm` model and IO entry points explicitly. The model subclass
   needs its own multimodal processor registration; inheritance alone is
   insufficient. Select one plugin explicitly when serving.
@@ -33,6 +35,39 @@ CI's CPU checks do not substitute for numerical and serving validation.
 - Keep scripts relative to the checkout and use its `.venv`. Do not add usernames,
   machine addresses, global environment mutations, or driver changes.
 
+## Adding an adapter
+
+1. Create `src/vtsfm/adapters/<family>/` with a pure metadata `AdapterSpec` in
+   `spec.py` and lazy model/IO implementations. Supply a name, exact model ID and
+   revision, architecture names, importable model and IO class paths, upstream IO
+   plugin, native server module, vLLM arguments, and an honest group-attention
+   capability flag. Keep model-family pins and execution settings here.
+   Declare and pin required optional runtime dependencies in package metadata and
+   the setup extras before claiming that adapter can be installed and served.
+2. Add the descriptor to `adapters/registry.py`. Discovery, `list_adapters()`,
+   `get_adapter(name)`, CLI help, `adapters`, and serving dry-runs must work without
+   importing Torch, vLLM, or model packages. Keep both `vtsfm` plugin entry points
+   stable; plugin registration and IO selection must follow descriptor metadata.
+3. Implement the family's normalization, patching, covariates, group semantics,
+   output decoding, and native comparator inside its adapter. Document the
+   numerical HTTP contract. The current Chronos-2 schema is not a common public
+   schema for other models. Add required concrete-class processor registration
+   rather than assuming inheritance handles it.
+4. Define how prepared rows map to `BatchKey` and `BatchRequest.group_sizes`.
+   Preserve independent requests and cross-learning semantics. Keep the shared
+   planner independent of model imports; model-specific target/covariate filtering
+   and kernels belong in the adapter. The planner is not yet wired into serving,
+   so planning tests alone do not validate execution or performance.
+5. Verify CPU-safe discovery and selection, invalid-name failures, preparation and
+   output semantics, and numerical parity on an idle GPU with matching native
+   inputs. Record model-specific launch requirements and benchmark limitations.
+   Adding metadata alone does not make a model supported.
+
+Preserve the existing Chronos-2 defaults, compatibility import paths, and
+`MODEL_ID`, `MODEL_REVISION`, and `CHRONOS_COMMIT` aliases. Another adapter must not
+silently change the pinned Chronos-2 baseline or imply the benchmark runner can
+evaluate that model without further work.
+
 ## Performance changes
 
 Save an untouched baseline and run the same payloads, settings, GPU, and timing
@@ -41,6 +76,12 @@ revisions, warmups, repetitions, precision, failures, and memory methodology.
 Report end-to-end HTTP latency and series/s with one outstanding request unless a
 separate concurrency experiment is explicitly specified. Do not call native-only
 model timings a matched comparison to the HTTP path.
+
+The current workload is sequential requests of univariate sensor/history windows
+with `cross_learning=false`. It does not validate grouped attention, covariates,
+concurrent clients, or live cross-request batching. Add separate workload and
+correctness coverage before making claims about those behaviors. A metadata
+planner change alone is not a GPU optimization or a measured speedup.
 
 Use a free GPU and port. The runner must refuse foreign GPU workloads or an
 occupied port and clean up only processes it launched. Never stop an existing
