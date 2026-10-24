@@ -1,7 +1,6 @@
 # Contributing
 
-Start from the [adapter design](docs/superpowers/specs/2026-10-23-adapters-design.md)
-and [implementation plan](docs/superpowers/plans/2026-10-23-adapters-plan.md).
+Start with the [architecture guide](docs/architecture.md).
 Chronos-2 is the first and only implemented adapter and delegates to the pinned
 Chronos integration. Shared batching is a metadata planner outside live serving;
 do not describe an optimization as implemented until code, numerical checks, and
