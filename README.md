@@ -123,7 +123,10 @@ CUDA_VISIBLE_DEVICES='' VTSFM_TEST_ADAPTER=timesfm25 \
   .venv-timesfm25/bin/python -m pytest tests/test_forecast_runtime.py -q
 ```
 
-This downloads the pinned checkpoint. GPU HTTP serving is not yet validated.
+This downloads the pinned checkpoint. GPU HTTP smoke tests passed for all three
+on an RTX 4080 Laptop GPU using cached checkpoints, FP32, eager execution, and
+`--gpu-memory-utilization 0.35`. Checks covered examples, unequal history lengths,
+and repeated requests; they do not establish performance or forecast accuracy.
 
 ## Run a comparison
 
