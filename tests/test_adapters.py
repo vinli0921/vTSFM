@@ -17,7 +17,7 @@ print(json.dumps({'names':[item.name for item in list_adapters()],
  'heavy':[name for name in ('torch','vllm','chronos') if name in sys.modules]}))
 '''], check=True, capture_output=True, text=True)
     assert json.loads(process.stdout) == {
-        'names': ['chronos2'], 'model': 'amazon/chronos-2',
+        'names': ['chronos2', 'timesfm25', 'toto2', 'moirai2'], 'model': 'amazon/chronos-2',
         'architecture': ['Chronos2Model'], 'heavy': [],
     }
 
@@ -71,7 +71,8 @@ def test_launch_uses_selected_adapter_model_and_runtime_arguments(monkeypatch):
 def test_cli_lists_adapters_on_cpu_and_rejects_unknown_adapter():
     process = subprocess.run([sys.executable, '-m', 'vtsfm.cli', 'adapters'],
                              check=True, capture_output=True, text=True)
-    assert [item['name'] for item in json.loads(process.stdout)['adapters']] == ['chronos2']
+    assert [item['name'] for item in json.loads(process.stdout)['adapters']] == [
+        'chronos2', 'timesfm25', 'toto2', 'moirai2']
     bad = subprocess.run([sys.executable, '-m', 'vtsfm.cli', 'serve',
                           '--adapter', 'timesfm', '--dry-run'], capture_output=True, text=True)
     assert bad.returncode == 2
@@ -86,3 +87,19 @@ def test_explicit_adapter_preserves_default_chronos_baseline():
     assert '--enforce-eager' in command
     assert '--no-enable-prefix-caching' in command
     assert env['VTSFM_ADAPTER'] == 'chronos2'
+
+
+@pytest.mark.parametrize('name', ['timesfm25', 'toto2', 'moirai2'])
+def test_new_adapters_select_pooling_without_runtime_imports(name):
+    from vtsfm.adapters import get_adapter
+    from vtsfm.cli import build_native_command, build_vllm_command
+    adapter = get_adapter(name)
+    command, environment = build_vllm_command(adapter=name)
+    assert command[command.index('--revision') + 1] == adapter.model_revision
+    assert command[command.index('--config-format') + 1] == 'vtsfm'
+    assert json.loads(command[command.index('--hf-overrides') + 1])['architectures'] == list(adapter.architectures)
+    assert environment['VTSFM_ADAPTER'] == name
+    with pytest.raises(ValueError, match='no native comparator'):
+        build_native_command(adapter=name)
+    with pytest.raises(ValueError, match='unavailable'):
+        build_vllm_command(adapter=name, backend='upstream')

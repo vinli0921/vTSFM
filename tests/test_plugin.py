@@ -26,5 +26,6 @@ def test_registration_uses_our_model_without_eager_cuda_import(monkeypatch):
     registry = SimpleNamespace(register_model=lambda *args: registrations.append(args))
     monkeypatch.setitem(sys.modules, 'vllm', SimpleNamespace(ModelRegistry=registry))
     register_models()
-    assert registrations == [('Chronos2Model', 'vtsfm.adapters.chronos2.model:VTSFMChronos2ForForecasting')]
+    assert registrations[0] == ('Chronos2Model', 'vtsfm.adapters.chronos2.model:VTSFMChronos2ForForecasting')
+    assert len(registrations) == 4
     assert get_io_processor() == 'vtsfm.adapters.chronos2.io_processor.VTSFMChronos2IOProcessor'

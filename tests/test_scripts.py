@@ -115,6 +115,28 @@ elif sys.argv[1:] == ['--version']:
         install = next(call for call in self.calls() if call["args"][:2] == ["pip", "install"])
         self.assertIn(".[serve,dev,benchmark]", install["args"])
 
+    def test_new_model_setup_keeps_chronos_environment_separate(self):
+        self.fake_python()
+        self.fake_uv()
+        for adapter, version in [('timesfm25', '3.11.17'), ('toto2', '3.12.12'), ('moirai2', '3.11.17')]:
+            result = self.run_script('setup.sh', '--adapter', adapter)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            install = [call for call in self.calls() if call['args'][:2] == ['pip', 'install']][-1]
+            self.assertIn(f'.[serve,dev,{adapter}]', install['args'])
+            self.assertIn(str(self.root / f'.venv-{adapter}/bin/python'), install['args'])
+            self.assertTrue(any(call['args'] == ['python', 'install', version] for call in self.calls()))
+            self.assertEqual('--override' in install['args'], adapter == 'moirai2')
+
+    def test_serving_selects_adapter_environment(self):
+        launcher = self.fake_python()
+        target = self.root / '.venv-toto2/bin/python'
+        target.parent.mkdir(parents=True)
+        shutil.copy2(launcher, target)
+        launcher.unlink()
+        result = self.run_script('serve.sh', '--adapter', 'toto2', '--backend', 'vtsfm')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls()[-1]['args'], ['-m', 'vtsfm.cli', 'serve', '--adapter', 'toto2', '--backend', 'vtsfm'])
+
     def test_missing_uv_bootstraps_once_inside_the_clone_without_shell_changes(self):
         source = self.fake_uv(target=self.bin / "uv-source")
         self.env["STUB_UV_SOURCE"] = str(source)

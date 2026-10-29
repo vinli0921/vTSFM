@@ -1,9 +1,17 @@
 # Architecture
 
-vTSFM is a general TSFM extension for vLLM. Chronos-2 is the first and only
-implemented adapter, and its model and IO classes inherit the pinned community
+vTSFM is a general TSFM extension for vLLM. Chronos-2's
+model and IO classes inherit the pinned community
 integration. The project owns adapter discovery, plugin registration, and a
 separate metadata batching planner; inference still delegates to upstream behavior.
+
+TimesFM 2.5, Toto 2 313M, and Moirai 2.0 small use `adapters/pooling.py` and
+`adapters/multimodal.py` for the same whole-forecast execution pattern. Each
+adapter's `runtime.py` constructs the official model and calls its forecasting
+API. Each adapter's `spec.py` owns its forecast limits, defaults, and output
+quantile order; shared IO consumes those settings. `hf_config.py` bridges the
+upstream configuration files into vLLM without requiring a Transformers
+implementation. These adapters expose independent univariate quantile forecasts.
 
 ```mermaid
 flowchart LR
@@ -151,8 +159,8 @@ Synthetic numerical inputs are permitted only for explicitly labeled smoke tests
 
 ## Future research boundaries
 
-Live cross-request batching, tensor packing, grouped attention kernels, another
-model adapter (including TimesFM), a common public numerical HTTP schema, and MCP
+Live cross-request batching, tensor packing, grouped attention kernels,
+a common public numerical HTTP schema across all models, and MCP
 integration are not implemented. Keep proposed changes behind clear boundaries
 and demonstrate numerical parity before interpreting performance.
 Any dependency, precision, scheduler, or IO change needs a separately labeled

@@ -1,10 +1,10 @@
 # Contributing
 
 Start with the [architecture guide](docs/architecture.md).
-Chronos-2 is the first and only implemented adapter and delegates to the pinned
-Chronos integration. Shared batching is a metadata planner outside live serving;
-do not describe an optimization as implemented until code, numerical checks, and
-measurements exist.
+Chronos-2 delegates to the pinned Chronos integration. TimesFM, Toto, and Moirai
+use whole-forecast pooling wrappers. Shared batching is a metadata planner outside
+live serving; do not describe an optimization as implemented until code,
+numerical checks, and measurements exist.
 
 ## Local checks
 

@@ -77,13 +77,15 @@ def build_native_command(host: str = '127.0.0.1', port: int = DEFAULT_PORT,
 def doctor(cpu: bool = False, adapter: str = 'chronos2') -> tuple[dict, bool]:
     selected = get_adapter(adapter)
     packages = {}
-    for name in ('vtsfm', 'numpy', 'requests', 'torch', 'vllm', 'transformers', 'chronos-forecasting'):
+    runtime_package = {'chronos2': 'chronos-forecasting', 'timesfm25': 'timesfm',
+                       'toto2': 'toto-2', 'moirai2': 'uni2ts'}[selected.name]
+    for name in ('vtsfm', 'numpy', 'requests', 'torch', 'vllm', 'transformers', runtime_package):
         try:
             packages[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
             packages[name] = None
     result = {'mode': 'cpu' if cpu else 'gpu', 'python': platform.python_version(),
-              'reference_python': PYTHON_VERSION, 'packages': packages,
+              'reference_python': '3.12.12' if selected.name == 'toto2' else PYTHON_VERSION, 'packages': packages,
               'adapter': selected.name, 'model': selected.model_id,
               'model_revision': selected.model_revision}
     if cpu:
@@ -102,7 +104,7 @@ def doctor(cpu: bool = False, adapter: str = 'chronos2') -> tuple[dict, bool]:
                       for name, version in expected.items()
                       if (packages[name] or '').split('+')[0] != version}
         result['version_mismatches'] = mismatches
-        result['ready'] = not mismatches and packages['chronos-forecasting'] is not None
+        result['ready'] = not mismatches and packages[runtime_package] is not None
     except (ImportError, RuntimeError) as error:
         result.update(ready=False, error=str(error), hint='Run scripts/setup.sh on the Linux GPU host, or use doctor --cpu.')
     return result, result['ready']

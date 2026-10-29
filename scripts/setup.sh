@@ -3,10 +3,11 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/setup.sh [--cpu]
+Usage: scripts/setup.sh [--cpu] [--adapter chronos2|timesfm25|toto2|moirai2]
 
 Create this clone's .venv with Python 3.11.17 and install vTSFM editable.
   --cpu       Install tests, data preparation, and reporting without Torch/vLLM.
+  --adapter   Install a new model in .venv-<adapter>; Chronos keeps .venv.
   -h, --help  Show this help without downloading or changing anything.
 
 The default installs GPU serving dependencies and requires Linux.
@@ -19,9 +20,12 @@ EOF
 }
 
 cpu=0
+adapter=chronos2
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --cpu) cpu=1 ;;
+    --adapter) adapter="${2:?--adapter requires a value}"; shift ;;
+    --adapter=*) adapter="${1#*=}" ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'Unknown setup option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
@@ -29,6 +33,16 @@ while [[ $# -gt 0 ]]; do
 done
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/_common.sh"
+case "$adapter" in
+  chronos2|timesfm25|toto2|moirai2) ;;
+  *) printf 'Unknown adapter: %s\n' "$adapter" >&2; exit 2 ;;
+esac
+if [[ "$cpu" == 1 && "$adapter" != chronos2 ]]; then
+  printf 'Use --cpu without --adapter for the shared CPU test environment.\n' >&2
+  exit 2
+fi
+vtsfm_select_environment --adapter "$adapter"
+environment_dir="${VTSFM_PYTHON%/bin/python}"
 cd -- "$VTSFM_ROOT"
 if [[ "$cpu" == 0 && "$(uname -s)" != Linux ]]; then
   printf 'GPU setup requires Linux. Use scripts/setup.sh --cpu on this platform.\n' >&2
@@ -36,6 +50,7 @@ if [[ "$cpu" == 0 && "$(uname -s)" != Linux ]]; then
 fi
 
 python_version=3.11.17
+if [[ "$adapter" == toto2 ]]; then python_version=3.12.12; fi
 if [[ -x "$VTSFM_PYTHON" ]]; then
   installed_version="$("$VTSFM_PYTHON" -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')"
   if [[ "$installed_version" != "$python_version" ]]; then
@@ -43,7 +58,7 @@ if [[ -x "$VTSFM_PYTHON" ]]; then
     printf 'Move or remove that .venv explicitly, then rerun setup; it has not been replaced.\n' >&2
     exit 1
   fi
-elif [[ -e "$VTSFM_ROOT/.venv" ]]; then
+elif [[ -e "$environment_dir" ]]; then
   printf 'Existing .venv has no working Python. Move or remove it explicitly, then rerun setup.\n' >&2
   exit 1
 fi
@@ -86,16 +101,21 @@ fi
 
 if [[ ! -x "$VTSFM_PYTHON" ]]; then
   "$uv_bin" python install "$python_version"
-  "$uv_bin" venv --python "$python_version" "$VTSFM_ROOT/.venv"
+  "$uv_bin" venv --python "$python_version" "$environment_dir"
 fi
 extras='.[serve,dev,benchmark]'
+overrides=()
+if [[ "$adapter" != chronos2 ]]; then extras=".[serve,dev,$adapter]"; fi
+if [[ "$adapter" == moirai2 ]]; then
+  overrides=(--override "$VTSFM_ROOT/scripts/moirai2-overrides.txt")
+fi
 if [[ "$cpu" == 1 ]]; then
   extras='.[dev,benchmark]'
 fi
-"$uv_bin" pip install --python "$VTSFM_PYTHON" --editable "$extras"
+"$uv_bin" pip install --python "$VTSFM_PYTHON" "${overrides[@]}" --editable "$extras"
 printf 'Environment ready: %s\n' "$VTSFM_PYTHON"
 if [[ "$cpu" == 1 ]]; then
   printf 'Next: scripts/doctor.sh --cpu\n'
 else
-  printf 'Next: scripts/doctor.sh\n'
+  printf 'Next: scripts/doctor.sh --adapter %s\n' "$adapter"
 fi
