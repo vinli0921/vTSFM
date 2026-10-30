@@ -499,8 +499,11 @@ def main():
 
     for rnd in rounds:
         for model in models:
-            subprocess.run([sys.executable, __file__, "--round", rnd, "--models", model,
-                            "--target", args.target], check=False)
+            rc = subprocess.run([sys.executable, __file__, "--round", rnd, "--models", model,
+                                 "--target", args.target], check=False).returncode
+            if rc != 0:  # e.g. killed by the job's memory cgroup: nothing else gets recorded
+                append_csv({"round": rnd, "model": model, "status": f"crashed: exit {rc}"})
+                print(f"round {rnd} model {model} crashed with exit code {rc}", flush=True)
 
 
 if __name__ == "__main__":
