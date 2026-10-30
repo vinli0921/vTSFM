@@ -22,6 +22,11 @@ pipeline. It is the "before" picture for vTSFM optimizations.
 | 3 | 0b in bf16 | 64 | 2048 | bf16 |
 | 4 | `run_recipe` `tsfm_anomaly_detection` (conformal) | 1 | 2048 (+96) | fp32 |
 | sweep | timing only | 1, 4, 16, 64, 256 | 512, 2048, 8192 | fp32 |
+| 5 | optional large-GPU extension, timing only: (a) big batches, (b) the sweep in bf16 | (a) 512, 1024; (b) as sweep | (a) 512, 2048; (b) as sweep | (a) fp32; (b) bf16 |
+
+Round 5 is not part of the A6000 baseline. It writes `results/round5/` and its own
+`timings_round5.csv` so `timings.csv` stays comparable across GPUs; an `oom` row marks
+the batches that do not fit.
 
 Each config runs 5 warm-up and 20 timed requests (round 4: 1 and 5, because
 conformal AD refits the forecaster many times per request), then `torch.profiler` (CPU

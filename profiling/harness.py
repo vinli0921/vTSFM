@@ -8,6 +8,8 @@ Rounds (one trace per model each):
   3   0b in bf16
   4   run_recipe tsfm_anomaly_detection (conformal), batch 1
   sweep  timing only: batch x context x model, fp32
+  5   optional large-GPU extension, timing only, own CSV: batch 512/1024 at context
+      512/2048 (fp32), and the sweep grid in bf16
 
 Usage: python profiling/harness.py --round 0 [--models chronos2,timesfm2,toto2,moirai2]
 """
@@ -422,8 +424,13 @@ CSV_FIELDS = ["round", "model", "path", "dtype", "batch", "context", "status", "
               "context_tiled"]
 
 
+def round_dir(rnd):
+    return RESULTS / ("round5" if rnd == "5" else rnd)
+
+
 def append_csv(row):
-    path = RESULTS / "timings.csv"
+    # round 5 is an extension beyond the A6000 baseline; keep it out of the comparable CSV
+    path = RESULTS / ("timings_round5.csv" if row["round"] == "5" else "timings.csv")
     new = not path.exists()
     with path.open("a", newline="") as f:
         w = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
@@ -433,7 +440,7 @@ def append_csv(row):
 
 
 def run_one(rnd, model, path, dtype, batch, context, fn, trace=True):
-    out_dir = RESULTS / rnd
+    out_dir = round_dir(rnd)
     out_dir.mkdir(parents=True, exist_ok=True)
     dname = "bf16" if dtype == torch.bfloat16 else "fp32"
     row = {"round": rnd, "model": model, "path": path, "dtype": dname,
@@ -452,13 +459,51 @@ def run_one(rnd, model, path, dtype, batch, context, fn, trace=True):
 
 
 def write_json(rnd, model, rows):
-    (RESULTS / rnd / f"{model}.json").write_text(json.dumps(rows, indent=2, default=str))
+    (round_dir(rnd) / f"{model}.json").write_text(json.dumps(rows, indent=2, default=str))
+
+
+SWEEP_CONTEXTS, SWEEP_BATCHES = (512, 2048, 8192), (1, 4, 16, 64, 256)
+
+
+def timing_grid(rnd, model, runner, y, dtype, batches, contexts, path="native"):
+    """Timing-only rows (no trace) over batch x context, context-major."""
+    rows = []
+    for context in contexts:
+        for batch in batches:
+            rows.append(run_one(rnd, model, path, dtype, batch, context,
+                                lambda t, b=batch, c=context: native_config(runner, y, b, c, None),
+                                trace=False))
+    return rows
+
+
+def run_round5(model, y):
+    fp32, bf16 = torch.float32, torch.bfloat16
+    rows = []
+    runner = RUNNERS[model](fp32)
+    # (a) batches past the sweep's 256; an OOM row marks the largest batch that fits
+    rows += timing_grid("5", model, runner, y, fp32, (512, 1024), (512, 2048), path="native_bigbatch")
+    meta_fp32 = {"bf16_mode": None, "patch": runner.patch, "quantile_levels": runner.levels}
+    rows = [{**r, **meta_fp32} for r in rows]
+    del runner
+    free_cuda()
+    # (b) the sweep grid in bf16
+    runner = RUNNERS[model](bf16)
+    meta_bf16 = {"bf16_mode": runner.bf16_mode, "patch": runner.patch,
+                 "quantile_levels": runner.levels}
+    rows += [{**r, **meta_bf16} for r in
+             timing_grid("5", model, runner, y, bf16, SWEEP_BATCHES, SWEEP_CONTEXTS)]
+    write_json("5", model, rows)
+    del runner
+    free_cuda()
 
 
 def run_round(rnd, models, y):
     fp32, bf16 = torch.float32, torch.bfloat16
     for model in models:
         rows = []
+        if rnd == "5":
+            run_round5(model, y)
+            continue
         if rnd in ("0a", "4"):
             task = "forecast" if rnd == "0a" else "anomaly"
             kw = {} if rnd == "0a" else {"n_warm": 1, "n_timed": 5, "n_prof": 1}
@@ -486,11 +531,7 @@ def run_round(rnd, models, y):
                               lambda t, b=batch: native_config(runner, y, b, 8192, t))
                 rows.append(row)
         elif rnd == "sweep":
-            for context in (512, 2048, 8192):
-                for batch in (1, 4, 16, 64, 256):
-                    rows.append(run_one(rnd, model, "native", dtype, batch, context,
-                                        lambda t, b=batch, c=context:
-                                        native_config(runner, y, b, c, None), trace=False))
+            rows += timing_grid(rnd, model, runner, y, dtype, SWEEP_BATCHES, SWEEP_CONTEXTS)
         rows_meta = {"bf16_mode": runner.bf16_mode if dtype == bf16 else None,
                      "patch": runner.patch, "quantile_levels": runner.levels}
         write_json(rnd, model, [{**r, **rows_meta} for r in rows])
@@ -530,7 +571,7 @@ def write_env(target):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--round", required=True,
-                    help="0 (=0a+0b), 0a, 0b, 1, 2, 3, 4, sweep, or a comma list")
+                    help="0 (=0a+0b), 0a, 0b, 1, 2, 3, 4, sweep, 5, or a comma list")
     ap.add_argument("--models", default=",".join(RUNNERS))
     ap.add_argument("--target", default=TARGET)
     args = ap.parse_args()
