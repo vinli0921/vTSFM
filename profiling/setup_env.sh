@@ -12,8 +12,10 @@ fi
 source "$ROOT/vtsfm-prof/bin/activate"
 $UV pip install -q --torch-backend cu128 torch \
   "sktime==1.2.0" "skpro>=2.14" "chronos-forecasting>=2.0.0" toto-models \
-  transformers accelerate pandas numpy huggingface_hub statsmodels scipy pyyaml nvtx
-for m in amazon/chronos-2 google/timesfm-2.5-200m-transformers Datadog/Toto-2.0-313m; do
+  transformers accelerate pandas numpy huggingface_hub statsmodels scipy pyyaml nvtx \
+  gluonts einops lightning hydra-core safetensors hf-xet
+for m in amazon/chronos-2 google/timesfm-2.5-200m-transformers Datadog/Toto-2.0-313m \
+         Salesforce/moirai-2.0-R-small; do
   hf download "$m" >/dev/null && echo "downloaded $m"
 done
-$UV pip list 2>/dev/null | grep -iE "^(torch|sktime|skpro|chronos-forecasting|toto-2|toto-models|transformers|timesfm|gluonts|numpy|pandas) "
+$UV pip list 2>/dev/null | grep -iE "^(torch|sktime|skpro|chronos-forecasting|toto-2|toto-models|transformers|timesfm|gluonts|lightning|numpy|pandas) "

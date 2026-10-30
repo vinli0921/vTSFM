@@ -1,6 +1,6 @@
-# Baseline profiling: Chronos-2, TimesFM-2.5, Toto-2
+# Baseline profiling: Chronos-2, TimesFM-2.5, Toto-2, Moirai-2.0
 
-`harness.py` measures and traces three time-series foundation models on one GPU, both
+`harness.py` measures and traces four time-series foundation models on one GPU, both
 through AssetOpsBench's TSFM engine (`run_recipe`) and through each model's native
 pipeline. It is the "before" picture for vTSFM optimizations.
 
@@ -9,6 +9,7 @@ pipeline. It is the "before" picture for vTSFM optimizations.
 | chronos2 | `amazon/chronos-2` | `Chronos2Pipeline.predict` | `Chronos2Forecaster` |
 | timesfm2 | `google/timesfm-2.5-200m-transformers` | `model(past_values=...)` | `TimesFM2Forecaster` |
 | toto2 | `Datadog/Toto-2.0-313m` | `Toto2Model.forecast` | `Toto2Forecaster` |
+| moirai2 | `Salesforce/moirai-2.0-R-small` | `Moirai2Forecast.forward` | `Moirai2Forecaster` |
 
 ## Rounds
 
@@ -63,3 +64,16 @@ Outputs go to `profiling/results/` (git-ignored): `<round>/<model>.json`,
   `torch_dtype=float32` explicitly.
 - `run_recipe` makes two model calls per request (holdout backtest, then the final
   forecast), so its latency is not comparable one-to-one with a single native forward.
+- `Moirai2Forecaster` defaults to `context_length=200`; the harness passes 2048 so it sees
+  the same context as the others. Its regime resolves to zero-shot without an override
+  ("moirai" is in the resolver's keyword list).
+
+## Notes on Moirai-2.0
+
+- The native path uses sktime's vendored copy (`sktime.libs.uni2ts`), which is what
+  `Moirai2Forecaster` runs by default. The `uni2ts` package itself pins `torch<2.5` and
+  `numpy~=1.26`, so it is not installed.
+- `moirai-2.0-R-small` has patch 16 and `max_seq_len` 512, so context 8192 (512 context
+  tokens plus prediction tokens) runs past the trained length. The rotary cache extends
+  itself, so the rounds still run, but treat 8192 quality numbers as out of range.
+- bf16 (round 3) runs under autocast with fp32 weights, like Toto.

@@ -1,4 +1,4 @@
-"""Baseline profiling harness for Chronos-2, TimesFM-2.5 and Toto-2 on one GPU.
+"""Baseline profiling harness for Chronos-2, TimesFM-2.5, Toto-2 and Moirai-2.0 on one GPU.
 
 Rounds (one trace per model each):
   0a  AssetOpsBench run_recipe forecast, batch 1, zero-shot
@@ -9,7 +9,7 @@ Rounds (one trace per model each):
   4   run_recipe tsfm_anomaly_detection (conformal), batch 1
   sweep  timing only: batch x context x model, fp32
 
-Usage: python profiling/harness.py --round 0 [--models chronos2,timesfm2,toto2]
+Usage: python profiling/harness.py --round 0 [--models chronos2,timesfm2,toto2,moirai2]
 """
 from __future__ import annotations
 
@@ -45,11 +45,13 @@ CHECKPOINTS = {
     "chronos2": "amazon/chronos-2",
     "timesfm2": "google/timesfm-2.5-200m-transformers",
     "toto2": "Datadog/Toto-2.0-313m",
+    "moirai2": "Salesforce/moirai-2.0-R-small",
 }
 SKTIME_CLASS = {
     "chronos2": "sktime.forecasting.chronos2.Chronos2Forecaster",
     "timesfm2": "sktime.forecasting.timesfm2.TimesFM2Forecaster",
     "toto2": "sktime.forecasting.toto2.Toto2Forecaster",
+    "moirai2": "sktime.forecasting.moirai2.Moirai2Forecaster",
 }
 
 
@@ -236,7 +238,53 @@ class Toto2(Runner):
         return q[:, self.levels.index(0.5), :], q
 
 
-RUNNERS = {"chronos2": Chronos2, "timesfm2": TimesFM2, "toto2": Toto2}
+class Moirai2(Runner):
+    name = "moirai2"
+
+    def __init__(self, dtype):
+        # sktime's vendored uni2ts copy: the same code Moirai2Forecaster runs by default, and the
+        # uni2ts package itself pins torch<2.5 and numpy 1.26
+        from sktime.libs.uni2ts.moirai2_forecast import Moirai2Forecast
+        from sktime.libs.uni2ts.moirai2_module import Moirai2Module
+
+        module = Moirai2Module.from_pretrained(CHECKPOINTS["moirai2"])
+        self.model = Moirai2Forecast(
+            prediction_length=HORIZON, target_dim=1, feat_dynamic_real_dim=0,
+            past_feat_dynamic_real_dim=0, context_length=2048, module=module).to("cuda").eval()
+        self.dtype = dtype
+        if dtype == torch.bfloat16:
+            # forward builds fp32 tensors internally (masks, quantile buffers); run bf16 via autocast
+            self.bf16_mode = "autocast"
+        self.patch = int(module.patch_size)
+        self.levels = list(module.quantile_levels)
+
+    def autocast(self):
+        if self.dtype == torch.bfloat16:
+            return torch.autocast("cuda", dtype=torch.bfloat16)
+        return contextlib.nullcontext()
+
+    def prepare(self, ctx):
+        # forward reads the context length from hparams to split context and prediction tokens
+        self.model.hparams.context_length = ctx.shape[-1]
+        target = torch.from_numpy(ctx).unsqueeze(-1).to("cuda", non_blocking=True)  # (B, C, 1)
+        return {
+            "past_target": target,
+            "past_observed_target": torch.ones_like(target, dtype=torch.bool),
+            "past_is_pad": torch.zeros(target.shape[:2], dtype=torch.bool, device="cuda"),
+        }
+
+    @torch.no_grad()
+    def forward(self, inputs):
+        with self.autocast():
+            return self.model(**inputs)
+
+    def post(self, out):
+        # sktime's copy returns ((preds (B, H, Q),), None, None) where uni2ts returns (B, Q, H)
+        q = out[0][0].float().cpu().numpy().transpose(0, 2, 1)  # (B, Q, H)
+        return q[:, self.levels.index(0.5), :], q
+
+
+RUNNERS = {"chronos2": Chronos2, "timesfm2": TimesFM2, "toto2": Toto2, "moirai2": Moirai2}
 
 
 # ---------------------------------------------------------------- measurement
@@ -311,6 +359,9 @@ def recipe_estimator(model, dtype):
                      "config": {"device_map": "cuda", "torch_dtype": dtype}},
         "timesfm2": {"model_path": CHECKPOINTS["timesfm2"], "device_map": "cuda", "dtype": dtype},
         "toto2": {"model_path": CHECKPOINTS["toto2"], "device": "cuda", "seed": SEED},
+        # the estimator's default context_length is 200; match the other models' 2048
+        "moirai2": {"checkpoint_path": CHECKPOINTS["moirai2"], "context_length": 2048,
+                    "map_location": "cuda"},
     }[model]
     spec = {"name": model, "sktime_class": SKTIME_CLASS[model], "params": params}
     if model == "toto2":
@@ -466,7 +517,7 @@ def write_env(target):
     except Exception as exc:
         lines.append(f"driver: unavailable ({exc})")
     for pkg in ("sktime", "skpro", "chronos-forecasting", "transformers", "toto-2",
-                "toto-models", "numpy", "pandas"):
+                "toto-models", "gluonts", "lightning", "numpy", "pandas"):
         try:
             lines.append(f"{pkg}: {md.version(pkg)}")
         except md.PackageNotFoundError:
