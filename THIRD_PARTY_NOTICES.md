@@ -15,6 +15,15 @@ retain their own licenses; the project license does not replace those terms.
   `29ec3766d36d6f73f0696f85560a422f50e8498c`; retain its model-card attribution
   and license when downloading or redistributing model artifacts.
 
+## Additional forecasting adapters
+
+The thin wrappers call upstream code installed as dependencies; model code is not
+vendored. TimesFM (`google-research/timesfm`), Toto (`DataDog/toto`, including
+dd-unit-scaling), and Moirai (`SalesforceAIResearch/uni2ts`) use Apache-2.0.
+Source revisions are pinned in `pyproject.toml`; checkpoint IDs and revisions
+are in each adapter's `spec.py`. Preserve the upstream licenses and model cards
+when redistributing weights or packaged environments.
+
 ## AssetOpsBench fixture
 
 - Project: [IBM/AssetOpsBench](https://github.com/IBM/AssetOpsBench).

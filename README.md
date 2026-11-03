@@ -1,8 +1,9 @@
 # vTSFM
 
 A general time-series foundation model (TSFM) extension for vLLM, with
-Chronos-2 as its first and only implemented adapter. CPU-safe adapter metadata
-selects each model family's implementation, numerical IO, and serving settings.
+Chronos-2 plus minimal TimesFM 2.5, Toto 2 313M, and Moirai 2.0 small adapters.
+CPU-safe adapter metadata selects each model family's implementation, numerical
+IO, and serving settings.
 The `vtsfm` plugin uses the pinned Chronos-2 integration; the original `chronos2`
 plugin remains available as a comparator.
 
@@ -78,8 +79,54 @@ Stop the previous server before starting another. `vtsfm` selects this project's
 adapter, `chronos2` selects the pinned community adapter, and `native` uses the
 official Chronos pipeline behind the same HTTP request/response boundary.
 `--adapter` selects the model family independently of `--backend`; it defaults to
-`chronos2`, so existing commands keep their behavior. No other model family or
-common public numerical HTTP schema is implemented yet.
+`chronos2`, so existing commands keep their behavior. The additional adapters
+use the smaller numerical contract described below.
+
+## TimesFM 2.5, Toto 2, and Moirai 2.0
+
+These adapters run complete upstream forecasts through the same vLLM pooling
+pattern. They do not add scheduling or attention optimizations. Each has its own
+environment, leaving `.venv` and the Chronos baseline unchanged:
+
+```bash
+./scripts/setup.sh --adapter timesfm25
+./scripts/serve.sh --adapter timesfm25 --backend vtsfm --port 8001
+curl --fail-with-body -H 'Content-Type: application/json' \
+  --data-binary @examples/timesfm25.json http://127.0.0.1:8001/pooling
+```
+
+Replace `timesfm25` with `toto2` or `moirai2` for the other adapters. These use
+`--backend vtsfm`; the native comparator and benchmark runner remain Chronos-specific.
+
+Inputs are finite univariate `target` arrays with optional `item_id`; separate
+inputs are independent series. Parameters are `prediction_length` (1–1024) and
+`quantile_levels` (unique increasing tenths from 0.1 through 0.9). Responses contain
+the requested quantiles and item IDs, without a synthetic `mean` field. Covariates,
+cross-learning, and multivariate targets are rejected. Context limits are 8192 for
+TimesFM/Toto and 7168 for Moirai, reserving room for the prediction horizon.
+
+TimesFM uses the official example's normalization, continuous quantile head,
+flip invariance, positivity, and crossing correction, with compilation disabled.
+Toto uses the documented 768-point block decoding setting. Moirai uses the
+upstream recursive quantile forecast unchanged.
+
+Toto uses Python 3.12.12 and a pinned upstream revision compatible with Torch
+2.9.1. Moirai keeps its NumPy 1.26 dependencies and explicitly overrides its Torch
+upper bound and vLLM's OpenCV requirement in `scripts/moirai2-overrides.txt`.
+These overrides apply only to `.venv-moirai2`; OpenCV vision processing is unused.
+
+Check checkpoint loading, multimodal IO, and parity against the official forecast
+on CPU inside a model environment (replace `timesfm25` for the other models):
+
+```bash
+CUDA_VISIBLE_DEVICES='' VTSFM_TEST_ADAPTER=timesfm25 \
+  .venv-timesfm25/bin/python -m pytest tests/test_forecast_runtime.py -q
+```
+
+This downloads the pinned checkpoint. GPU HTTP smoke tests passed for all three
+on an RTX 4080 Laptop GPU using cached checkpoints, FP32, eager execution, and
+`--gpu-memory-utilization 0.35`. Checks covered examples, unequal history lengths,
+and repeated requests; they do not establish performance or forecast accuracy.
 
 ## Run a comparison
 

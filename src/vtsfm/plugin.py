@@ -12,6 +12,11 @@ def register_models() -> None:
     for adapter in list_adapters():
         for architecture in adapter.architectures:
             ModelRegistry.register_model(architecture, adapter.model_class)
+    if os.environ.get('VTSFM_ADAPTER', 'chronos2') in ('timesfm25', 'toto2', 'moirai2'):
+        from vllm.transformers_utils.config import register_config_parser
+        from vtsfm.adapters.hf_config import ForecastConfigParser
+
+        register_config_parser('vtsfm')(ForecastConfigParser)
 
 
 def get_io_processor() -> str:

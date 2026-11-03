@@ -1,0 +1,4 @@
+# Uni2TS declares torch<2.5; the pooling wrapper uses vLLM's pinned Torch.
+torch==2.9.1
+# Keep Uni2TS's NumPy 1.26 stack; these adapters do not use vLLM's vision IO.
+opencv-python-headless==4.11.0.86
