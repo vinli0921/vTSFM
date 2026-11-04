@@ -2,7 +2,7 @@
 
 Agent conventions live in [AGENTS.md](AGENTS.md); `CLAUDE.md` imports that guide.
 This is an early-stage research project: use focused changes and proportionate
-local checks. GitHub Actions runs lightweight CPU checks; model/GPU validation,
+local checks. GitHub Actions runs basic lint, CPU tests, and package checks; model/GPU validation,
 performance benchmarks, and deployment remain manual. There is no required
 pre-commit gate.
 
@@ -16,9 +16,16 @@ numerical checks, and measurements exist.
 
 ```bash
 ./scripts/setup.sh --cpu
+.venv/bin/python -m ruff check .
 .venv/bin/python -m pytest -m 'not gpu'
 for script in scripts/*.sh; do bash -n "$script"; done
+.venv/bin/python -m build
 ```
+
+Lint catches basic Python errors; there is no formatting gate. Package validation
+builds an sdist and then a wheel from it, installs the wheel into a fresh
+environment without optional dependencies, and checks the installed CLI, both
+vLLM plugin entry points, and adapter module discovery outside the checkout.
 
 CPU checks must work without Torch, vLLM, an NVIDIA GPU, or model downloads.
 Keep imports lazy: package discovery and CLI help must not initialize CUDA.

@@ -53,7 +53,7 @@ Use the checkout's environments, not global Python packages:
 - Serving/model changes need relevant HTTP smoke and numerical parity checks
   when a suitable environment is available. Say what ran, what failed, and what
   remains unverified; CPU tests do not establish GPU compatibility.
-- Keep the existing GitHub Actions workflow for lightweight CPU checks.
+- Keep GitHub Actions lightweight: basic lint, CPU tests, and package checks.
   Model/GPU testing, performance benchmarks, and deployment remain manual unless
   the team explicitly asks to automate them. There is no mandatory pre-commit gate.
 

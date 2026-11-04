@@ -27,7 +27,7 @@ benchmark = [
   "fastapi==0.156.2",
   "uvicorn==0.54.0",
 ]
-dev = ["pytest==8.4.2", "build>=1.2,<2"]
+dev = ["pytest==8.4.2", "build>=1.2,<2", "ruff==0.14.0"]
 timesfm25 = [
   "timesfm @ git+https://github.com/google-research/timesfm.git@e51928e27119cb17bebc005be2696b75e0a9e688",
 ]
@@ -59,3 +59,11 @@ packages = ["src/vtsfm"]
 testpaths = ["tests"]
 addopts = "-ra"
 markers = ["gpu: opt-in integration checks requiring Linux, CUDA, and serving dependencies"]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+# Basic correctness checks only; formatting and stricter style rules stay advisory.
+select = ["E4", "E7", "E9", "F"]
+ignore = ["E731"]  # Assigned lambdas are a style choice, not a correctness gate.

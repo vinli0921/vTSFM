@@ -219,7 +219,8 @@ Read [architecture](docs/architecture.md) and [contribution guidance](CONTRIBUTI
 before changing plugin discovery or the serving contract.
 
 Agents should start with [AGENTS.md](AGENTS.md); `CLAUDE.md` imports the same
-conventions. The existing GitHub Actions workflow runs lightweight CPU checks.
+conventions. GitHub Actions runs basic Python lint, CPU tests, shell syntax
+checks, and package build/install smoke checks.
 Model/GPU validation, performance benchmarks, and deployment remain manual.
 
 ## License
