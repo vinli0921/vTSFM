@@ -32,6 +32,8 @@ vLLM plugin entry points, and adapter module discovery outside the checkout.
 CPU checks must work without Torch, vLLM, an NVIDIA GPU, or model downloads.
 Keep imports lazy: package discovery and CLI help must not initialize CUDA.
 GPU integration checks are opt-in and run separately on an idle Linux GPU host.
+The [Modal GPU workflow](docs/gpu-testing.md) runs a small CUDA contract suite on
+demand; its guide covers account setup, secrets, and credit-only billing limits.
 CPU checks do not substitute for numerical and serving validation.
 
 ## Change boundaries

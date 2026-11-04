@@ -42,6 +42,10 @@ loading CUDA:
 
 `adapters` prints JSON metadata without loading Torch, vLLM, or model packages.
 
+Optional [Modal GPU checks](docs/gpu-testing.md) run CUDA contract tests on demand.
+Set up the documented credit/spend limits and repository secrets before enabling
+the manually triggered workflow.
+
 ## Serve on a GPU
 
 Use a Linux machine with an NVIDIA GPU and a compatible NVIDIA driver. The
