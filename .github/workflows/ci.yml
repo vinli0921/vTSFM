@@ -14,13 +14,18 @@ concurrency:
 jobs:
   cpu:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Set up the same CPU environment as teammates
         run: ./scripts/setup.sh --cpu
       - name: Check the CPU environment
         run: ./scripts/doctor.sh --cpu
+      - name: Lint Python for basic errors
+        run: .venv/bin/python -m ruff check .
       - name: Run CPU tests
+        env:
+          VTSFM_TEST_ADAPTER: ""
         run: .venv/bin/python -m pytest -m 'not gpu'
       - name: Check shell syntax
         shell: bash
@@ -28,3 +33,39 @@ jobs:
           for script in scripts/*.sh; do
             bash -n "$script"
           done
+      - name: Build source distribution and wheel
+        run: .venv/bin/python -m build
+      - name: Install the wheel without optional dependencies
+        run: |
+          .venv/bin/python -m venv .venv-wheel
+          .venv-wheel/bin/python -m pip install --no-deps dist/*.whl
+      - name: Check installed CLI and plugin discovery
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$GITHUB_WORKSPACE/.venv-wheel/bin/vtsfm" --help
+          "$GITHUB_WORKSPACE/.venv-wheel/bin/vtsfm" adapters
+          "$GITHUB_WORKSPACE/.venv-wheel/bin/python" -I - <<'PY'
+          import sys
+          from importlib import metadata, util
+
+          from vtsfm.adapters import list_adapters
+
+          distribution = metadata.distribution("vtsfm")
+          for group in ("console_scripts", "vllm.general_plugins", "vllm.io_processor_plugins"):
+              entries = [entry for entry in distribution.entry_points
+                         if entry.group == group and entry.name == "vtsfm"]
+              assert len(entries) == 1, f"Missing or duplicate entry point: {group}"
+              assert callable(entries[0].load()), f"Entry point is not callable: {group}"
+
+          adapters = list_adapters()
+          assert adapters, "No model adapters were packaged"
+          for adapter in adapters:
+              modules = (adapter.model_class.split(":")[0],
+                         adapter.io_processor_class.rsplit(".", 1)[0])
+              for module in modules:
+                  assert util.find_spec(module) is not None, f"Missing adapter module: {module}"
+
+          heavy = {"torch", "vllm", "transformers", "chronos", "timesfm", "toto2", "uni2ts"}
+          assert not heavy.intersection(sys.modules), "Discovery imported model dependencies"
+          print(f"Wheel entry points and {len(adapters)} adapters passed CPU-only discovery.")
+          PY

@@ -1,5 +1,4 @@
 """Benchmark archives must retain the implementation behind compatibility shims."""
-from pathlib import Path
 
 
 def test_snapshot_preserves_adapter_implementation_and_excludes_bytecode(tmp_path, monkeypatch):

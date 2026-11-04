@@ -191,7 +191,7 @@ fixture. See [data and measurement details](docs/architecture.md#benchmark-contr
 | Execution | FP32, eager; `cross_learning=false`; one outstanding HTTP request |
 
 These pins define a research baseline. A dependency or precision change requires
-a separate result set. CPU CI does not verify GPU compatibility or performance.
+a separate result set. CPU checks do not verify GPU compatibility or performance.
 See the [starter verification record](docs/verification.md) for the initial CPU
 and GPU checks.
 
@@ -211,11 +211,17 @@ model family, provide its metadata and implementations, register the descriptor,
 and validate its preparation and output contract; see
 [adding an adapter](CONTRIBUTING.md#adding-an-adapter).
 
-Run CPU checks, reproduce the untouched GPU smoke comparison on an idle machine,
-and save a baseline before changing behavior.
+For serving or performance changes, run relevant CPU checks, reproduce the
+untouched GPU smoke comparison on an idle machine when available, and save a
+baseline before optimizing.
 Assign each proposed optimization a numerical check and a measurable target.
 Read [architecture](docs/architecture.md) and [contribution guidance](CONTRIBUTING.md)
 before changing plugin discovery or the serving contract.
+
+Agents should start with [AGENTS.md](AGENTS.md); `CLAUDE.md` imports the same
+conventions. GitHub Actions runs basic Python lint, CPU tests, shell syntax
+checks, and package build/install smoke checks.
+Model/GPU validation, performance benchmarks, and deployment remain manual.
 
 ## License
 
