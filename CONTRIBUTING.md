@@ -1,5 +1,9 @@
 # Contributing
 
+Agent conventions live in [AGENTS.md](AGENTS.md); `CLAUDE.md` imports that guide.
+This is an early-stage research project: use focused changes and proportionate
+local checks. There is no CI/CD pipeline or required pre-commit gate.
+
 Start with the [architecture guide](docs/architecture.md).
 Chronos-2 delegates to the pinned Chronos integration. TimesFM, Toto, and Moirai
 use whole-forecast pooling wrappers. Shared batching is a metadata planner outside
@@ -17,7 +21,7 @@ for script in scripts/*.sh; do bash -n "$script"; done
 CPU checks must work without Torch, vLLM, an NVIDIA GPU, or model downloads.
 Keep imports lazy: package discovery and CLI help must not initialize CUDA.
 GPU integration checks are opt-in and run separately on an idle Linux GPU host.
-CI's CPU checks do not substitute for numerical and serving validation.
+CPU checks do not substitute for numerical and serving validation.
 
 ## Change boundaries
 
