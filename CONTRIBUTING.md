@@ -2,7 +2,9 @@
 
 Agent conventions live in [AGENTS.md](AGENTS.md); `CLAUDE.md` imports that guide.
 This is an early-stage research project: use focused changes and proportionate
-local checks. There is no CI/CD pipeline or required pre-commit gate.
+local checks. GitHub Actions runs lightweight CPU checks; model/GPU validation,
+performance benchmarks, and deployment remain manual. There is no required
+pre-commit gate.
 
 Start with the [architecture guide](docs/architecture.md).
 Chronos-2 delegates to the pinned Chronos integration. TimesFM, Toto, and Moirai

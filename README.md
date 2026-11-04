@@ -219,7 +219,8 @@ Read [architecture](docs/architecture.md) and [contribution guidance](CONTRIBUTI
 before changing plugin discovery or the serving contract.
 
 Agents should start with [AGENTS.md](AGENTS.md); `CLAUDE.md` imports the same
-conventions. Validation runs locally; the repository has no CI/CD pipeline.
+conventions. The existing GitHub Actions workflow runs lightweight CPU checks.
+Model/GPU validation, performance benchmarks, and deployment remain manual.
 
 ## License
 
