@@ -34,6 +34,7 @@ class BatchKey:
     prediction_length: int
     quantile_levels: tuple[float, ...]
     dtype: str = "float32"
+    execution_options: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("adapter", "model_id", "model_revision", "dtype"):
@@ -49,6 +50,18 @@ class BatchKey:
         if any(left >= right for left, right in zip(levels, levels[1:])):
             raise ValueError("quantile_levels must be strictly increasing")
         object.__setattr__(self, "quantile_levels", levels)
+        options = []
+        for pair in self.execution_options:
+            if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                raise TypeError('execution options must be (name, string value) pairs')
+            name, value = pair
+            _text(name, 'execution option name')
+            if not isinstance(value, str):
+                raise TypeError('execution option values must be strings')
+            options.append((name, value))
+        if len({name for name, _ in options}) != len(options):
+            raise ValueError('duplicate execution option names')
+        object.__setattr__(self, 'execution_options', tuple(sorted(options)))
 
 
 @dataclass(frozen=True, slots=True)

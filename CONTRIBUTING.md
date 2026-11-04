@@ -7,6 +7,8 @@ performance benchmarks, and deployment remain manual. There is no required
 pre-commit gate.
 
 Start with the [architecture guide](docs/architecture.md).
+For tensor adapters and shared worker work, use the
+[prepared execution contract](docs/execution-contract.md) and its CPU example.
 Chronos-2 delegates to the pinned Chronos integration. TimesFM, Toto, and Moirai
 use whole-forecast pooling wrappers. Shared batching is a metadata planner outside
 live serving; do not describe an optimization as implemented until code,
@@ -67,6 +69,8 @@ CPU checks do not substitute for numerical and serving validation.
    schema for other models. Add required concrete-class processor registration
    rather than assuming inheritance handles it.
 4. Define how prepared rows map to `BatchKey` and `BatchRequest.group_sizes`.
+   Declare `execution_capabilities` and relevant `execution_options`, and follow
+   the prepared input/output shapes when implementing `ForecastExecutor`.
    Preserve independent requests and cross-learning semantics. Keep the shared
    planner independent of model imports; model-specific target/covariate filtering
    and kernels belong in the adapter. The planner is not yet wired into serving,

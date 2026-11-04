@@ -34,6 +34,7 @@ They are alternatives in this diagram, not simultaneous resident services.
 | `src/vtsfm/adapters/registry.py` | `list_adapters()` and `get_adapter(name)` without model runtime imports |
 | `src/vtsfm/adapters/chronos2/` | Chronos-2 pins, launch settings, model, numerical IO, and native comparator |
 | `src/vtsfm/batching.py` | Runtime-independent reference planner for compatible prepared work and output routing |
+| `src/vtsfm/execution.py` | CPU-safe prepared tensor, capability, and result contracts for future shared execution |
 | `src/vtsfm/config.py` | Shared dependency pins/defaults and compatibility aliases for Chronos-2 model pins |
 | `src/vtsfm/plugin.py` | Lazy architecture registration and adapter-selected IO factory for the `vtsfm` entry points |
 | `src/vtsfm/cli.py` | Build commands/environments and start the selected backend without GPU imports for help |
@@ -83,7 +84,7 @@ machine is deliberately configured.
 `batching.py` plans already prepared work using standard-library metadata. It has
 no model-runtime dependency and does not import adapters. A `BatchKey` contains
 the adapter, checkpoint ID/revision, context length, prediction length, quantile
-levels, and dtype. Keys must match exactly; differing shapes or settings remain
+levels, dtype, and canonical execution options. Keys must match exactly; differing shapes or settings remain
 separate, even where a future adapter might safely combine them.
 An empty quantile tuple represents point-only forecasts; shared planning does
 not require an attention backbone or probabilistic model outputs.
@@ -107,6 +108,12 @@ The planner is a CPU-testable reference for later scheduler/worker integration.
 It is not connected to the vLLM serving path and adds no queue admission, tensor
 packing, multi-prompt transport, GPU execution, or attention kernels. Its group
 IDs do not enable cross-request grouped execution in the Chronos-2 runtime.
+
+The [prepared execution contract](execution-contract.md) binds a plan to validated
+input tensors and defines row-aligned results, per-request splitting, and
+conservative model capability metadata. It is available for independent runtime
+and adapter development; the current whole-forecast serving wrappers do not yet
+implement that boundary.
 
 ## Benchmark contract
 
