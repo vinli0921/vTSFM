@@ -42,6 +42,7 @@ def _environment(trace):
     environment = dict(os.environ)
     environment.update(VLLM_PLUGINS='vtsfm', VTSFM_ADAPTER='timesfm25',
                        VLLM_ENABLE_V1_MULTIPROCESSING='1', VLLM_WORKER_MULTIPROC_METHOD='spawn',
+                       VLLM_USE_V2_MODEL_RUNNER='0',
                        VTSFM_ROUTING_TRACE=str(trace), OMP_NUM_THREADS='4',
                        PYTHONPATH=os.pathsep.join([str(ROOT / 'src'), str(ROOT / 'tests'), str(ROOT)]))
     return environment
@@ -72,8 +73,9 @@ def engine(gpu, tmp_path, monkeypatch):
     import vllm
     from vllm import LLM
     import routing_probe  # noqa: F401 - register in the driver and import hook
+    from vtsfm.config import VLLM_VERSION
 
-    assert vllm.__version__ == '0.16.0'
+    assert vllm.__version__ == VLLM_VERSION
     directory = tmp_path / 'model'
     _configuration(directory)
     llm = LLM(
@@ -159,23 +161,25 @@ def _encode(engine, data, prefix):
     from vllm.pooling_params import PoolingParams
     from vtsfm.adapters.timesfm25.io_processor import TimesFMIOProcessor
 
-    processor = TimesFMIOProcessor(None)
+    processor = TimesFMIOProcessor(None, None)
     ids = [f'{prefix}-{index}' for index in range(len(data))]
-    prompts = [processor.pre_process(processor.parse_request(value), request_id=identity)
+    prompts = [processor.pre_process(processor.parse_data(value), request_id=identity)
                for identity, value in zip(ids, data)]
-    core = engine.llm_engine.engine_core
-    core.call_utility('pause_scheduler')
+    engine = engine.llm_engine
+    core = engine.engine_core
+    core.call_utility('pause_scheduler', 'keep', False)
     try:
-        engine._validate_and_add_requests(
-            prompts, PoolingParams(task='plugin'), use_tqdm=False, lora_request=None)
+        for identity, prompt in zip(ids, prompts):
+            engine.add_request(identity, prompt, PoolingParams(task='plugin'))
     finally:
         core.call_utility('resume_scheduler')
-    outputs = engine._run_engine(use_tqdm=False)
-    assert len(outputs) == len(data)
+    completed = {}
+    while engine.has_unfinished_requests():
+        completed.update((output.request_id, output) for output in engine.step())
+    assert completed.keys() == set(ids)
     responses = []
-    for output, identity, value in zip(outputs, ids, data):
-        response = processor.post_process([output], request_id=identity)
-        assert response['request_id'] == identity
+    for identity, value in zip(ids, data):
+        response = processor.post_process([completed[identity]], request_id=identity)
         _check_predictions(response['predictions'], value)
         responses.append(response['predictions'])
     assert not processor.pending
@@ -212,6 +216,7 @@ def _post(url, data, barrier=None, model=SERVED_MODEL, check_expected=True):
         response.raise_for_status()
         result = response.json()
     assert isinstance(result['request_id'], str) and result['request_id']
+    assert isinstance(result['created_at'], int) and result['created_at'] > 0
     if check_expected:
         _check_predictions(result['data']['predictions'], data)
     return result
@@ -248,19 +253,20 @@ def test_scrambled_worker_slots_route_by_feature_identity_and_recover_after_bad_
     import torch
     from routing_probe import RoutingProbeModel
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.multimodal.processing import ProcessorInputs, TimingContext
     from vtsfm.adapters.multimodal import ForecastDataParser, ForecastMultiModalProcessor
     from vtsfm.adapters.timesfm25.io_processor import TimesFMIOProcessor
     from vtsfm.worker import slot_request_ids
 
     cases = _cases()
-    io = TimesFMIOProcessor(None)
+    io = TimesFMIOProcessor(None, None)
     processor = object.__new__(ForecastMultiModalProcessor)
     new, states = [], {}
     for index, data in enumerate(cases):
         identity = f'original-{index}'
-        prompt = io.pre_process(io.parse_request(data), request_id=identity)
+        prompt = io.pre_process(io.parse_data(data), request_id=identity)
         parsed = ForecastDataParser().parse_mm_data(prompt['multi_modal_data'])
-        processed = processor.apply([1], parsed, {})
+        processed = processor.apply(ProcessorInputs([1], parsed), TimingContext(enabled=False))
         features = [SimpleNamespace(modality='timeseries',
                                    data=processed['mm_kwargs']['timeseries'][0])]
         new.append(SimpleNamespace(mm_features=features))

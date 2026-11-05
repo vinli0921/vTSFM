@@ -50,9 +50,10 @@ the workflow. Full-model validation and benchmarks remain manual.
 ## Serve on a GPU
 
 Use a Linux machine with an NVIDIA GPU and a compatible NVIDIA driver. The
-verified reference machine has an A100-SXM4-40GB, CUDA 12.8 Torch binaries, and
-driver 595.91.07. Setup does not install or change drivers. Model downloads need
-network access and disk space; keep weights outside Git.
+reference machine has an A100-SXM4-40GB and driver 595.91.07. TimesFM, Toto, and
+Moirai use CUDA 13.0 Torch binaries; the Chronos baseline uses CUDA 12.8. Setup
+does not install or change drivers. Model downloads need network access and disk
+space; keep weights outside Git.
 
 ```bash
 ./scripts/setup.sh
@@ -115,10 +116,14 @@ flip invariance, positivity, and crossing correction, with compilation disabled.
 Toto uses the documented 768-point block decoding setting. Moirai uses the
 upstream recursive quantile forecast unchanged.
 
-Toto uses Python 3.12.12 and a pinned upstream revision compatible with Torch
-2.9.1. Moirai keeps its NumPy 1.26 dependencies and explicitly overrides its Torch
+Toto uses Python 3.12.12 and a pinned upstream revision. Moirai keeps its
+NumPy 1.26 dependencies and explicitly overrides its Torch
 upper bound and vLLM's OpenCV requirement in `scripts/moirai2-overrides.txt`.
 These overrides apply only to `.venv-moirai2`; OpenCV vision processing is unused.
+
+If upgrading an existing CUDA 12 model environment, move it aside before
+running setup (for example, `mv .venv-timesfm25 .venv-timesfm25-cu128`), or use a
+fresh checkout. The CUDA 12 and CUDA 13 wheels can own overlapping files.
 
 Check checkpoint loading, multimodal IO, and parity against the official forecast
 on CPU inside a model environment (replace `timesfm25` for the other models):
@@ -183,16 +188,24 @@ imputed index. Windows overlap and share one compressor, so a batch of 128 means
 they do not establish forecasting accuracy. Context 8,192 is unsupported by this
 fixture. See [data and measurement details](docs/architecture.md#benchmark-contract).
 
-## Reproducible baseline
+## Reproducible runtime pins
+
+| Adapter | vLLM | Torch | Torch CUDA runtime | Transformers |
+| --- | --- | --- | --- | --- |
+| TimesFM 2.5, Toto 2, Moirai 2.0 | 0.33.0 (V1 runner) | 2.14.0 | 13.0 | 5.20.2 |
+| Chronos-2 baseline | 0.16.0 (V1 runner) | 2.9.1 | 12.8 | 4.57.6 |
+
+The vLLM release determines the compatible Torch and CUDA binaries. The
+forecasting launcher selects V1 because V2 does not support the `plugin` task.
+See the [runtime upgrade spike](docs/runtime-upgrade.md) for the A100 results.
+
+The remaining settings for the Chronos-2 baseline are:
 
 | Component | Pin / setting |
 | --- | --- |
 | Python | 3.11.17 |
 | Chronos integration | PR [#473](https://github.com/amazon-science/chronos-forecasting/pull/473), commit `ba47d25a04aedac33af2fb9780609afd54744d5e` |
 | Model | `amazon/chronos-2`, revision `29ec3766d36d6f73f0696f85560a422f50e8498c` |
-| vLLM | 0.16.0 |
-| Torch | 2.9.1 |
-| Transformers | 4.57.6 |
 | Execution | FP32, eager; `cross_learning=false`; one outstanding HTTP request |
 
 These pins define a research baseline. A dependency or precision change requires

@@ -10,6 +10,7 @@ from vllm.v1.worker.gpu_worker import Worker
 
 from vtsfm.adapters.multimodal import MODALITY
 from vtsfm.adapters.transport import decode_metadata
+from vtsfm.config import VLLM_VERSION
 
 
 def slot_request_ids(runner):
@@ -29,11 +30,11 @@ def slot_request_ids(runner):
 
 
 class ForecastWorker(Worker):
-    def load_model(self):
-        if vllm.__version__ != '0.16.0' or self.use_v2_model_runner:
-            raise ValueError('Forecast routing requires pinned vLLM 0.16.0 V1')
+    def load_model(self, *, load_dummy_weights=False):
+        if vllm.__version__ != VLLM_VERSION or self.use_v2_model_runner:
+            raise ValueError(f'Forecast routing requires pinned vLLM {VLLM_VERSION} Model Runner V1')
         if (not self.model_config.enforce_eager or self.parallel_config.pipeline_parallel_size != 1
                 or self.parallel_config.tensor_parallel_size != 1):
             raise ValueError('Forecast routing requires eager execution on one GPU')
-        super().load_model()
+        super().load_model(load_dummy_weights=load_dummy_weights)
         self.model_runner.get_model().set_request_order(lambda: slot_request_ids(self.model_runner))

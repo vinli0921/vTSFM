@@ -48,12 +48,14 @@ def test_cpu_doctor_has_no_cuda_dependency():
     assert json.loads(process.stdout)['mode'] == 'cpu'
 
 
-def test_new_adapters_use_routing_worker_and_concurrency_is_opt_in():
+def test_new_adapters_use_routing_worker_and_concurrency_is_opt_in(monkeypatch):
     from vtsfm.cli import build_vllm_command
+    monkeypatch.setenv('VLLM_USE_V2_MODEL_RUNNER', '1')
     for adapter in ('timesfm25', 'toto2', 'moirai2'):
         default, _ = build_vllm_command(adapter=adapter)
         assert default[default.index('--max-num-seqs') + 1] == '1'
-        command, _ = build_vllm_command(adapter=adapter, max_num_seqs=3)
+        command, environment = build_vllm_command(adapter=adapter, max_num_seqs=3)
+        assert environment['VLLM_USE_V2_MODEL_RUNNER'] == '0'
         assert command[command.index('--worker-cls') + 1] == 'vtsfm.worker.ForecastWorker'
         assert command.count('--max-num-seqs') == 1
         assert command[command.index('--max-num-seqs') + 1] == '3'

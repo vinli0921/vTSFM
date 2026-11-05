@@ -1,16 +1,13 @@
 """Whole-forecast pooling, following the Chronos plugin's execution pattern."""
 
-import time
 import uuid
 
 import torch
 from torch import nn
-from vllm.entrypoints.pooling.pooling.protocol import IOProcessorResponse
 from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.models.interfaces import IsAttentionFree, SupportsMultiModal
 from vllm.model_executor.models.interfaces_base import attn_type
 from vllm.plugins.io_processors.interface import IOProcessor
-from vllm.pooling_params import PoolingParams
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 
 from .forecast import ForecastSettings, format_predictions, parse_request
@@ -131,12 +128,12 @@ class ForecastModel(nn.Module, IsAttentionFree, SupportsMultiModal):
 class ForecastIOProcessor(IOProcessor):
     settings: ForecastSettings
 
-    def __init__(self, vllm_config):
-        super().__init__(vllm_config)
+    def __init__(self, vllm_config, renderer):
+        super().__init__(vllm_config, renderer)
         self.pending = {}
 
-    def parse_request(self, request):
-        return parse_request(request.data if hasattr(request, 'data') else request, self.settings)
+    def parse_data(self, data):
+        return parse_request(data, self.settings)
 
     def pre_process(self, prompt, request_id=None, **kwargs):
         inputs, horizon, levels = prompt
@@ -157,13 +154,5 @@ class ForecastIOProcessor(IOProcessor):
         output = model_output[0].outputs.data
         if output.ndim == 4 and output.shape[0] == 1:
             output = output.squeeze(0)
-        result = format_predictions(output, item_ids, levels, horizon, self.settings)
-        result['request_id'] = request_id
-        return result
-
-    def validate_or_generate_params(self, params=None):
-        return PoolingParams(task='plugin')
-
-    def output_to_response(self, plugin_output):
-        return IOProcessorResponse(request_id=plugin_output['request_id'], created_at=int(time.time()),
-                                   data={'predictions': plugin_output['predictions']})
+        # vLLM wraps plugin data with the HTTP request ID and creation time.
+        return format_predictions(output, item_ids, levels, horizon, self.settings)

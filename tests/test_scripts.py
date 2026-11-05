@@ -43,15 +43,18 @@ class ScriptChecks(unittest.TestCase):
         path.chmod(0o755)
         return path
 
-    def fake_python(self, version="3.11.17"):
+    def fake_python(self, version="3.11.17", *, target=None):
         body = f"""import json, os, sys
 if sys.argv[1:2] == ['-c']:
-    print({version!r})
+    if 'sys.version_info' in sys.argv[2]:
+        print({version!r})
+    else:
+        exec(sys.argv[2])
 else:
     with open(os.environ['STUB_LOG'], 'a') as log:
         log.write(json.dumps({{'tool':'python', 'args':sys.argv[1:], 'cwd':os.getcwd()}})+'\\n')
 """
-        return self.write_command("python", body, self.root / ".venv/bin/python")
+        return self.write_command("python", body, target or self.root / ".venv/bin/python")
 
     def fake_uv(self, target=None, version="0.13.4"):
         body = f"""import json, os, pathlib, sys
@@ -103,17 +106,19 @@ elif sys.argv[1:] == ['--version']:
         self.assertTrue(any(call["args"] == ["python", "install", "3.11.17"] for call in calls))
         install = next(call for call in calls if call["args"][:2] == ["pip", "install"])
         self.assertIn(".[dev,benchmark]", install["args"])
+        self.assertNotIn("--torch-backend", install["args"])
         self.assertIn(str(self.root / ".venv/bin/python"), install["args"])
         self.assertEqual(install["cwd"], str(self.root))
         self.assertEqual(install["cache"], self.env["UV_CACHE_DIR"])
         self.assertEqual(install["python_dir"], self.env["UV_PYTHON_INSTALL_DIR"])
 
-    def test_gpu_setup_selects_serve_extra(self):
+    def test_default_gpu_setup_selects_legacy_chronos_extra(self):
         self.fake_uv()
         result = self.run_script("setup.sh")
         self.assertEqual(result.returncode, 0, result.stderr)
         install = next(call for call in self.calls() if call["args"][:2] == ["pip", "install"])
-        self.assertIn(".[serve,dev,benchmark]", install["args"])
+        self.assertIn(".[serve-chronos,dev,benchmark]", install["args"])
+        self.assertNotIn("--torch-backend", install["args"])
 
     def test_new_model_setup_keeps_chronos_environment_separate(self):
         self.fake_python()
@@ -123,6 +128,7 @@ elif sys.argv[1:] == ['--version']:
             self.assertEqual(result.returncode, 0, result.stderr)
             install = [call for call in self.calls() if call['args'][:2] == ['pip', 'install']][-1]
             self.assertIn(f'.[serve,dev,{adapter}]', install['args'])
+            self.assertEqual(install['args'][install['args'].index('--torch-backend') + 1], 'cu130')
             self.assertIn(str(self.root / f'.venv-{adapter}/bin/python'), install['args'])
             self.assertTrue(any(call['args'] == ['python', 'install', version] for call in self.calls()))
             self.assertEqual('--override' in install['args'], adapter == 'moirai2')
@@ -178,6 +184,24 @@ pathlib.Path(sys.argv[sys.argv.index('--output')+1]).write_text({installer!r})
         self.assertIn("3.11.17", result.stderr)
         self.assertEqual(python.read_bytes(), before)
         self.assertFalse(any(call["args"][:2] == ["pip", "install"] for call in self.calls()))
+
+    def test_modern_setup_refuses_existing_cuda_12_environment_before_installation(self):
+        launcher = self.root / ".venv-timesfm25/bin/python"
+        self.fake_python(target=launcher)
+        packages = self.root / "legacy packages"
+        metadata = packages / "nvidia_cuda_runtime_cu12-12.8.90.dist-info"
+        metadata.mkdir(parents=True)
+        (metadata / "METADATA").write_text("Name: nvidia-cuda-runtime-cu12\nVersion: 12.8.90\n")
+        self.env["PYTHONPATH"] = str(packages)
+        self.fake_uv()
+
+        result = self.run_script("setup.sh", "--adapter", "timesfm25")
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("CUDA 12 packages", result.stderr)
+        self.assertIn("Move the environment aside or use a fresh checkout", result.stderr)
+        self.assertTrue(launcher.is_file())
+        self.assertEqual(self.calls(), [])
 
     def test_wrappers_preserve_arguments_and_work_from_another_directory(self):
         self.fake_python()

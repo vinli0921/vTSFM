@@ -1,14 +1,14 @@
 """Read upstream TSFM configs without requiring Transformers model classes."""
 
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 from vllm.transformers_utils.config_parser_base import ConfigParserBase
 
 
 class ForecastConfigParser(ConfigParserBase):
     def parse(self, model, trust_remote_code, revision=None, code_revision=None, **kwargs):
-        raw, _ = PretrainedConfig.get_config_dict(model, revision=revision)
+        raw, _ = PreTrainedConfig.get_config_dict(model, revision=revision)
         raw = {key: value for key, value in raw.items() if not key.startswith('_')}
-        config = PretrainedConfig(
+        config = PreTrainedConfig(
             vtsfm_config=raw,
             hidden_size=raw.get('hidden_size', raw.get('d_model')),
             num_hidden_layers=raw.get('num_hidden_layers', raw.get('num_layers')),
