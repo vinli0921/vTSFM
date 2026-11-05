@@ -1,0 +1,73 @@
+"""Local submission gate and the small, provider-independent GPU test command."""
+
+from collections.abc import Mapping
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+
+def require_ci_trigger(environment: Mapping[str, str], event: dict) -> None:
+    """Accept trusted same-repository PRs or an acknowledged manual invocation."""
+    if environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch':
+        if environment.get('BILLING_LIMITS_VERIFIED') != 'true':
+            raise RuntimeError('Verify the Modal usage budget and $0 spend limit first; '
+                               'see docs/gpu-testing.md')
+    elif environment.get('GITHUB_EVENT_NAME') == 'pull_request':
+        head = event.get('pull_request', {}).get('head', {}).get('repo') or {}
+        repository = environment.get('GITHUB_REPOSITORY')
+        if not repository or head.get('full_name') != repository:
+            raise RuntimeError('Automatic GPU checks require a same-repository pull request')
+    else:
+        raise RuntimeError('GPU checks accept only pull_request or workflow_dispatch events')
+
+
+def require_setup(environment: Mapping[str, str]) -> None:
+    """Check explicit owner acknowledgement, not the provider's actual budget.
+
+    The owner must first save the usage budget and $0 net-spend limit in Modal.
+    Neither this flag nor a timeout can guarantee that a run uses free credits.
+    """
+    if environment.get('MODAL_GPU_ENABLED') != 'true':
+        raise RuntimeError('Set MODAL_GPU_ENABLED=true only after verifying Modal credit '
+                           'allowance, workspace usage budget, and $0 spend limit; '
+                           'see docs/gpu-testing.md')
+    for name in ('MODAL_TOKEN_ID', 'MODAL_TOKEN_SECRET'):
+        if not environment.get(name, '').strip():
+            raise RuntimeError(f'Missing {name}; add the matching Modal repository secrets')
+
+
+def runtime_metadata(runtime) -> dict[str, str]:
+    """Describe the GPU runtime for a client that has no Torch installation."""
+    # torch.__version__ is a TorchVersion subclass: pickling it would require
+    # importing Torch on the GitHub runner just to read the result metadata.
+    return {'gpu': str(runtime.cuda.get_device_name(0)), 'torch': str(runtime.__version__),
+            'cuda': str(runtime.version.cuda)}
+
+
+def run_gpu_checks(root: Path = Path('/workspace')) -> dict[str, str]:
+    """Execute a fixed correctness suite; model downloads and benchmarks are excluded."""
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError('GPU job has no working CUDA device')
+    info = runtime_metadata(torch)
+    print(json.dumps(info), flush=True)
+    environment = os.environ.copy()
+    environment['PYTHONPATH'] = str(root / 'src')
+    environment['VTSFM_TEST_ADAPTER'] = ''
+    subprocess.run([
+        sys.executable, '-m', 'pytest', '-q', '-s', '-p', 'no:cacheprovider',
+        'tests/test_cuda_contract.py', 'tests/test_execution.py', 'tests/test_batching.py',
+    ], cwd=root, env=environment, check=True, timeout=240)
+    torch.cuda.synchronize()
+    return {**info, 'result': 'passed'}
+
+
+if __name__ == '__main__':
+    if os.environ.get('GITHUB_ACTIONS') == 'true':
+        event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+        require_ci_trigger(os.environ, event)
+    require_setup(os.environ)
+    print('Local setup acknowledged. Provider billing caps must be verified in Modal.')

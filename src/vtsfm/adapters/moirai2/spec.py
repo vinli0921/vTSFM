@@ -3,6 +3,7 @@
 import json
 from vtsfm.adapters.base import AdapterSpec, FORECAST_VLLM_ARGS
 from vtsfm.adapters.forecast import ForecastSettings
+from vtsfm.execution import ExecutionCapabilities
 
 MODEL_ID = 'Salesforce/moirai-2.0-R-small'
 MODEL_REVISION = '30f43ff08c8494f4943ae1521e9d4e94a0fbb389'
@@ -23,4 +24,10 @@ MOIRAI2 = AdapterSpec(
                                      'num_attention_heads': 6}),
     ),
     supports_group_attention=False,
+    execution_capabilities=ExecutionCapabilities(
+        max_context=FORECAST_SETTINGS.max_context, max_horizon=FORECAST_SETTINGS.max_horizon,
+        quantiles=FORECAST_SETTINGS.quantiles, supports_point_forecast=False,
+        # patch_size and patch_size * num_predict_token come from the checkpoint.
+        # Ragged batching stays disabled pending the #10 masking/parity checks.
+    ),
 )

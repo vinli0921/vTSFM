@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+from vtsfm.execution import ExecutionCapabilities
+
 
 FORECAST_VLLM_ARGS = (
     '--runner', 'pooling', '--config-format', 'vtsfm', '--enforce-eager',
@@ -29,3 +31,4 @@ class AdapterSpec:
     native_server_module: str | None
     vllm_args: tuple[str, ...]
     supports_group_attention: bool = False
+    execution_capabilities: ExecutionCapabilities | None = None

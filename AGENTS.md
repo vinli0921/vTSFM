@@ -54,8 +54,34 @@ Use the checkout's environments, not global Python packages:
   when a suitable environment is available. Say what ran, what failed, and what
   remains unverified; CPU tests do not establish GPU compatibility.
 - Keep GitHub Actions lightweight: basic lint, CPU tests, and package checks.
-  Model/GPU testing, performance benchmarks, and deployment remain manual unless
-  the team explicitly asks to automate them. There is no mandatory pre-commit gate.
+  The enabled Modal workflow adds small CUDA contract checks on relevant trusted
+  pull requests. Full-model GPU validation, performance benchmarks, and deployment
+  remain manual unless the team explicitly asks to automate them. There is no
+  mandatory pre-commit gate.
+
+## Modal CUDA contract checks
+
+- Follow [docs/gpu-testing.md](docs/gpu-testing.md). Automatic runs use the changed
+  paths in `.github/workflows/gpu-tests.yml` and accept only same-repository PRs,
+  including drafts. Skip forks, never use `pull_request_target` with credentials,
+  and do not add a duplicate GPU `push` trigger. PR path filters consider the
+  whole PR diff, so later documentation-only commits can still match.
+- `MODAL_GPU_ENABLED=true` is the owner's persistent acknowledgement of the
+  workspace credit allowance, usage budget, and $0 out-of-pocket spend limit.
+  Keep both Modal token values in GitHub secrets. The flag and timeouts do not
+  inspect live billing or guarantee free execution; unset/false disables submission.
+- Manual dispatch overrides the path filter and also requires its billing-limit
+  checkbox; it does not override disabled setup. Keep the single global
+  concurrency group with `cancel-in-progress: false` so an active GPU app is not
+  orphaned by a newer commit.
+- Preserve the small job's bounds: one L4, one CPU, 4096 MiB memory, one single-use
+  container, no warm pool/volumes/retries, 120-second startup, 300-second execution,
+  240-second test timeout, and a 30-minute GitHub job. This suite checks CUDA tensor
+  contracts and routing; it does not establish model parity, accuracy, or performance.
+- Record the running app ID in a fresh private file before submitting GPU work.
+  Always clean up only that validated ID, never an app name or unrelated workspace
+  resources. No recorded ID means no cleanup API call; after forced cancellation,
+  verify that run's app has stopped. Keep credentials off the remote test worker.
 
 ## Experiments and shared resources
 

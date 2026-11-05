@@ -2,11 +2,14 @@
 
 Agent conventions live in [AGENTS.md](AGENTS.md); `CLAUDE.md` imports that guide.
 This is an early-stage research project: use focused changes and proportionate
-local checks. GitHub Actions runs basic lint, CPU tests, and package checks; model/GPU validation,
-performance benchmarks, and deployment remain manual. There is no required
-pre-commit gate.
+local checks. GitHub Actions runs basic lint, CPU tests, and package checks;
+the optional Modal workflow adds small CUDA contract checks on relevant trusted
+pull requests. Full-model validation, performance benchmarks, and deployment
+remain manual. There is no required pre-commit gate.
 
 Start with the [architecture guide](docs/architecture.md).
+For tensor adapters and shared worker work, use the
+[prepared execution contract](docs/execution-contract.md) and its CPU example.
 Chronos-2 delegates to the pinned Chronos integration. TimesFM, Toto, and Moirai
 use whole-forecast pooling wrappers. Shared batching is a metadata planner outside
 live serving; do not describe an optimization as implemented until code,
@@ -30,6 +33,9 @@ vLLM plugin entry points, and adapter module discovery outside the checkout.
 CPU checks must work without Torch, vLLM, an NVIDIA GPU, or model downloads.
 Keep imports lazy: package discovery and CLI help must not initialize CUDA.
 GPU integration checks are opt-in and run separately on an idle Linux GPU host.
+The [Modal GPU workflow](docs/gpu-testing.md) runs a small CUDA contract suite on
+relevant same-repository pull requests and on demand; its guide covers account
+setup, secrets, and credit-only billing limits.
 CPU checks do not substitute for numerical and serving validation.
 
 ## Change boundaries
@@ -67,6 +73,8 @@ CPU checks do not substitute for numerical and serving validation.
    schema for other models. Add required concrete-class processor registration
    rather than assuming inheritance handles it.
 4. Define how prepared rows map to `BatchKey` and `BatchRequest.group_sizes`.
+   Declare `execution_capabilities` and relevant `execution_options`, and follow
+   the prepared input/output shapes when implementing `ForecastExecutor`.
    Preserve independent requests and cross-learning semantics. Keep the shared
    planner independent of model imports; model-specific target/covariate filtering
    and kernels belong in the adapter. The planner is not yet wired into serving,
