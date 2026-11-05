@@ -37,6 +37,7 @@ They are alternatives in this diagram, not simultaneous resident services.
 | `src/vtsfm/execution.py` | CPU-safe prepared tensor, capability, and result contracts for future shared execution |
 | `src/vtsfm/config.py` | Shared dependency pins/defaults and compatibility aliases for Chronos-2 model pins |
 | `src/vtsfm/plugin.py` | Lazy architecture registration and adapter-selected IO factory for the `vtsfm` entry points |
+| `src/vtsfm/adapters/transport.py`, `multimodal.py` | Request-preserving raw multimodal fields; single-request model execution remains the default |
 | `src/vtsfm/cli.py` | Build commands/environments and start the selected backend without GPU imports for help |
 | `src/vtsfm/models/chronos2.py`, `src/vtsfm/io_processor.py`, `src/vtsfm/native_server.py` | Compatibility shims for the previous implementation paths |
 | `src/vtsfm/benchmark_memory.py` | Optional worker memory counters used in benchmark mode |
@@ -106,8 +107,15 @@ optimizations likewise belong inside the relevant adapter.
 
 The planner is a CPU-testable reference for later scheduler/worker integration.
 It is not connected to the vLLM serving path and adds no queue admission, tensor
-packing, multi-prompt transport, GPU execution, or attention kernels. Its group
+packing, GPU execution, or attention kernels. Its group
 IDs do not enable cross-request grouped execution in the Chronos-2 runtime.
+
+Separately, the newer adapters' [numerical transport](numerical-transport.md)
+uses batched multimodal fields to preserve multiple request payloads and stable
+IDs at the pinned vLLM worker boundary. A checkpoint-free engine probe checks
+this path. Normal serving retains `max_num_seqs=1` and explicitly rejects
+multiple forecasts until pooled-output routing is implemented; this transport
+does not collate requests for model execution.
 
 The [prepared execution contract](execution-contract.md) binds a plan to validated
 input tensors and defines row-aligned results, per-request splitting, and

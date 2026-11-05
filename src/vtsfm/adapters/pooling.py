@@ -1,6 +1,7 @@
 """Whole-forecast pooling, following the Chronos plugin's execution pattern."""
 
 import time
+import uuid
 
 import torch
 from torch import nn
@@ -14,6 +15,7 @@ from vllm.utils import length_from_prompt_token_ids_or_embeds
 
 from .forecast import ForecastSettings, format_predictions, parse_request
 from .multimodal import MODALITY
+from .transport import decode_requests, encode_metadata
 
 
 # Attention stays inside the upstream model; vLLM does not manage its KV cache.
@@ -45,7 +47,13 @@ class ForecastModel(nn.Module, IsAttentionFree, SupportsMultiModal):
         length = length_from_prompt_token_ids_or_embeds(input_ids, inputs_embeds)
         if kwargs.get('context') is None:
             return torch.zeros(length, 0, device=positions.device)
-        output = self.runtime.forecast(kwargs['context'], int(kwargs['horizon']))
+        requests = decode_requests(kwargs['context'], kwargs['request_metadata'])
+        # Transport supports multiple requests; pooled-output association (#7)
+        # and collated numerical execution (#11) are separate work. Fail closed.
+        if len(requests) != 1:
+            raise ValueError('Multi-request forecast output routing is not enabled; keep max_num_seqs=1')
+        request = requests[0]
+        output = self.runtime.forecast(request.context, request.horizon)
         return output.to(positions.device).unsqueeze(0).expand(length, *(-1 for _ in output.shape))
 
     def load_weights(self, weights):
@@ -69,8 +77,11 @@ class ForecastIOProcessor(IOProcessor):
         for row, item in zip(context, inputs):
             row[-len(item['target']):] = torch.tensor(item['target'], dtype=torch.float32)
         self.pending[request_id] = ([item.get('item_id') for item in inputs], horizon, levels)
+        metadata = encode_metadata(request_id or f'vtsfm-{uuid.uuid4().hex}',
+            [item.get('item_id') for item in inputs], [len(item['target']) for item in inputs], horizon, levels)
         return {'prompt_token_ids': [1], 'multi_modal_data': {
-            MODALITY: {'context': context, 'horizon': horizon}}}
+            MODALITY: {'context': [context],
+                       'request_metadata': [torch.tensor(list(metadata), dtype=torch.uint8)]}}}
 
     def post_process(self, model_output, request_id=None, **kwargs):
         item_ids, horizon, levels = self.pending.pop(request_id)
