@@ -150,7 +150,13 @@ Modal after a cancellation or timeout and stop only that run's app if necessary.
 
 ## Resource and usage bounds
 
-The initial job requests one L4, one physical CPU core, and 4 GiB of host memory.
+The job requests one GPU, one physical CPU core, and 4 GiB of host memory.
+Modal tries the L4 first and can schedule the same job on a T4 when L4
+capacity is unavailable. Both run the same pinned Torch/CUDA image and
+CUDA tensor contract tests. The test output identifies the selected GPU.
+Use the target GPU separately for tests of architecture-specific kernels.
+See [Modal GPU fallbacks](https://modal.com/docs/guide/gpu#gpu-fallbacks).
+
 It allows one container, keeps no warm pool, uses no persistent volumes, and has
 no scheduled trigger or model downloads. The execution timeout is 300 seconds,
 startup timeout 120 seconds, and test subprocess timeout 240 seconds. There are
@@ -163,7 +169,9 @@ than five minutes before its tests start. Extending that wait does not increase
 the five-minute GPU execution cap.
 
 At the published November 2026 rates, five minutes of the requested GPU, CPU,
-and memory is about $0.073 before startup and image-building costs. Budgeting
+and memory is about $0.073 on an L4 or $0.056 on a T4 before startup and
+image-building costs. Both use the same workspace usage budget and $0
+out-of-pocket spend limit. Budgeting
 roughly $0.10–$0.15 for a short run is an estimate, not a price guarantee. Recheck
 [Modal's current rates](https://modal.com/pricing) and the workspace dashboard
 before increasing test frequency or adding model inference.

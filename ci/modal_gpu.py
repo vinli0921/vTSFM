@@ -35,7 +35,7 @@ image = (
 app = modal.App('vtsfm-gpu-tests', include_source=True)
 
 
-@app.function(image=image, gpu='L4', cpu=1, memory=4096,
+@app.function(image=image, gpu=['L4', 'T4'], cpu=1, memory=4096,
               min_containers=0, max_containers=1, buffer_containers=0,
               scaledown_window=2, single_use_containers=True, retries=0,
               startup_timeout=120, timeout=300)
