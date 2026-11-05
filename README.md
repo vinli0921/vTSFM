@@ -128,6 +128,11 @@ on an RTX 4080 Laptop GPU using cached checkpoints, FP32, eager execution, and
 `--gpu-memory-utilization 0.35`. Checks covered examples, unequal history lengths,
 and repeated requests; they do not establish performance or forecast accuracy.
 
+For a manual native-GPU versus HTTP parity run across all three adapters, use
+`./scripts/test-models.sh`. See the [model integration guide](docs/model-integration.md)
+for environment setup, idle-GPU requirements, per-model selection, and saved
+pre-merge evidence.
+
 ## Run a comparison
 
 Benchmarks require exclusive access to the selected GPU and a free port. The

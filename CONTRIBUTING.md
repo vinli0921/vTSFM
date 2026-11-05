@@ -32,6 +32,12 @@ Keep imports lazy: package discovery and CLI help must not initialize CUDA.
 GPU integration checks are opt-in and run separately on an idle Linux GPU host.
 CPU checks do not substitute for numerical and serving validation.
 
+For TimesFM, Toto, and Moirai changes, run the manual
+[model integration suite](docs/model-integration.md) with `scripts/test-models.sh`
+and link its results to the tested commit in the PR. The runner checks native
+GPU forecasts against the HTTP path and saves per-adapter evidence; it is not
+an automatic merge gate or a performance benchmark.
+
 ## Change boundaries
 
 - Keep model/revision pins in the adapter descriptor, compatibility aliases in
