@@ -119,6 +119,11 @@ startup timeout 120 seconds, and test subprocess timeout 240 seconds. There are
 no configured application retries. These bounds limit each submission; they are
 not a monthly spending cap.
 
+The GitHub job has a separate 30-minute wall-clock limit to allow for provisioning.
+Modal's execution timeout excludes scheduling wait, so an app can wait longer
+than five minutes before its tests start. Extending that wait does not increase
+the five-minute GPU execution cap.
+
 At the published November 2026 rates, five minutes of the requested GPU, CPU,
 and memory is about $0.073 before startup and image-building costs. Budgeting
 roughly $0.10–$0.15 for a short run is an estimate, not a price guarantee. Recheck
