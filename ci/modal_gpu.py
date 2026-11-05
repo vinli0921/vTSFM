@@ -1,4 +1,4 @@
-"""Manual, bounded GPU correctness checks: modal run -m ci.modal_gpu.
+"""Bounded GPU correctness checks: modal run -m ci.modal_gpu.
 
     Setup and required billing caps: docs/gpu-testing.md.
     This defines an ephemeral App; do not deploy it as an always-on service.
@@ -11,6 +11,7 @@ from pathlib import Path
 import modal
 
 from ci.gpu_checks import require_setup, run_gpu_checks
+from ci.modal_cleanup import record_app_id
 
 
 # Refuse local submissions before image construction or App startup. On Modal
@@ -44,4 +45,6 @@ def gpu_tests():
 
 @app.local_entrypoint()
 def main():
+    if filename := os.environ.get('MODAL_APP_ID_FILE'):
+        record_app_id(app.app_id, filename)
     print(json.dumps(gpu_tests.remote(), indent=2))

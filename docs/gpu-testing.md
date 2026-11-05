@@ -1,15 +1,32 @@
 # GPU correctness checks on Modal
 
 The optional `gpu-tests.yml` workflow runs short CUDA correctness checks on
-Modal when a maintainer selects **Run workflow**. The existing CPU workflow
-continues to run on pushes and pull requests. No always-on GPU VM is needed.
+Modal for relevant, trusted same-repository pull requests, including drafts.
+Maintainers can also select **Run workflow**. The existing CPU workflow continues
+to run on pushes and pull requests. No always-on GPU VM is needed.
 
 This initial suite covers the prepared execution contract, planner, and CUDA
 tensor routing. It runs `tests/test_cuda_contract.py`, `tests/test_execution.py`,
 and `tests/test_batching.py`. It does not download checkpoints, run the vLLM
 server, measure forecast accuracy, or produce performance baselines. Passing it
 does not verify the driver on the team's separate GPU VM; run that machine's
-health check after boot and before experiments.
+health check after boot and before experiments. Full-model serving/parity,
+forecast accuracy evaluation, and performance profiles remain manual jobs on an
+idle, suitably sized GPU (the reference baseline uses an A100).
+
+Automatic runs are limited to changes in the planner, prepared execution
+contract, adapter metadata used by that contract, its fake adapter example,
+the three selected test files, Modal runner/setup tests, or their workflow and
+dependency configuration. The exact filters live in
+[`gpu-tests.yml`](../.github/workflows/gpu-tests.yml). PRs changing only documentation
+or unrelated model code do not trigger this suite. There is no GPU `push`
+trigger, so a PR update does not also submit a duplicate push run.
+
+Fork PRs are skipped before checkout and never receive Modal credentials. This
+uses `pull_request`, never `pull_request_target`; only branches within this
+repository are treated as trusted. Repository collaborators can change code that
+runs with the Modal token, so restrict write access to people you trust. The job
+has only `contents: read` GitHub permissions and does not persist checkout credentials.
 
 ## Account setup: apply billing limits first
 
@@ -76,7 +93,10 @@ add this repository **variable** in the same settings area:
 | --- | --- |
 | `MODAL_GPU_ENABLED` | `true` |
 
-Leave that variable unset or set it to `false` to disable GPU submissions. It is
+This variable enables both automatic and manual GPU submissions. Setting it to
+`true` is the owner's persistent acknowledgement that the credit allowance and
+both billing limits are configured; automatic runs require no per-PR confirmation.
+Leave it unset or set it to `false` to skip all GPU jobs. It is
 an explicit setup acknowledgement, not a programmatic billing check. Never
 commit token files, put secrets in workflow YAML, or paste token values into an
 issue, PR, or chat. The workflow passes credentials to the Modal client; test
@@ -88,11 +108,19 @@ run; local validation of the workflow does not establish Modal GPU execution.
 
 ## Run and inspect a check
 
-The workflow file must first be merged into the repository's default branch for
-GitHub to show its manual trigger. The prepared execution contract from PR #26
-is also required. Then open **Actions → Modal GPU checks → Run workflow** and
-follow the workflow's setup confirmation. Run only code you trust with the
-workspace credentials.
+With setup enabled, opening, reopening, or updating a same-repository PR with a
+matching path runs the small CUDA suite automatically. Draft PRs are included.
+All GPU runs share one concurrency group: an active run is allowed to finish,
+and newer commits may replace an older pending run. GitHub does not guarantee
+FIFO queue order. This avoids cancelling an active client while its GPU app is
+still running.
+
+For a manual override of the path filter, open **Actions → Modal GPU checks →
+Run workflow**, select a trusted ref, and check the billing-limit confirmation.
+The confirmation remains required for each manual run; it does not override a
+disabled `MODAL_GPU_ENABLED` variable. The workflow file must be on the default
+branch for GitHub to show this manual trigger. The prepared execution contract
+from PR #26 is also required. Run only code you trust with the workspace credentials.
 
 For a local invocation from a checkout, supply the same `MODAL_TOKEN_ID` and
 `MODAL_TOKEN_SECRET` as shell environment variables through your local secret
@@ -109,6 +137,16 @@ that image. Inspect the GitHub job log for the GPU and package versions, CUDA
 test output, and pytest summary. A missing GPU or a failed CUDA operation is a
 failure, not a successful skipped check. Modal's dashboard shows the associated
 execution and its usage.
+
+Before submitting the GPU function, the local entrypoint writes its running app
+ID to a fresh, private file unique to this GitHub run and attempt. An `always()`
+cleanup step uses the same pinned Modal client to stop only that validated app
+ID. An already stopped app is accepted only after checking the exact ID's stopped
+lifecycle. If setup fails before the entrypoint records an ID, cleanup makes no
+Modal call and no GPU function has been submitted. The ordinary ephemeral app
+lifecycle also stops the app when its client disconnects; this workflow does not
+deploy or detach an app. Forced runner termination can prevent cleanup, so inspect
+Modal after a cancellation or timeout and stop only that run's app if necessary.
 
 ## Resource and usage bounds
 
@@ -130,7 +168,7 @@ roughly $0.10–$0.15 for a short run is an estimate, not a price guarantee. Rec
 [Modal's current rates](https://modal.com/pricing) and the workspace dashboard
 before increasing test frequency or adding model inference.
 
-Keep full-model parity checks and benchmarks separate until their resource needs
-are measured. To stop future submissions, disable the workflow or set
+Keep full-model parity checks, accuracy evaluation, and benchmarks manual until
+their resource needs are measured. To stop future submissions, disable the workflow or set
 `MODAL_GPU_ENABLED=false`; cancel any active job and verify its Modal execution
 has ended. The provider's $0 spend limit remains the final credit-only safeguard.

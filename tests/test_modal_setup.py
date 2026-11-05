@@ -1,5 +1,8 @@
 """CI must refuse GPU submission until the owner configures billing and tokens."""
 
+import json
+import os
+from pathlib import Path
 import pickle
 import subprocess
 import sys
@@ -10,6 +13,31 @@ import pytest
 
 class RuntimeVersion(str):
     """Like TorchVersion, this subclass would need its module on the client."""
+
+
+@pytest.mark.parametrize('event_name,event,acknowledged,allowed', [
+    ('pull_request', {'pull_request': {'head': {'repo': {'full_name': 'team/vtsfm'}}}}, '', True),
+    ('pull_request', {'pull_request': {'head': {'repo': {'full_name': 'fork/vtsfm'}}}}, 'true', False),
+    ('pull_request', {'pull_request': {'head': {'repo': None}}}, 'true', False),
+    ('workflow_dispatch', {}, 'true', True),
+    ('workflow_dispatch', {}, '', False),
+    ('workflow_dispatch', {}, 'false', False),
+    ('push', {}, 'true', False),
+    ('pull_request_target', {}, 'true', False),
+])
+def test_ci_only_accepts_same_repository_prs_or_acknowledged_manual_runs(
+        event_name, event, acknowledged, allowed, tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    payload = tmp_path / 'event.json'
+    payload.write_text(json.dumps(event))
+    environment = {**os.environ, 'GITHUB_ACTIONS': 'true', 'GITHUB_EVENT_NAME': event_name,
+                   'GITHUB_REPOSITORY': 'team/vtsfm', 'GITHUB_EVENT_PATH': str(payload),
+                   'BILLING_LIMITS_VERIFIED': acknowledged, 'MODAL_GPU_ENABLED': 'true',
+                   'MODAL_TOKEN_ID': 'private-token-id', 'MODAL_TOKEN_SECRET': 'private-token-secret'}
+    result = subprocess.run([sys.executable, '-m', 'ci.gpu_checks'], cwd=root,
+                            env=environment, capture_output=True, text=True)
+    assert (result.returncode == 0) is allowed, result.stderr
+    assert 'private-token' not in result.stdout + result.stderr
 
 
 @pytest.mark.parametrize('value', [None, '', 'false', 'True', '1'])

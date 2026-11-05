@@ -1,6 +1,23 @@
 name: Modal GPU checks
 
 on:
+  pull_request:
+    paths:
+      - '.github/workflows/gpu-tests.yml'
+      - 'ci/**'
+      - 'src/vtsfm/batching.py'
+      - 'src/vtsfm/execution.py'
+      - 'src/vtsfm/adapters/base.py'
+      - 'src/vtsfm/adapters/__init__.py'
+      - 'src/vtsfm/adapters/forecast.py'
+      - 'src/vtsfm/adapters/*/spec.py'
+      - 'src/vtsfm/adapters/registry.py'
+      - 'examples/fake_adapter.py'
+      - 'tests/test_cuda_contract.py'
+      - 'tests/test_execution.py'
+      - 'tests/test_batching.py'
+      - 'tests/test_modal_*.py'
+      - 'pyproject.toml'
   workflow_dispatch:
     inputs:
       billing_limits_verified:
@@ -18,28 +35,28 @@ concurrency:
 
 jobs:
   gpu:
+    # Only repository collaborators' branches receive the Modal credentials.
+    if: >-
+      vars.MODAL_GPU_ENABLED == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: ubuntu-24.04
     # Allow provisioning wait separately from the 300-second GPU execution cap.
     timeout-minutes: 30
     env:
       MODAL_GPU_ENABLED: ${{ vars.MODAL_GPU_ENABLED }}
+      MODAL_APP_ID_FILE: .modal-gpu-${{ github.run_id }}-${{ github.run_attempt }}.app-id
     steps:
-      - name: Require explicit billing acknowledgement
-        env:
-          BILLING_LIMITS_VERIFIED: ${{ inputs.billing_limits_verified }}
-        run: |
-          if [[ "$BILLING_LIMITS_VERIFIED" != true ]]; then
-            echo '::error::Verify the Modal usage budget and $0 spend limit first. See docs/gpu-testing.md.'
-            exit 1
-          fi
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11.17'
-      - name: Check enablement and credentials before contacting Modal
+      - name: Check trusted trigger, billing acknowledgement, and credentials
         env:
+          BILLING_LIMITS_VERIFIED: ${{ inputs.billing_limits_verified }}
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: python -m ci.gpu_checks
@@ -50,3 +67,15 @@ jobs:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
         run: modal run -m ci.modal_gpu
+      - name: Stop only the app created by this run
+        if: always()
+        timeout-minutes: 3
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          if [[ -e "$MODAL_APP_ID_FILE" || -L "$MODAL_APP_ID_FILE" ]]; then
+            python -m ci.modal_cleanup
+          else
+            echo 'No app ID recorded; no GPU function was submitted by the entrypoint.'
+          fi

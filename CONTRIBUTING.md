@@ -2,9 +2,10 @@
 
 Agent conventions live in [AGENTS.md](AGENTS.md); `CLAUDE.md` imports that guide.
 This is an early-stage research project: use focused changes and proportionate
-local checks. GitHub Actions runs basic lint, CPU tests, and package checks; model/GPU validation,
-performance benchmarks, and deployment remain manual. There is no required
-pre-commit gate.
+local checks. GitHub Actions runs basic lint, CPU tests, and package checks;
+the optional Modal workflow adds small CUDA contract checks on relevant trusted
+pull requests. Full-model validation, performance benchmarks, and deployment
+remain manual. There is no required pre-commit gate.
 
 Start with the [architecture guide](docs/architecture.md).
 For tensor adapters and shared worker work, use the
@@ -33,7 +34,8 @@ CPU checks must work without Torch, vLLM, an NVIDIA GPU, or model downloads.
 Keep imports lazy: package discovery and CLI help must not initialize CUDA.
 GPU integration checks are opt-in and run separately on an idle Linux GPU host.
 The [Modal GPU workflow](docs/gpu-testing.md) runs a small CUDA contract suite on
-demand; its guide covers account setup, secrets, and credit-only billing limits.
+relevant same-repository pull requests and on demand; its guide covers account
+setup, secrets, and credit-only billing limits.
 CPU checks do not substitute for numerical and serving validation.
 
 ## Change boundaries

@@ -8,6 +8,21 @@ import subprocess
 import sys
 
 
+def require_ci_trigger(environment: Mapping[str, str], event: dict) -> None:
+    """Accept trusted same-repository PRs or an acknowledged manual invocation."""
+    if environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch':
+        if environment.get('BILLING_LIMITS_VERIFIED') != 'true':
+            raise RuntimeError('Verify the Modal usage budget and $0 spend limit first; '
+                               'see docs/gpu-testing.md')
+    elif environment.get('GITHUB_EVENT_NAME') == 'pull_request':
+        head = event.get('pull_request', {}).get('head', {}).get('repo') or {}
+        repository = environment.get('GITHUB_REPOSITORY')
+        if not repository or head.get('full_name') != repository:
+            raise RuntimeError('Automatic GPU checks require a same-repository pull request')
+    else:
+        raise RuntimeError('GPU checks accept only pull_request or workflow_dispatch events')
+
+
 def require_setup(environment: Mapping[str, str]) -> None:
     """Check explicit owner acknowledgement, not the provider's actual budget.
 
@@ -51,5 +66,8 @@ def run_gpu_checks(root: Path = Path('/workspace')) -> dict[str, str]:
 
 
 if __name__ == '__main__':
+    if os.environ.get('GITHUB_ACTIONS') == 'true':
+        event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+        require_ci_trigger(os.environ, event)
     require_setup(os.environ)
     print('Local setup acknowledged. Provider billing caps must be verified in Modal.')
