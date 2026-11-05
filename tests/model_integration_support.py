@@ -1,7 +1,7 @@
-"""Synthetic HTTP cases and independent native references for manual GPU checks.
+"""HTTP cases and independent native references for manual GPU checks.
 
-Imports remain CPU-safe. The CLI alone imports model packages and downloads the
-pinned checkpoint; it must run in the selected adapter's Linux GPU environment.
+Imports remain CPU-safe. Constructing NativeForecaster imports model packages and
+downloads the pinned checkpoint in the selected adapter's Linux GPU environment.
 """
 
 import argparse
@@ -120,57 +120,122 @@ def compare_response(response, case, expected, rtol=1e-4, atol=1e-4):
             'rtol': rtol, 'atol': atol}
 
 
-def native_reference(adapter):
-    """Run official upstream inference on CUDA FP32, without the adapter runtime."""
+def forecast_settings(adapter):
+    """Resolve only the CPU-safe numerical contract for an integration adapter."""
     if adapter not in ADAPTERS:
         raise ValueError(f'Unsupported integration adapter: {adapter!r}')
-    if platform.system() != 'Linux':
-        raise RuntimeError('Native integration reference requires Linux and a CUDA GPU')
+    return importlib.import_module(f'vtsfm.adapters.{adapter}.spec').FORECAST_SETTINGS
 
-    import numpy as np
-    import torch
-    from huggingface_hub import snapshot_download
-    from vtsfm.adapters import get_adapter
 
-    if not torch.cuda.is_available():
-        raise RuntimeError('Native integration reference requires a working CUDA GPU')
-    torch.manual_seed(0)
-    np.random.seed(0)
-    torch.set_num_threads(4)
-    device = torch.device('cuda:0')
-    probe = torch.arange(16, device=device, dtype=torch.float32).reshape(4, 4)
-    torch.testing.assert_close(probe @ torch.eye(4, device=device), probe, rtol=0, atol=0)
-    torch.cuda.synchronize(device)
-    spec = get_adapter(adapter)
-    directory = snapshot_download(spec.model_id, revision=spec.model_revision,
-                                  allow_patterns=['config.json', 'model.safetensors'])
-    if adapter == 'timesfm25':
-        import timesfm
-        reference = timesfm.TimesFM_2p5_200M_torch.from_pretrained(directory, torch_compile=False)
-        reference.model.to(device=device, dtype=torch.float32).eval()
-        reference.model.device = device
-        reference.model.device_count = 1
-    elif adapter == 'toto2':
-        from toto2 import Toto2Model
-        reference = Toto2Model.from_pretrained(directory).to(device=device, dtype=torch.float32).eval()
-    else:
-        from uni2ts.model.moirai2 import Moirai2Forecast, Moirai2Module
-        reference = Moirai2Module.from_pretrained(directory).to(device=device, dtype=torch.float32).eval()
+def validate_cases(adapter, cases):
+    """Validate and copy canonical cases before any model or CUDA initialization."""
+    from vtsfm.adapters.forecast import parse_request
 
-    outputs = []
-    with torch.inference_mode():
-        for case in integration_cases(adapter):
-            histories = [np.asarray(item['target'], dtype=np.float32) for item in case['data']['inputs']]
-            horizon = case['data']['parameters']['prediction_length']
+    settings = forecast_settings(adapter)
+    if not isinstance(cases, list) or not cases:
+        raise ValueError('cases must be a nonempty list')
+    result = deepcopy(cases)
+    names = set()
+    for case in result:
+        if (not isinstance(case, dict) or not {'name', 'data'} <= set(case)
+                or set(case) - {'name', 'data', 'evaluation', 'provenance'}):
+            raise ValueError('Each case must contain name and data')
+        name = case['name']
+        if not isinstance(name, str) or not name or name in names:
+            raise ValueError('Case names must be nonempty, unique strings')
+        names.add(name)
+        _, horizon, levels = parse_request(case['data'], settings)
+        case['data']['parameters'] = {'prediction_length': horizon, 'quantile_levels': list(levels)}
+    return result
+
+
+class NativeForecaster:
+    """One pinned official model, independent of adapter execution wrappers.
+
+    Inputs use the pure adapter IO contract. ``predict_array`` returns the native
+    FP32 array in [series, 9 canonical quantiles, horizon] order; ``predict`` makes
+    finite JSON lists for reference artifacts. CUDA ordinal zero refers to the GPU
+    selected by the caller's CUDA_VISIBLE_DEVICES. Forecast APIs can mutate
+    compilation state, so callers must serialize forecast calls.
+    """
+
+    def __init__(self, adapter):
+        self.settings = forecast_settings(adapter)
+        self.adapter = adapter
+        if platform.system() != 'Linux':
+            raise RuntimeError('Native integration reference requires Linux and a CUDA GPU')
+
+        import numpy as np
+        import torch
+        from huggingface_hub import snapshot_download
+        from vtsfm.adapters import get_adapter
+
+        if not torch.cuda.is_available():
+            raise RuntimeError('Native integration reference requires a working CUDA GPU')
+        torch.manual_seed(0)
+        np.random.seed(0)
+        torch.set_num_threads(4)
+        self.device = device = torch.device('cuda:0')
+        probe = torch.arange(16, device=device, dtype=torch.float32).reshape(4, 4)
+        torch.testing.assert_close(probe @ torch.eye(4, device=device), probe, rtol=0, atol=0)
+        torch.cuda.synchronize(device)
+        spec = get_adapter(adapter)
+        directory = snapshot_download(spec.model_id, revision=spec.model_revision,
+                                      allow_patterns=['config.json', 'model.safetensors'])
+        if adapter == 'timesfm25':
+            import timesfm
+            self.reference = timesfm.TimesFM_2p5_200M_torch.from_pretrained(directory, torch_compile=False)
+            self.reference.model.to(device=device, dtype=torch.float32).eval()
+            self.reference.model.device = device
+            self.reference.model.device_count = 1
+            self.forecast_config_class = timesfm.ForecastConfig
+        elif adapter == 'toto2':
+            from toto2 import Toto2Model
+            self.reference = Toto2Model.from_pretrained(directory).to(device=device, dtype=torch.float32).eval()
+        else:
+            from uni2ts.model.moirai2 import Moirai2Forecast, Moirai2Module
+            self.reference = Moirai2Module.from_pretrained(directory).to(device=device, dtype=torch.float32).eval()
+            self.forecast_class = Moirai2Forecast
+        torch.cuda.synchronize(device)
+        properties = torch.cuda.get_device_properties(device)
+        package = {'timesfm25': 'timesfm', 'toto2': 'toto-2', 'moirai2': 'uni2ts'}[adapter]
+        uuid = getattr(properties, 'uuid', None)
+        self._metadata = {
+            'adapter': adapter, 'model_id': spec.model_id, 'model_revision': spec.model_revision,
+            'model_path': str(directory), 'runtime': {
+                'gpu': torch.cuda.get_device_name(device), 'uuid': str(uuid) if uuid is not None else None,
+                'device': str(device), 'dtype': 'float32', 'torch': torch.__version__,
+                'cuda': torch.version.cuda, 'python': platform.python_version(),
+                'platform': platform.platform(), 'seed': 0,
+                'torch_num_threads': torch.get_num_threads(),
+                'package': package, 'package_version': importlib.metadata.version(package),
+                'cuda_visible_devices': os.environ.get('CUDA_VISIBLE_DEVICES'),
+                'nvidia_tf32_override': os.environ.get('NVIDIA_TF32_OVERRIDE'),
+                'float32_matmul_precision': torch.get_float32_matmul_precision(),
+                'torch_allow_tf32': torch.backends.cuda.matmul.allow_tf32,
+                'cudnn_allow_tf32': torch.backends.cudnn.allow_tf32,
+            },
+        }
+
+    def predict_array(self, data):
+        """Run official inference without materializing an intermediate JSON list."""
+        import numpy as np
+        import torch
+        from vtsfm.adapters.forecast import parse_request
+
+        inputs, horizon, _ = parse_request(data, self.settings)
+        histories = [np.asarray(item['target'], dtype=np.float32) for item in inputs]
+        reference, device = self.reference, self.device
+        with torch.inference_mode():
             context_length = max(map(len, histories))
-            if adapter == 'timesfm25':
-                reference.compile(timesfm.ForecastConfig(
+            if self.adapter == 'timesfm25':
+                reference.compile(self.forecast_config_class(
                     max_context=context_length, max_horizon=horizon,
                     per_core_batch_size=len(histories), normalize_inputs=True,
                     use_continuous_quantile_head=True, force_flip_invariance=True,
                     infer_is_positive=True, fix_quantile_crossing=True))
                 values = reference.forecast(horizon=horizon, inputs=histories)[1][..., 1:].transpose(0, 2, 1)
-            elif adapter == 'toto2':
+            elif self.adapter == 'toto2':
                 # Pad raw histories independently; padding is never an observed target.
                 context = torch.full((len(histories), context_length), float('nan'),
                                      dtype=torch.float32, device=device)
@@ -186,41 +251,61 @@ def native_reference(adapter):
                     horizon=horizon, decode_block_size=768)[:, :, 0, :].permute(1, 0, 2)
                 values = values.cpu().numpy()
             else:
-                runner = Moirai2Forecast(
+                runner = self.forecast_class(
                     module=reference, prediction_length=horizon, context_length=context_length,
                     target_dim=1, feat_dynamic_real_dim=0, past_feat_dynamic_real_dim=0,
                 ).to(device=device, dtype=torch.float32).eval()
                 values = runner.predict(histories)
-            expected = values.tolist()
-            _check_native_shape(expected, case)
-            outputs.append({'case': case, 'expected': expected})
-    torch.cuda.synchronize(device)
-    properties = torch.cuda.get_device_properties(device)
-    package = {'timesfm25': 'timesfm', 'toto2': 'toto-2', 'moirai2': 'uni2ts'}[adapter]
-    uuid = getattr(properties, 'uuid', None)
-    return {'adapter': adapter, 'model_id': spec.model_id, 'model_revision': spec.model_revision,
-            'model_path': str(directory), 'runtime': {
-                'gpu': torch.cuda.get_device_name(device), 'uuid': str(uuid) if uuid is not None else None,
-                'device': str(device), 'dtype': 'float32', 'torch': torch.__version__,
-                'cuda': torch.version.cuda, 'python': platform.python_version(),
-                'platform': platform.platform(), 'seed': 0,
-                'torch_num_threads': torch.get_num_threads(),
-                'package': package, 'package_version': importlib.metadata.version(package),
-                'nvidia_tf32_override': os.environ.get('NVIDIA_TF32_OVERRIDE'),
-                'float32_matmul_precision': torch.get_float32_matmul_precision(),
-                'torch_allow_tf32': torch.backends.cuda.matmul.allow_tf32,
-                'cudnn_allow_tf32': torch.backends.cudnn.allow_tf32,
-            }, 'cases': outputs}
+        values = np.asarray(values)
+        shape = (len(inputs), len(self.settings.quantiles), horizon)
+        if values.shape != shape:
+            raise ValueError(f'Unexpected native forecast shape: {values.shape}; expected {shape}')
+        torch.cuda.synchronize(device)
+        return values
+
+    def predict(self, data):
+        """Build the fully validated canonical JSON forecast for saved references."""
+        from vtsfm.adapters.forecast import parse_request
+
+        expected = self.predict_array(data).tolist()
+        inputs, horizon, _ = parse_request(data, self.settings)
+        _check_native_shape(expected, {'name': 'native-forecast', 'data': {
+            'inputs': inputs, 'parameters': {'prediction_length': horizon}}})
+        return expected
+
+    def metadata(self):
+        return deepcopy(self._metadata)
+
+
+def native_reference(adapter, cases=None):
+    """Run validated cases through official upstream CUDA FP32 inference once."""
+    cases = validate_cases(adapter, integration_cases(adapter) if cases is None else cases)
+    forecaster = NativeForecaster(adapter)
+    outputs = []
+    for case in cases:
+        expected = forecaster.predict(case['data'])
+        _check_native_shape(expected, case)
+        outputs.append({'case': case, 'expected': expected})
+    return {**forecaster.metadata(), 'cases': outputs}
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--adapter', choices=ADAPTERS, required=True)
+    parser.add_argument('--cases', type=Path, help='JSON case list or {cases, provenance} manifest')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args(argv)
-    result = native_reference(args.adapter)
+    manifest = json.loads(args.cases.read_text()) if args.cases else None
+    cases = manifest.get('cases') if isinstance(manifest, dict) else manifest
+    if isinstance(manifest, dict) and 'cases' not in manifest:
+        parser.error('The cases manifest must contain cases')
+    if args.cases and not isinstance(cases, list):
+        parser.error('cases must be a nonempty list')
+    result = native_reference(args.adapter, cases)
+    if isinstance(manifest, dict) and 'provenance' in manifest:
+        result['provenance'] = manifest['provenance']
     args.output.write_text(json.dumps(result, indent=2, allow_nan=False) + '\n')
-    print(f'Saved {len(result["cases"])} synthetic native CUDA reference cases to {args.output}')
+    print(f'Saved {len(result["cases"])} native CUDA reference cases to {args.output}')
     return 0
 
 

@@ -71,6 +71,36 @@ Use the checkout's environments, not global Python packages:
 - Keep credentials, checkpoints, raw downloads, environments, and generated runs
   out of Git. Preserve third-party attribution.
 
+## Manual GPU model validation
+
+- Run `scripts/test-models.sh` on an active, idle Linux GPU node; it needs no
+  stable IP, SSH secret, Actions runner, or automatic VM startup. Each adapter
+  uses `.venv-timesfm25`, `.venv-toto2`, or `.venv-moirai2`. See
+  [the model validation guide](docs/model-integration.md).
+- Before merging serving/model changes, use `--profile integration` for actual
+  vLLM HTTP versus independent native CUDA parity. Synthetic edge cases and a
+  small pinned AssetOpsBench slice cover different failure modes. The first run
+  prepares the documented sensor fixture; keep downloaded data outside Git.
+- Use `--profile accuracy` for model, precision, or approximate-execution changes.
+  Optional prepared fev slices are custom univariate smoke tasks, not full
+  benchmark submissions. Score observed future labels only; fit no scales from
+  holdouts. MAE/MASE use the median, SQL uses all nine quantiles. Undefined scales
+  must remain explicit with counts. Gate on preserving native behavior, not an
+  arbitrary absolute accuracy score or beating seasonal naive on every task.
+- Use `--profile performance` for optimization comparisons. Match native and
+  vLLM HTTP boundaries, payloads, pins, precision, context, horizon, batch size,
+  and client concurrency. Exclude startup, warmups, and numerical checks from
+  timed samples. Under concurrency, throughput is completions / elapsed wall
+  time. Retain failures and partial samples; failed points are not speedups.
+- Save raw samples, error scores, full commit/dirty state, hardware, and cleanup
+  evidence in ignored results directories. NVML sampled residency is not Torch
+  allocator memory. Fewer than 100 requests is a harness smoke check; repeat and
+  counterbalance backend order before interpreting performance differences.
+- These profiles remain manual on the A100. A small Modal contract check does
+  not load real models or replace model parity, accuracy, or performance checks.
+  Do not add a noisy performance merge threshold or silently loosen parity
+  tolerances to make an optimization pass.
+
 Keep handoffs short: what changed, why, checks run, and remaining limitations.
 These conventions take inspiration from [vLLM's agent guide](https://github.com/vllm-project/vllm/blob/main/AGENTS.md),
 adapted to a small research team with lightweight local validation.

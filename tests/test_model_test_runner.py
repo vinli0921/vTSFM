@@ -26,7 +26,8 @@ def checkout(tmp_path):
     if source.exists():
         shutil.copy2(source, root / 'scripts/test-models.sh')
     (root / 'tests').mkdir()
-    (root / 'tests/test_model_integration.py').touch()
+    for profile in ('integration', 'accuracy', 'performance'):
+        (root / f'tests/test_model_{profile}.py').touch()
     commands = tmp_path / 'commands'
     commands.mkdir()
     uname = commands / 'uname'
@@ -45,6 +46,10 @@ def install_environments(root, failures=None):
         python.parent.mkdir(parents=True)
         body = f'''import json, os, pathlib, sys
 record = {{'adapter': {adapter!r}, 'args': sys.argv[1:], 'cwd': os.getcwd(),
+          'profile': os.environ.get('VTSFM_TEST_PROFILE'),
+          'data_dir': os.environ.get('VTSFM_TEST_DATA'), 'cases': os.environ.get('VTSFM_TEST_CASES'),
+          'performance': {{key: os.environ.get('VTSFM_PERF_' + key) for key in
+              ('REQUESTS','WARMUPS','BATCHES','CONTEXTS','CLIENTS','HORIZON','ORDER')}},
           'env': {{k: os.environ.get(k) for k in ('VTSFM_TEST_ADAPTER',
           'VTSFM_TEST_GPU_INDEX', 'VTSFM_TEST_PORT', 'VTSFM_TEST_OUTPUT',
           'CUDA_VISIBLE_DEVICES', 'CUDA_DEVICE_ORDER', 'NVIDIA_TF32_OVERRIDE',
@@ -79,6 +84,44 @@ def test_help_has_no_environment_or_output_side_effects(checkout):
     assert '--adapter' in result.stdout
     assert not (root / 'results').exists()
     assert calls(env) == []
+
+
+@pytest.mark.parametrize('profile', ['accuracy', 'performance'])
+def test_profiles_select_their_tests_and_forward_frozen_settings(checkout, profile):
+    root, env = checkout
+    install_environments(root)
+    manifest = root / 'frozen cases.json'
+    manifest.write_text('{"cases":[]}')
+    arguments = ['--profile', profile, '--adapter', 'timesfm25', '--data-dir', 'input cache']
+    if profile == 'accuracy':
+        arguments += ['--cases', str(manifest)]
+    else:
+        arguments += ['--requests', '12', '--warmups', '2', '--batches', '2,4',
+                      '--contexts', '128', '--clients', '1,2', '--horizon', '32',
+                      '--backend-order', 'vtsfm,native']
+    result = run(root, env, *arguments)
+    assert result.returncode == 0, result.stderr
+    record, = calls(env)
+    assert record['profile'] == profile
+    assert f'tests/test_model_{profile}.py' in record['args']
+    assert record['data_dir'] == str(root / 'input cache')
+    if profile == 'accuracy':
+        assert record['cases'] == str(manifest)
+    else:
+        assert record['performance'] == {'REQUESTS':'12', 'WARMUPS':'2', 'BATCHES':'2,4',
+            'CONTEXTS':'128', 'CLIENTS':'1,2', 'HORIZON':'32', 'ORDER':'vtsfm,native'}
+
+
+@pytest.mark.parametrize('arguments', [('--profile','unknown'), ('--requests','0'),
+    ('--warmups','-1'), ('--batches','0,4'), ('--clients','one'), ('--horizon','1025'),
+    ('--backend-order','native,native'), ('--cases','anything.json')])
+def test_invalid_profile_settings_do_not_start_model_processes(checkout, arguments):
+    root, env = checkout
+    install_environments(root)
+    result = run(root, env, *arguments)
+    assert result.returncode != 0
+    assert calls(env) == []
+    assert not (root / 'results').exists()
 
 
 def test_all_models_continue_after_failure_and_preserve_logs_and_exit_codes(checkout):

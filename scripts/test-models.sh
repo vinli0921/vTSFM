@@ -5,12 +5,20 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage: scripts/test-models.sh [--adapter all|timesfm25|toto2|moirai2]
+                            [--profile integration|accuracy|performance]
                             [--gpu INDEX] [--port PORT] [--output NEW_DIRECTORY]
+                            [--data-dir DIRECTORY] [--cases ACCURACY_MANIFEST]
+                            [--requests 100] [--warmups 5] [--batches 1,4]
+                            [--contexts 128,512] [--clients 1,4] [--horizon 96]
+                            [--backend-order native,vtsfm]
 
 Run model integration checks sequentially on an idle Linux NVIDIA GPU.
 Defaults: all three adapters, GPU 0, port 18001, and a new UTC/commit directory
 under results/model-integration/. No CPU .venv is required. Set up each selected
 model environment with scripts/setup.sh --adapter NAME before running.
+Integration includes a small pinned AssetOpsBench fixture, downloaded once.
+Accuracy scores observed labels; --cases selects an optional prepared fev slice.
+Performance compares native HTTP and vLLM with matching request boundaries.
 EOF
 }
 
@@ -20,19 +28,39 @@ fail() {
 }
 
 adapter=all
+profile=integration
 gpu=0
 port=18001
 output=
+data_dir=
+cases=
+requests=100
+warmups=5
+batches=1,4
+contexts=128,512
+clients=1,4
+horizon=96
+backend_order=native,vtsfm
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
-    --adapter|--gpu|--port|--output)
+    --adapter|--profile|--gpu|--port|--output|--data-dir|--cases|--requests|--warmups|--batches|--contexts|--clients|--horizon|--backend-order)
       [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || fail "Missing value for $1"
       case "$1" in
         --adapter) adapter="$2" ;;
+        --profile) profile="$2" ;;
         --gpu) gpu="$2" ;;
         --port) port="$2" ;;
         --output) output="$2" ;;
+        --data-dir) data_dir="$2" ;;
+        --cases) cases="$2" ;;
+        --requests) requests="$2" ;;
+        --warmups) warmups="$2" ;;
+        --batches) batches="$2" ;;
+        --contexts) contexts="$2" ;;
+        --clients) clients="$2" ;;
+        --horizon) horizon="$2" ;;
+        --backend-order) backend_order="$2" ;;
       esac
       shift 2 ;;
     *) fail "Unknown argument: $1" ;;
@@ -44,13 +72,47 @@ case "$adapter" in
   timesfm25|toto2|moirai2) adapters=("$adapter") ;;
   *) fail 'Unsupported adapter; use all, timesfm25, toto2, or moirai2' ;;
 esac
+case "$profile" in
+  integration|accuracy|performance) ;;
+  *) fail 'Unsupported profile; use integration, accuracy, or performance' ;;
+esac
+[[ -z "$cases" || "$profile" == accuracy ]] || fail '--cases requires --profile accuracy'
+[[ "$requests" =~ ^[0-9]+$ && ${#requests} -le 7 && 10#$requests -ge 1 ]] || fail '--requests must be positive'
+[[ "$warmups" =~ ^[0-9]+$ && ${#warmups} -le 7 ]] || fail '--warmups must be nonnegative'
+[[ "$horizon" =~ ^[0-9]+$ && ${#horizon} -le 4 ]] || fail '--horizon must be in [1,1024]'
+(( 10#$horizon >= 1 && 10#$horizon <= 1024 )) || fail '--horizon must be in [1,1024]'
+for values in "$batches" "$contexts" "$clients"; do
+  [[ "$values" =~ ^[0-9]+(,[0-9]+)*$ ]] || fail 'Grid values must be comma-separated positive integers'
+  IFS=, read -r -a numbers <<< "$values"
+  for number in "${numbers[@]}"; do
+    [[ ${#number} -le 7 ]] || fail 'Grid value is too large'
+    (( 10#$number >= 1 )) || fail 'Grid values must be positive'
+  done
+done
+case "$backend_order" in
+  native,vtsfm|vtsfm,native) ;;
+  *) fail '--backend-order must be native,vtsfm or vtsfm,native' ;;
+esac
+if [[ "$profile" == performance ]]; then
+  IFS=, read -r -a numbers <<< "$clients"
+  for number in "${numbers[@]}"; do
+    (( 10#$requests >= 10#$number )) || fail '--requests must be at least every client concurrency'
+  done
+fi
 [[ "$gpu" =~ ^[0-9]+$ ]] || fail '--gpu must be a numeric physical GPU index'
 [[ "$port" =~ ^[0-9]+$ && ${#port} -le 5 ]] || fail '--port must be an integer in [1,65535]'
 (( 10#$port >= 1 && 10#$port <= 65535 )) || fail '--port must be an integer in [1,65535]'
 [[ "$(uname -s)" == Linux ]] || fail 'Model integration checks require Linux and an NVIDIA GPU'
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-[[ -f "$root/tests/test_model_integration.py" ]] || fail 'Missing tests/test_model_integration.py'
+test_file="tests/test_model_$profile.py"
+[[ -f "$root/$test_file" ]] || fail "Missing $test_file"
+if [[ -z "$data_dir" ]]; then data_dir="$root/data";
+elif [[ "$data_dir" != /* ]]; then data_dir="$PWD/$data_dir"; fi
+if [[ -n "$cases" ]]; then
+  if [[ "$cases" != /* ]]; then cases="$PWD/$cases"; fi
+  [[ -f "$cases" ]] || fail "Missing accuracy manifest: $cases"
+fi
 missing=0
 for name in "${adapters[@]}"; do
   if [[ ! -x "$root/.venv-$name/bin/python" ]]; then
@@ -62,7 +124,7 @@ done
 
 if [[ -z "$output" ]]; then
   revision="$(git -C "$root" rev-parse --short=12 HEAD 2>/dev/null || printf unknown)"
-  output="$root/results/model-integration/$(date -u +%Y%m%dT%H%M%SZ)-$revision"
+  output="$root/results/model-$profile/$(date -u +%Y%m%dT%H%M%SZ)-$revision"
 elif [[ "$output" != /* ]]; then
   output="$PWD/$output"
 fi
@@ -75,6 +137,10 @@ printf 'adapter\tpytest_exit_code\tlog_exit_code\n' > "$summary"
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$gpu"
 export VTSFM_TEST_GPU_INDEX="$gpu" VTSFM_TEST_PORT="$port"
+export VTSFM_TEST_PROFILE="$profile" VTSFM_TEST_DATA="$data_dir" VTSFM_TEST_CASES="$cases"
+export VTSFM_PERF_REQUESTS="$requests" VTSFM_PERF_WARMUPS="$warmups"
+export VTSFM_PERF_BATCHES="$batches" VTSFM_PERF_CONTEXTS="$contexts"
+export VTSFM_PERF_CLIENTS="$clients" VTSFM_PERF_HORIZON="$horizon" VTSFM_PERF_ORDER="$backend_order"
 export NVIDIA_TF32_OVERRIDE=0 OMP_NUM_THREADS=4 PYTHONUNBUFFERED=1
 export PYTHONPATH="$root/src:$root${PYTHONPATH:+:$PYTHONPATH}"
 
@@ -152,7 +218,7 @@ for name in "${adapters[@]}"; do
   mkfifo -- "$fifo"
   tee "$folder/pytest.log" < "$fifo" &
   log_pid=$!
-  "$root/.venv-$name/bin/python" -m pytest -m gpu tests/test_model_integration.py \
+  "$root/.venv-$name/bin/python" -m pytest -m gpu "$test_file" \
     -q -s --junitxml "$folder/junit.xml" > "$fifo" 2>&1 &
   pytest_pid=$!
   launching=0

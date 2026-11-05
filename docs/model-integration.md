@@ -1,9 +1,15 @@
-# Manual GPU model integration checks
+# Manual GPU model validation
 
 Run this suite on a Linux NVIDIA GPU host before merging a model or serving
 change. It compares the pinned TimesFM 2.5, Toto 2, and Moirai 2.0 native GPU
-forecasting paths with the vTSFM HTTP path. Inputs are synthetic correctness
-fixtures, not AssetOpsBench accuracy or performance measurements.
+forecasting paths with the vTSFM HTTP path. Three profiles share model lifecycle,
+workloads, revision metadata, resource refusal, and cleanup:
+
+| Profile | Purpose | Typical trigger |
+| --- | --- | --- |
+| `integration` (default) | Native/vLLM numerical and HTTP correctness | Serving/model PRs |
+| `accuracy` | Observed-label MAE, MASE, SQL and seasonal-naive comparison | Model/precision/approximation changes |
+| `performance` | Matched HTTP throughput, p50/p95, and sampled GPU memory | Optimization experiments |
 
 The runner is manual. It does not start a cloud VM, connect over SSH, install
 drivers, or configure a GitHub Actions runner. CPU Actions checks continue to
@@ -68,7 +74,7 @@ device, FP32 settings, horizon, quantiles, and model options. Model-specific
 normalization, padding, decoding, and quantile semantics remain part of the
 reference behavior.
 
-Each model receives four requests, in order:
+The integration profile sends six requests per model, in order:
 
 1. One 128-point history, a 17-point forecast, and quantiles 0.1/0.5/0.9.
 2. Two unequal histories of 97 and 163 points, a 33-point forecast, and only
@@ -76,6 +82,15 @@ Each model receives four requests, in order:
 3. A longer forecast: 256 points for TimesFM, 800 for Toto, and 160 for Moirai,
    with all nine quantiles. Toto's case exceeds its 768-point decoding block.
 4. The first request repeated after the horizon and batch shape changes.
+5. Two additional pinned AssetOpsBench cases, each with two observed sensor
+   histories of 128 points and 32 fully observed future labels. All nine quantiles
+   are checked. Sensor windows share one compressor; they are not independent assets.
+
+The first profile run prepares the pinned MetroPT fixture in `data/` when absent,
+using the existing preparer and its source checksum. Use `--data-dir DIRECTORY`
+for a different prepared cache. Existing corrupt or inconsistent data is rejected,
+not silently replaced. Input histories may contain the documented causal forward
+fill; held-out accuracy labels exclude those imputed rows.
 
 The initial numerical tolerance is `rtol=1e-4`, `atol=1e-4`. Treat that as a
 provisional threshold until the tests are validated on the target GPU; do not
@@ -128,3 +143,74 @@ pin, precision, or configuration changes.
 This documents a manual pre-merge practice. It is not an automatically enforced
 branch-protection gate, and CPU test success does not substitute for a completed
 GPU model run.
+
+## Accuracy profile
+
+The built-in accuracy slice evaluates five chronological AssetOps cutoffs with
+all seven channels. It compares native, vTSFM, and seasonal-naive forecasts:
+
+```bash
+./scripts/test-models.sh --profile accuracy --gpu 0
+```
+
+MAE and MASE use the 0.5 quantile as the point forecast, not an invented mean.
+SQL averages pinball losses over quantiles 0.1 through 0.9 and scales using
+seasonal differences from the input history only. Missing future observations
+are masked. Zero or insufficient seasonal scales produce explicit null scaled
+scores and counts; they do not become successful zero-error observations.
+`accuracy.json` retains per-series results and served-minus-native differences.
+Current exact paths require native numerical parity; there is no requirement
+that a foundation model beat seasonal naive on every small case. Approximate
+execution needs a separately justified quality budget, not silently relaxed tests.
+
+For a broader custom smoke slice, prepare pinned data with optional
+[`fev`](https://github.com/autogluon/fev) 0.10.0 in the CPU environment:
+
+```bash
+./scripts/setup.sh --cpu --evaluation
+.venv/bin/python -m benchmarks.prepare_data --output data
+.venv/bin/python -m benchmarks.model_evaluation prepare --data-dir data \
+  --fev --output data/accuracy-fev.json
+./scripts/test-models.sh --profile accuracy --cases data/accuracy-fev.json --gpu 0
+```
+
+The optional manifest adds M4 hourly, electricity hourly, and solar hourly:
+two rolling windows with up to eight finite univariate series per task. The
+dataset revision and configuration are pinned in `benchmarks/fev_smoke.json`;
+the manifest freezes the selected IDs, cutoffs, context limits, targets, and
+seasonality. No covariates or jointly modelled multivariate tasks are implied.
+This is a documented subset for regression checks, not a full fev-bench or
+GIFT-Eval score. Keep fev preparation in the CPU environment so it does not
+change the three model environments' dependency baselines.
+
+## Performance profile
+
+```bash
+./scripts/test-models.sh --profile performance --gpu 0 \
+  --batches 1,4 --contexts 128,512 --horizon 96 --clients 1,4 \
+  --requests 100 --warmups 5
+```
+
+Each model runs a native HTTP service and vLLM sequentially on the same GPU and
+loopback port. Both receive identical pre-encoded numerical payloads and return
+the requested quantiles and item IDs. Native execution calls the official model
+directly, formats its arrays without an artificial JSON round trip, and permits
+one active forecast, matching the current vLLM `max_num_seqs=1` baseline.
+Concurrency means outstanding HTTP clients; it does not imply live cross-request
+batching. Numerical checks, including a concurrent parity burst, happen outside
+the timed measurement. Startup and model downloads are excluded; warmups finish
+before measurement and NVML sampling.
+
+`performance.json` and individual `points/` files retain latencies, failures,
+request/series throughput, and memory samples. Throughput is successful completions
+divided by total wall time under concurrency. A failed request invalidates a
+point's throughput; queued requests stop, and interrupted runs retain partial
+samples. Memory is NVML whole-device residency sampled every 20 ms, which can
+miss short peaks; it is not Torch allocated/reserved memory.
+
+Fewer than 100 measured requests is labelled `smoke_only`; it verifies the
+harness rather than a paper result. Repeat independent runs on an idle GPU and
+counterbalance `--backend-order native,vtsfm` with `--backend-order vtsfm,native`
+before interpreting speed differences. No performance threshold blocks merging
+automatically. The older `benchmarks.run` Chronos comparator remains unchanged;
+this profile supplies the matched HTTP path for these three adapters.

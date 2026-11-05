@@ -1,0 +1,12 @@
+{
+  "description": "Custom univariate fev smoke slices; not the complete fev-bench suite",
+  "fev_version": "0.10.0",
+  "dataset_path": "autogluon/chronos_datasets",
+  "dataset_revision": "eeecad0b82a8c237e212ce6f8d1abecb513e2cec",
+  "quantile_levels": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+  "tasks": [
+    {"dataset_config": "m4_hourly", "target": "target", "context": 128, "horizon": 48, "seasonality": 24, "max_series": 8},
+    {"dataset_config": "monash_electricity_hourly", "target": "target", "context": 512, "horizon": 24, "seasonality": 24, "max_series": 8},
+    {"dataset_config": "solar_1h", "target": "power_mw", "context": 512, "horizon": 24, "seasonality": 24, "max_series": 8}
+  ]
+}

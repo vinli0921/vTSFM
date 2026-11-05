@@ -36,7 +36,9 @@ For TimesFM, Toto, and Moirai changes, run the manual
 [model integration suite](docs/model-integration.md) with `scripts/test-models.sh`
 and link its results to the tested commit in the PR. The runner checks native
 GPU forecasts against the HTTP path and saves per-adapter evidence; it is not
-an automatic merge gate or a performance benchmark.
+an automatic merge gate. Its separate accuracy and performance profiles evaluate
+observed-label quality and matched HTTP serving; use the relevant profile for
+precision/approximation or optimization changes and retain the raw evidence.
 
 ## Change boundaries
 

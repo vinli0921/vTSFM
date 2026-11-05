@@ -129,7 +129,9 @@ on an RTX 4080 Laptop GPU using cached checkpoints, FP32, eager execution, and
 and repeated requests; they do not establish performance or forecast accuracy.
 
 For a manual native-GPU versus HTTP parity run across all three adapters, use
-`./scripts/test-models.sh`. See the [model integration guide](docs/model-integration.md)
+`./scripts/test-models.sh`. It includes synthetic and pinned AssetOpsBench cases;
+`--profile accuracy` adds observed-label scoring, and `--profile performance`
+compares matching native/vLLM HTTP workloads. See the [model integration guide](docs/model-integration.md)
 for environment setup, idle-GPU requirements, per-model selection, and saved
 pre-merge evidence.
 
@@ -226,7 +228,7 @@ before changing plugin discovery or the serving contract.
 Agents should start with [AGENTS.md](AGENTS.md); `CLAUDE.md` imports the same
 conventions. GitHub Actions runs basic Python lint, CPU tests, shell syntax
 checks, and package build/install smoke checks.
-Model/GPU validation, performance benchmarks, and deployment remain manual.
+Full-model GPU validation, accuracy/performance benchmarks, and deployment remain manual.
 
 ## License
 
