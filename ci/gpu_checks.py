@@ -23,14 +23,21 @@ def require_setup(environment: Mapping[str, str]) -> None:
             raise RuntimeError(f'Missing {name}; add the matching Modal repository secrets')
 
 
+def runtime_metadata(runtime) -> dict[str, str]:
+    """Describe the GPU runtime for a client that has no Torch installation."""
+    # torch.__version__ is a TorchVersion subclass: pickling it would require
+    # importing Torch on the GitHub runner just to read the result metadata.
+    return {'gpu': str(runtime.cuda.get_device_name(0)), 'torch': str(runtime.__version__),
+            'cuda': str(runtime.version.cuda)}
+
+
 def run_gpu_checks(root: Path = Path('/workspace')) -> dict[str, str]:
     """Execute a fixed correctness suite; model downloads and benchmarks are excluded."""
     import torch
 
     if not torch.cuda.is_available():
         raise RuntimeError('GPU job has no working CUDA device')
-    info = {'gpu': torch.cuda.get_device_name(0), 'torch': torch.__version__,
-            'cuda': str(torch.version.cuda)}
+    info = runtime_metadata(torch)
     print(json.dumps(info), flush=True)
     environment = os.environ.copy()
     environment['PYTHONPATH'] = str(root / 'src')
