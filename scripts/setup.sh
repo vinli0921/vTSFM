@@ -3,10 +3,11 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/setup.sh [--cpu] [--adapter chronos2|timesfm25|toto2|moirai2]
+Usage: scripts/setup.sh [--cpu [--evaluation]] [--adapter chronos2|timesfm25|toto2|moirai2]
 
 Create this clone's .venv with Python 3.11.17 and install vTSFM editable.
   --cpu       Install tests, data preparation, and reporting without Torch/vLLM.
+  --evaluation Add pinned fev preparation tools to the CPU environment only.
   --adapter   Install a new model in .venv-<adapter>; Chronos keeps .venv.
   -h, --help  Show this help without downloading or changing anything.
 
@@ -20,10 +21,12 @@ EOF
 }
 
 cpu=0
+evaluation=0
 adapter=chronos2
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --cpu) cpu=1 ;;
+    --evaluation) evaluation=1 ;;
     --adapter) adapter="${2:?--adapter requires a value}"; shift ;;
     --adapter=*) adapter="${1#*=}" ;;
     -h|--help) usage; exit 0 ;;
@@ -39,6 +42,10 @@ case "$adapter" in
 esac
 if [[ "$cpu" == 1 && "$adapter" != chronos2 ]]; then
   printf 'Use --cpu without --adapter for the shared CPU test environment.\n' >&2
+  exit 2
+fi
+if [[ "$evaluation" == 1 && "$cpu" != 1 ]]; then
+  printf 'Use --evaluation with --cpu; model environments keep their own pins.\n' >&2
   exit 2
 fi
 vtsfm_select_environment --adapter "$adapter"
@@ -111,6 +118,7 @@ if [[ "$adapter" == moirai2 ]]; then
 fi
 if [[ "$cpu" == 1 ]]; then
   extras='.[dev,benchmark]'
+  if [[ "$evaluation" == 1 ]]; then extras='.[dev,benchmark,evaluation]'; fi
 fi
 "$uv_bin" pip install --python "$VTSFM_PYTHON" "${overrides[@]}" --editable "$extras"
 printf 'Environment ready: %s\n' "$VTSFM_PYTHON"

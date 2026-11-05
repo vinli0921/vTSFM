@@ -101,7 +101,9 @@ curl --fail-with-body -H 'Content-Type: application/json' \
 ```
 
 Replace `timesfm25` with `toto2` or `moirai2` for the other adapters. These use
-`--backend vtsfm`; the native comparator and benchmark runner remain Chronos-specific.
+`--backend vtsfm`; the serving CLI's `--backend native` and the older
+`benchmarks.run` comparator remain Chronos-specific. The manual performance
+profile below provides a native HTTP baseline for these three adapters.
 
 Inputs are finite univariate `target` arrays with optional `item_id`; separate
 inputs are independent series. Parameters are `prediction_length` (1–1024) and
@@ -132,6 +134,13 @@ This downloads the pinned checkpoint. GPU HTTP smoke tests passed for all three
 on an RTX 4080 Laptop GPU using cached checkpoints, FP32, eager execution, and
 `--gpu-memory-utilization 0.35`. Checks covered examples, unequal history lengths,
 and repeated requests; they do not establish performance or forecast accuracy.
+
+For a manual native-GPU versus HTTP parity run across all three adapters, use
+`./scripts/test-models.sh`. It includes synthetic and pinned AssetOpsBench cases;
+`--profile accuracy` adds observed-label scoring, and `--profile performance`
+compares matching native/vLLM HTTP workloads. See the [model integration guide](docs/model-integration.md)
+for environment setup, idle-GPU requirements, per-model selection, and saved
+pre-merge evidence.
 
 ## Run a comparison
 
@@ -226,7 +235,7 @@ before changing plugin discovery or the serving contract.
 Agents should start with [AGENTS.md](AGENTS.md); `CLAUDE.md` imports the same
 conventions. GitHub Actions runs basic Python lint, CPU tests, shell syntax
 checks, and package build/install smoke checks.
-Model/GPU validation, performance benchmarks, and deployment remain manual.
+Full-model GPU validation, accuracy/performance benchmarks, and deployment remain manual.
 
 ## License
 
