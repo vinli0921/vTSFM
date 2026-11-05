@@ -152,8 +152,10 @@ Modal after a cancellation or timeout and stop only that run's app if necessary.
 
 The job requests one GPU, one physical CPU core, and 4 GiB of host memory.
 Modal tries the L4 first and can schedule the same job on a T4 when L4
-capacity is unavailable. Both run the same pinned Torch/CUDA image and
-CUDA tensor contract tests. The test output identifies the selected GPU.
+capacity is unavailable. Both run the CUDA tensor contract tests on
+PyTorch 2.14.0 with CUDA 13.0, matching the numerical serving stack in
+[PR #32](https://github.com/vinli0921/vTSFM/pull/32). The test output
+reports the actual GPU and runtime versions.
 Use the target GPU separately for tests of architecture-specific kernels.
 See [Modal GPU fallbacks](https://modal.com/docs/guide/gpu#gpu-fallbacks).
 
