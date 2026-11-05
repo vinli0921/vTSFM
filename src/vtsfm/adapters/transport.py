@@ -52,6 +52,20 @@ def encode_metadata(request_id, item_ids, context_lengths, horizon, quantile_lev
     return json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(',', ':')).encode('utf-8')
 
 
+def decode_metadata(encoded) -> dict:
+    """Decode the small CPU field, also used to identify cached worker slots."""
+    if (str(getattr(encoded, 'device', 'cpu')) != 'cpu'
+            or str(encoded.dtype).removeprefix('torch.') != 'uint8'
+            or len(encoded.shape) != 1):
+        raise ValueError('request_metadata must contain CPU uint8 byte vectors')
+    try:
+        data = json.loads(bytes(encoded.tolist()).decode('utf-8'))
+    except (ValueError, UnicodeError, TypeError) as exc:
+        raise ValueError('Invalid encoded numerical request metadata') from exc
+    _validate_metadata(data)
+    return data
+
+
 def decode_requests(context, request_metadata) -> tuple[TransportRequest, ...]:
     """Read vLLM batched fields: stacked tensors if shapes match, lists otherwise.
 
@@ -64,15 +78,7 @@ def decode_requests(context, request_metadata) -> tuple[TransportRequest, ...]:
         raise ValueError('Context and metadata request count must match and be nonzero')
     requests, identities = [], set()
     for values, encoded in zip(contexts, metadata):
-        if (str(getattr(encoded, 'device', 'cpu')) != 'cpu'
-                or str(encoded.dtype).removeprefix('torch.') != 'uint8'
-                or len(encoded.shape) != 1):
-            raise ValueError('request_metadata must contain CPU uint8 byte vectors')
-        try:
-            data = json.loads(bytes(encoded.tolist()).decode('utf-8'))
-        except (ValueError, UnicodeError, TypeError) as exc:
-            raise ValueError('Invalid encoded numerical request metadata') from exc
-        _validate_metadata(data)
+        data = decode_metadata(encoded)
         if (len(values.shape) != 2 or values.shape[0] != len(data['context_lengths'])
                 or max(data['context_lengths']) != values.shape[1]
                 or str(values.dtype).removeprefix('torch.') != 'float32'):

@@ -46,3 +46,27 @@ def test_cpu_doctor_has_no_cuda_dependency():
     process = subprocess.run([sys.executable, '-m', 'vtsfm.cli', 'doctor', '--cpu'],
                              check=True, capture_output=True, text=True)
     assert json.loads(process.stdout)['mode'] == 'cpu'
+
+
+def test_new_adapters_use_routing_worker_and_concurrency_is_opt_in():
+    from vtsfm.cli import build_vllm_command
+    for adapter in ('timesfm25', 'toto2', 'moirai2'):
+        default, _ = build_vllm_command(adapter=adapter)
+        assert default[default.index('--max-num-seqs') + 1] == '1'
+        command, _ = build_vllm_command(adapter=adapter, max_num_seqs=3)
+        assert command[command.index('--worker-cls') + 1] == 'vtsfm.worker.ForecastWorker'
+        assert command.count('--max-num-seqs') == 1
+        assert command[command.index('--max-num-seqs') + 1] == '3'
+
+
+@pytest.mark.parametrize('limit', [0, -1, True, 1.5])
+def test_concurrency_limit_rejects_invalid_values(limit):
+    from vtsfm.cli import build_vllm_command
+    with pytest.raises(ValueError, match='positive integer'):
+        build_vllm_command(adapter='toto2', max_num_seqs=limit)
+
+
+def test_chronos_keeps_single_request_baseline():
+    from vtsfm.cli import build_vllm_command
+    with pytest.raises(ValueError, match='only for'):
+        build_vllm_command(adapter='chronos2', max_num_seqs=3)
