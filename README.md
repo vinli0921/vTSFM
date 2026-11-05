@@ -96,7 +96,9 @@ curl --fail-with-body -H 'Content-Type: application/json' \
 ```
 
 Replace `timesfm25` with `toto2` or `moirai2` for the other adapters. These use
-`--backend vtsfm`; the native comparator and benchmark runner remain Chronos-specific.
+`--backend vtsfm`; the serving CLI's `--backend native` and the older
+`benchmarks.run` comparator remain Chronos-specific. The manual performance
+profile below provides a native HTTP baseline for these three adapters.
 
 Inputs are finite univariate `target` arrays with optional `item_id`; separate
 inputs are independent series. Parameters are `prediction_length` (1–1024) and

@@ -159,6 +159,8 @@ seasonal differences from the input history only. Missing future observations
 are masked. Zero or insufficient seasonal scales produce explicit null scaled
 scores and counts; they do not become successful zero-error observations.
 `accuracy.json` retains per-series results and served-minus-native differences.
+The seasonal-naive comparison repeats the previous season deterministically at
+every quantile; it is not the probabilistic baseline from a published leaderboard.
 Current exact paths require native numerical parity; there is no requirement
 that a foundation model beat seasonal naive on every small case. Approximate
 execution needs a separately justified quality budget, not silently relaxed tests.
