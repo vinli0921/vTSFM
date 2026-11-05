@@ -24,11 +24,11 @@ image = (
     .apt_install('libgomp1')
     .pip_install('torch==2.9.1', index_url='https://download.pytorch.org/whl/cu128')
     .pip_install('numpy==2.2.6', 'pytest==8.4.2')
+    .env({'PYTHONPATH': '/workspace/src:/workspace'})
     .add_local_dir(ROOT / 'src', '/workspace/src')
     .add_local_dir(ROOT / 'tests', '/workspace/tests')
     .add_local_dir(ROOT / 'examples', '/workspace/examples')
     .add_local_file(ROOT / 'pyproject.toml', '/workspace/pyproject.toml')
-    .env({'PYTHONPATH': '/workspace/src:/workspace'})
 )
 
 app = modal.App('vtsfm-gpu-tests', include_source=True)
