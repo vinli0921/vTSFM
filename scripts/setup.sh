@@ -11,7 +11,8 @@ Create this clone's .venv with Python 3.11.17 and install vTSFM editable.
   --adapter   Install a new model in .venv-<adapter>; Chronos keeps .venv.
   -h, --help  Show this help without downloading or changing anything.
 
-The default installs GPU serving dependencies and requires Linux.
+GPU setup requires Linux. The default installs the legacy Chronos stack.
+TimesFM, Toto, and Moirai use the vLLM 0.33.0 / CUDA 13.0 wheel stack.
 If uv is unavailable or older than 0.13.4, install uv 0.13.4 locally using
 Astral's official installer. Older uv versions lack the pinned Python metadata.
 Existing UV_CACHE_DIR, UV_PYTHON_INSTALL_DIR, UV_PYTHON_BIN_DIR, and uv installer
@@ -65,6 +66,12 @@ if [[ -x "$VTSFM_PYTHON" ]]; then
     printf 'Move or remove that .venv explicitly, then rerun setup; it has not been replaced.\n' >&2
     exit 1
   fi
+  if [[ "$cpu" == 0 && "$adapter" != chronos2 ]] &&
+    "$VTSFM_PYTHON" -c 'from importlib.metadata import version; version("nvidia-cuda-runtime-cu12")' 2>/dev/null; then
+    printf 'Existing environment has CUDA 12 packages: %s\n' "$environment_dir" >&2
+    printf '%s requires CUDA 13.0 wheels. Move the environment aside or use a fresh checkout, then rerun setup.\n' "$adapter" >&2
+    exit 1
+  fi
 elif [[ -e "$environment_dir" ]]; then
   printf 'Existing .venv has no working Python. Move or remove it explicitly, then rerun setup.\n' >&2
   exit 1
@@ -110,17 +117,20 @@ if [[ ! -x "$VTSFM_PYTHON" ]]; then
   "$uv_bin" python install "$python_version"
   "$uv_bin" venv --python "$python_version" "$environment_dir"
 fi
-extras='.[serve,dev,benchmark]'
-overrides=()
-if [[ "$adapter" != chronos2 ]]; then extras=".[serve,dev,$adapter]"; fi
-if [[ "$adapter" == moirai2 ]]; then
-  overrides=(--override "$VTSFM_ROOT/scripts/moirai2-overrides.txt")
+install_args=(pip install --python "$VTSFM_PYTHON")
+extras='.[serve-chronos,dev,benchmark]'
+if [[ "$adapter" != chronos2 ]]; then
+  extras=".[serve,dev,$adapter]"
+  install_args+=(--torch-backend cu130)
+  if [[ "$adapter" == moirai2 ]]; then
+    install_args+=(--override "$VTSFM_ROOT/scripts/moirai2-overrides.txt")
+  fi
 fi
 if [[ "$cpu" == 1 ]]; then
   extras='.[dev,benchmark]'
   if [[ "$evaluation" == 1 ]]; then extras='.[dev,benchmark,evaluation]'; fi
 fi
-"$uv_bin" pip install --python "$VTSFM_PYTHON" "${overrides[@]}" --editable "$extras"
+"$uv_bin" "${install_args[@]}" --editable "$extras"
 printf 'Environment ready: %s\n' "$VTSFM_PYTHON"
 if [[ "$cpu" == 1 ]]; then
   printf 'Next: scripts/doctor.sh --cpu\n'

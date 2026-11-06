@@ -45,13 +45,15 @@ def engine(tmp_path_factory):
     os.environ['VLLM_PLUGINS'] = 'vtsfm'
     os.environ['VTSFM_ADAPTER'] = 'timesfm25'
     os.environ['VLLM_ENABLE_V1_MULTIPROCESSING'] = '1'
+    os.environ['VLLM_USE_V2_MODEL_RUNNER'] = '0'
     os.environ['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
     import torch
     import vllm
     from vllm import LLM
     import transport_probe
+    from vtsfm.config import VLLM_VERSION
 
-    assert vllm.__version__ == '0.16.0', 'This probe targets the pinned vLLM 0.16.0 boundary'
+    assert vllm.__version__ == VLLM_VERSION
     assert torch.cuda.is_available(), 'The engine probe requires working CUDA'
     directory = tmp_path_factory.mktemp('transport-model')
     (directory / 'config.json').write_text(json.dumps({
@@ -79,8 +81,8 @@ def engine(tmp_path_factory):
 def _prompt(request_id, targets, horizon, quantiles=(0.1, 0.5, 0.9)):
     from vtsfm.adapters.timesfm25.io_processor import TimesFMIOProcessor
 
-    processor = TimesFMIOProcessor(None)
-    parsed = processor.parse_request({
+    processor = TimesFMIOProcessor(None, None)
+    parsed = processor.parse_data({
         'inputs': [{'target': target, 'item_id': f'{request_id}-series-{index}'}
                    for index, target in enumerate(targets)],
         'parameters': {'prediction_length': horizon, 'quantile_levels': list(quantiles)},
@@ -104,21 +106,21 @@ def _encode_and_check(engine, prompts):
     from vllm.pooling_params import PoolingParams
 
     expected = [_expected_fingerprint(prompt) for prompt in prompts]
-    # LLM.encode submits sequentially while the separate EngineCore is already
-    # scheduling, so its first request can finish before the next ADD arrives.
-    # The pinned engine's acknowledged utility calls freeze scheduling while all
-    # ADDs cross the actual IPC path. Resume uses the same ordered input socket.
-    # These private LLM enqueue/drain helpers are test-only v0.16 integration;
-    # normal serving is unchanged and the scheduler/worker are not patched.
-    core = engine.llm_engine.engine_core
-    core.call_utility('pause_scheduler')
+    # Freeze the separate scheduler so all requests reach one worker forward.
+    engine = engine.llm_engine
+    core = engine.engine_core
+    request_ids = [f'transport-{index}' for index in range(len(prompts))]
+    core.call_utility('pause_scheduler', 'keep', False)
     try:
-        engine._validate_and_add_requests(
-            prompts, PoolingParams(task='plugin'), use_tqdm=False, lora_request=None)
+        for request_id, prompt in zip(request_ids, prompts):
+            engine.add_request(request_id, prompt, PoolingParams(task='plugin'))
     finally:
         core.call_utility('resume_scheduler')
-    outputs = engine._run_engine(use_tqdm=False)
-    assert len(outputs) == len(prompts)
+    completed = {}
+    while engine.has_unfinished_requests():
+        completed.update((output.request_id, output) for output in engine.step())
+    assert completed.keys() == set(request_ids)
+    outputs = [completed[request_id] for request_id in request_ids]
     fingerprints = [output.outputs.data.reshape(-1).tolist() for output in outputs]
     assert len({row[0] for row in fingerprints}) == 1, 'Requests did not share one worker forward'
     for actual, digest in zip(fingerprints, expected):
@@ -179,6 +181,7 @@ def test_production_wrapper_rejects_multiple_forecasts_before_running_model():
     from vtsfm.adapters.pooling import ForecastModel, ForecastPooler
     from vtsfm.adapters.timesfm25.spec import FORECAST_SETTINGS
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.multimodal.processing import ProcessorInputs, TimingContext
 
     # Exercise real parser/processor/reducer with a tiny deterministic runtime.
     processor = object.__new__(ForecastMultiModalProcessor)
@@ -186,7 +189,7 @@ def test_production_wrapper_rejects_multiple_forecasts_before_running_model():
     requests = []
     for prompt in prompts:
         parsed = ForecastDataParser().parse_mm_data(prompt['multi_modal_data'])
-        processed = processor.apply([1], parsed, {})
+        processed = processor.apply(ProcessorInputs([1], parsed), TimingContext(enabled=False))
         requests.append(SimpleNamespace(mm_features=[SimpleNamespace(
             modality='timeseries', data=processed['mm_kwargs']['timeseries'][0])]))
     runner = SimpleNamespace(is_multimodal_raw_input_only_model=True,

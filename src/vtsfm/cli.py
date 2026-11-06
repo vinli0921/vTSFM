@@ -11,10 +11,7 @@ from pathlib import Path
 import platform
 import sys
 
-from vtsfm.config import (
-    DEFAULT_PORT, PYTHON_VERSION, TORCH_VERSION,
-    TRANSFORMERS_VERSION, VLLM_VERSION,
-)
+from vtsfm.config import DEFAULT_PORT, PYTHON_VERSION, serving_pins
 from vtsfm.adapters import get_adapter, list_adapters
 
 
@@ -50,6 +47,8 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
     environment = _environment(benchmark)
     environment['VLLM_PLUGINS'] = plugin
     environment['VTSFM_ADAPTER'] = selected.name
+    # MRV2 does not support the plugin pooling task in the published releases.
+    environment['VLLM_USE_V2_MODEL_RUNNER'] = '0'
     command = [str(Path(sys.executable).with_name('vllm')), 'serve', selected.model_id,
                '--revision', selected.model_revision, '--host', host, '--port', str(port),
                '--io-processor-plugin', plugin, *selected.vllm_args]
@@ -104,11 +103,10 @@ def doctor(cpu: bool = False, adapter: str = 'chronos2') -> tuple[dict, bool]:
         result['gpu'] = torch.cuda.get_device_name(0)
         result['cuda_runtime'] = torch.version.cuda
         result['cuda_test'] = (torch.ones(4, device='cuda') * 2).cpu().tolist()
-        expected = {'vllm': VLLM_VERSION, 'torch': TORCH_VERSION,
-                    'transformers': TRANSFORMERS_VERSION}
-        mismatches = {name: {'expected': version, 'actual': packages[name]}
-                      for name, version in expected.items()
-                      if (packages[name] or '').split('+')[0] != version}
+        actual = {**packages, 'cuda_runtime': result['cuda_runtime']}
+        mismatches = {name: {'expected': version, 'actual': actual[name]}
+                      for name, version in serving_pins(selected.name).items()
+                      if (actual[name] or '').split('+')[0] != version}
         result['version_mismatches'] = mismatches
         result['ready'] = not mismatches and packages[runtime_package] is not None
     except (ImportError, RuntimeError) as error:
@@ -156,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as error:
         parser.error(str(error))
     if args.dry_run:
-        keys = ('VTSFM_ADAPTER', 'VLLM_PLUGINS', 'VLLM_SERVER_DEV_MODE',
+        keys = ('VTSFM_ADAPTER', 'VLLM_PLUGINS', 'VLLM_USE_V2_MODEL_RUNNER', 'VLLM_SERVER_DEV_MODE',
                 'OMP_NUM_THREADS', 'HF_HUB_DISABLE_TELEMETRY')
         print(json.dumps({'command': command, 'environment': {
             key: environment[key] for key in keys if key in environment}}, indent=2))

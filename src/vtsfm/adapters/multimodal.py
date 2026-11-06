@@ -3,8 +3,9 @@
 import uuid
 
 import torch
+from vllm.inputs import mm_input
 from vllm.multimodal.inputs import (
-    MultiModalFieldConfig, MultiModalFieldElem, MultiModalInputs,
+    MultiModalFieldConfig, MultiModalFieldElem,
     MultiModalKwargsItem, MultiModalKwargsItems, PlaceholderRange,
 )
 from vllm.multimodal.parse import DictEmbeddingItems, MultiModalDataItems, MultiModalDataParser
@@ -55,21 +56,24 @@ class ForecastInputBuilder(BaseDummyInputsBuilder):
 
 
 class ForecastMultiModalProcessor(BaseMultiModalProcessor):
+    requires_tokenizer = False
+
     def _get_mm_fields_config(self, hf_inputs, hf_processor_mm_kwargs):
         return fields()
 
     def _get_prompt_updates(self, mm_items, hf_processor_mm_kwargs, out_mm_kwargs):
         return []
 
-    def apply(self, prompt, mm_items, hf_processor_mm_kwargs, tokenization_kwargs=None, **kwargs):
+    def apply(self, inputs, timing_ctx):
+        mm_items = inputs.mm_data_items
         if mm_items[MODALITY].get_count() != 1:
             raise ValueError('Expected one numerical payload per forecast request')
         data = mm_items[MODALITY].get(0)
         values = {name: MultiModalFieldElem(data=data[name], field=config.field)
                   for name, config in fields().items()}
         # One placeholder token carries a whole forecast, not a count of time steps.
-        return MultiModalInputs(
-            type='multimodal', prompt_token_ids=[1],
+        return mm_input(
+            prompt_token_ids=[1],
             mm_kwargs=MultiModalKwargsItems({MODALITY: [MultiModalKwargsItem(values)]}),
             mm_hashes={MODALITY: [uuid.uuid4().hex]},
             mm_placeholders={MODALITY: [PlaceholderRange(offset=0, length=0)]},

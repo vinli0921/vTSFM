@@ -1,9 +1,11 @@
 # Numerical request transport and output routing
 
 TimesFM, Toto, and Moirai carry whole-forecast inputs through vLLM's raw
-multimodal interface. This transport targets **vLLM 0.16.0** and uses plugin
-processor hooks and built-in field reducers; it requires no vLLM source patch.
-Chronos-2 keeps its separate upstream integration.
+multimodal interface. This transport targets **vLLM 0.33.0 with Model Runner
+V1** and uses plugin processor hooks and built-in field reducers; it requires no
+vLLM source patch. Chronos-2 keeps its separate upstream integration on 0.16.0.
+The launcher sets `VLLM_USE_V2_MODEL_RUNNER=0`; the released V2 runner excludes
+the `plugin` pooling task.
 
 ## Why batched fields matter
 
@@ -45,7 +47,7 @@ model, it installs a callback that reads the current `input_batch.req_ids` and
 resolves each slot's cached `mm_features` metadata to the original request ID.
 The callback runs when the model executes, after worker state updates. It does
 not edit vLLM source or replace a runner method. This bridge supports **vLLM
-0.16.0 V1, eager execution, and one GPU**; other configurations fail explicitly.
+0.33.0 V1, eager execution, and one GPU**; other configurations fail explicitly.
 
 `ForecastModel` then:
 
