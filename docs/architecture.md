@@ -6,9 +6,10 @@ integration. The project owns adapter discovery, plugin registration, and a
 separate metadata batching planner; inference still delegates to upstream behavior.
 
 TimesFM 2.5, Toto 2 313M, and Moirai 2.0 small use `adapters/pooling.py` and
-`adapters/multimodal.py` for the same whole-forecast execution pattern. Each
-adapter's `runtime.py` constructs the official model and calls its forecasting
-API. Each adapter's `spec.py` owns its forecast limits, defaults, and output
+`adapters/multimodal.py` for the same whole-forecast execution pattern. TimesFM
+uses a device-resident tensor path around the upstream decoder. Toto and Moirai
+call their upstream forecast APIs. Each adapter's `spec.py` owns its forecast
+limits, defaults, and output
 quantile order; shared IO consumes those settings. `hf_config.py` bridges the
 upstream configuration files into vLLM without requiring a Transformers
 implementation. These adapters expose independent univariate quantile forecasts.
@@ -121,9 +122,9 @@ collated numerical execution remains future work.
 
 The [prepared execution contract](execution-contract.md) binds a plan to validated
 input tensors and defines row-aligned results, per-request splitting, and
-conservative model capability metadata. It is available for independent runtime
-and adapter development; the current whole-forecast serving wrappers do not yet
-implement that boundary.
+conservative model capability metadata. TimesFM implements the prepared
+executor for equal-length independent rows. The live worker uses the same
+TimesFM tensor forecast core for each scheduled request.
 
 ## Benchmark contract
 

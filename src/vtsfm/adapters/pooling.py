@@ -106,9 +106,8 @@ class ForecastModel(nn.Module, IsAttentionFree, SupportsMultiModal):
             raise ValueError('Forecast placeholders do not match worker request count')
         outputs = []
         for request in requests:
-            # Bring-up TimesFM/Moirai wrappers still return CPU tensors via
-            # upstream NumPy APIs. Preserve their existing output staging until
-            # the tensor adapter ports (#9/#10) remove those round trips.
+            # Moirai's current wrapper returns CPU tensors via its NumPy API.
+            # Tensor runtimes already return on the execution device.
             output = self.runtime.forecast(request.context, request.horizon).to(request.context.device)
             validate_forecast(request, output, len(self.settings.quantiles))
             outputs.append(output)

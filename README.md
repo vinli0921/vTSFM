@@ -113,8 +113,9 @@ the requested quantiles and item IDs, without a synthetic `mean` field. Covariat
 cross-learning, and multivariate targets are rejected. Context limits are 8192 for
 TimesFM/Toto and 7168 for Moirai, reserving room for the prediction horizon.
 
-TimesFM uses the official example's normalization, continuous quantile head,
-flip invariance, positivity, and crossing correction, with compilation disabled.
+TimesFM keeps histories and forecast tensors on the model device and uses the
+pinned upstream decoder. It preserves the reference normalization, continuous
+quantile head, flip invariance, positivity, and crossing correction.
 Toto uses the documented 768-point block decoding setting. Moirai uses the
 upstream recursive quantile forecast unchanged.
 

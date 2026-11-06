@@ -82,12 +82,11 @@ continuous batching or vLLM-managed attention/KV caching and makes no accuracy
 or performance claim.
 
 Wire metadata is separate from the [prepared execution contract](execution-contract.md).
-Model adapters will prepare `PreparedRequest` tensors and masks in issues
-#8/#9/#10; shared execution will consume `PreparedBatch` in #11. Normalization,
-patching, model attention, and output semantics remain adapter responsibilities.
-The current TimesFM/Moirai bring-up wrappers still use upstream NumPy APIs and
-return CPU tensors. Output staging preserves that existing behavior; these paths
-do not yet provide the transfer-free execution contract of the tensor adapters.
+TimesFM uses its tensor forecast path for each scheduled request, and shared
+execution will consume `PreparedBatch` in #11. Normalization, patching, model
+attention, and output semantics remain adapter responsibilities. Moirai's
+current NumPy wrapper returns CPU tensors, which the worker stages on the
+execution device.
 
 When no request ID is supplied, preprocessing generates a transport UUID. This
 does not fix the existing `pending[None]` state or provide offline-call lifecycle

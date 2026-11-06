@@ -23,6 +23,8 @@ dd-unit-scaling), and Moirai (`SalesforceAIResearch/uni2ts`) use Apache-2.0.
 Source revisions are pinned in `pyproject.toml`; checkpoint IDs and revisions
 are in each adapter's `spec.py`. Preserve the upstream licenses and model cards
 when redistributing weights or packaged environments.
+The TimesFM adapter follows the preprocessing and postprocessing in Google's
+[pinned TimesFM forecast implementation](https://github.com/google-research/timesfm/blob/e51928e27119cb17bebc005be2696b75e0a9e688/src/timesfm/timesfm_2p5/timesfm_2p5_torch.py).
 
 ## AssetOpsBench fixture
 

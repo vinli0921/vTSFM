@@ -4,10 +4,10 @@
 adapters. It imports no Torch, vLLM, NumPy, or model packages. Its validation and
 the CPU example can be used before the live worker integration exists.
 
-The current serving wrappers still call whole upstream forecasts through
-`adapters/pooling.py`. They do not yet implement this contract. Model tensor
-ports (#8–#10), transport (#6), live output routing (#7), and shared execution
-(#11) remain separate work.
+TimesFM implements `ForecastExecutor` for prepared batches of independent rows
+with equal true history lengths and fully observed values after left padding.
+The live serving wrapper calls the same tensor forecast core per request.
+Shared execution across HTTP requests is tracked in #11.
 
 ## Inputs, planning, and outputs
 
@@ -65,6 +65,14 @@ stepping. Their existing HTTP paths still accept unequal histories; these flags
 gate the new contract until adapter parity tests establish safe collation.
 Unknown patch/block sizes stay `None` until the loaded checkpoint supplies them.
 Chronos-2 has no declaration for this boundary yet.
+
+TimesFM's HTTP path supports ragged histories within a request. Its outer
+normalization includes the zero left padding up to the next 32-point patch of
+the longest history in that request. The prepared executor keeps equal true
+history lengths across requests to preserve the isolated normalization width.
+It checks finite values and the observed mask before decoding, which uses a
+scalar validation sync and rejects internal gaps. The HTTP path validates
+finite histories at request parsing.
 
 `PreparedRequest.workload` reports logical rows, context points, forecast values,
 and patch/block counts when sizes are known. These are dimensions, not predicted
