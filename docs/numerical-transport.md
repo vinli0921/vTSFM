@@ -72,21 +72,36 @@ explicit experimental option for TimesFM, Toto, and Moirai:
 ./scripts/serve.sh --adapter toto2 --max-num-seqs 3 --port 8001
 ```
 
-The flag changes scheduling capacity. Each request still runs an individual
-whole forecast; [issue #11](https://github.com/vinli0921/vTSFM/issues/11) will
-collate compatible requests into shared numerical execution. Stable numerical
-workload/memory admission remains [issue #12](https://github.com/vinli0921/vTSFM/issues/12),
-so the request-count flag is not a memory bound. Mixed shapes can increase the
-padded output allocation. This path does not implement
-continuous batching or vLLM-managed attention/KV caching and makes no accuracy
-or performance claim.
+TimesFM can opt into whole-forecast batching for requests vLLM places in the
+same worker forward:
+
+```bash
+./scripts/serve.sh --adapter timesfm25 --max-num-seqs 4 --forecast-batch-rows 8 --port 8001
+```
+
+The planner combines consecutive requests with matching dense history length
+and horizon. The executor computes all native quantiles and HTTP response
+formatting selects each request's own quantiles. Each batch contains up to
+four requests and the configured row cap. Ragged, oversized, or unmatched
+requests execute individually. The cap bounds fused rows. Numerical workload
+and memory admission are tracked in [issue #12](https://github.com/vinli0921/vTSFM/issues/12).
+Forecast-block scheduling is tracked in [issue #15](https://github.com/vinli0921/vTSFM/issues/15).
 
 Wire metadata is separate from the [prepared execution contract](execution-contract.md).
-TimesFM uses its tensor forecast path for each scheduled request, and shared
-execution will consume `PreparedBatch` in #11. Normalization, patching, model
-attention, and output semantics remain adapter responsibilities. Moirai's
-current NumPy wrapper returns CPU tensors, which the worker stages on the
-execution device.
+The batch helper builds `PreparedBatch` only when several requests will share
+execution. Validating those prepared masks synchronizes with the GPU.
+Normalization, patching, attention, and output semantics belong to the adapter.
+Moirai's current NumPy wrapper returns CPU tensors for the worker to stage.
+
+Run the real TimesFM batching check on an idle Linux GPU:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 VTSFM_RUN_TIMESFM_BATCHING=1 PYTHONPATH=src:tests \
+  .venv-timesfm25/bin/python -m pytest tests/test_timesfm_http_batching.py -q -s
+```
+
+The test starts a loopback server, queues distinct HTTP requests, and checks
+the worker's completed execution trace against each isolated forecast.
 
 When no request ID is supplied, preprocessing generates a transport UUID. This
 does not fix the existing `pending[None]` state or provide offline-call lifecycle

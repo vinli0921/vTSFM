@@ -4,7 +4,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vtsfm.adapters.multimodal import ForecastInputBuilder, ForecastMultiModalProcessor, ForecastProcessingInfo
 from vtsfm.adapters.pooling import ForecastModel
 from .runtime import TimesFMRuntime
-from .spec import FORECAST_SETTINGS
+from .spec import FORECAST_SETTINGS, TIMESFM25
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -13,3 +13,4 @@ from .spec import FORECAST_SETTINGS
 class VTSFMTimesFMForForecasting(ForecastModel):
     runtime_class = TimesFMRuntime
     settings = FORECAST_SETTINGS
+    batch_spec = TIMESFM25

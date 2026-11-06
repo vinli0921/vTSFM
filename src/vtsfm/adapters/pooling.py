@@ -1,5 +1,6 @@
 """Whole-forecast pooling, following the Chronos plugin's execution pattern."""
 
+import os
 import uuid
 
 import torch
@@ -10,6 +11,9 @@ from vllm.model_executor.models.interfaces_base import attn_type
 from vllm.plugins.io_processors.interface import IOProcessor
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 
+from vtsfm.config import FORECAST_BATCH_ROWS_ENV, MAX_FORECAST_BATCH_ROWS
+
+from .execution_batch import execute_scheduled
 from .forecast import ForecastSettings, format_predictions, parse_request
 from .multimodal import MODALITY
 from .transport import decode_requests, encode_metadata
@@ -59,6 +63,7 @@ class ForecastModel(nn.Module, IsAttentionFree, SupportsMultiModal):
     supports_multimodal_raw_input_only = True
     is_pooling_model = True
     packed_modules_mapping = {}
+    batch_spec = None
 
     def __init__(self, *, vllm_config, prefix=''):
         super().__init__()
@@ -66,6 +71,11 @@ class ForecastModel(nn.Module, IsAttentionFree, SupportsMultiModal):
         self.model = self.runtime.model
         self.pooler = ForecastPooler()
         self.request_order = None
+        self.forecast_batch_rows = int(os.environ.get(FORECAST_BATCH_ROWS_ENV, '0'))
+        if self.forecast_batch_rows and (self.batch_spec is None
+                or not 2 <= self.forecast_batch_rows <= MAX_FORECAST_BATCH_ROWS):
+            raise ValueError('Unsupported adapter or row cap for experimental forecast batching')
+        self.forecast_batch_trace = os.environ.get('VTSFM_FORECAST_BATCH_TRACE')
 
     def set_request_order(self, callback):
         self.request_order = callback
@@ -104,11 +114,16 @@ class ForecastModel(nn.Module, IsAttentionFree, SupportsMultiModal):
                 self.pooler.profiling = True
                 return torch.zeros(length, 1, len(self.settings.quantiles), 1, device=positions.device)
             raise ValueError('Forecast placeholders do not match worker request count')
+        if self.forecast_batch_rows and len(requests) > 1:
+            forecasts = execute_scheduled(self.runtime, self.batch_spec, requests,
+                                          self.forecast_batch_rows, self.forecast_batch_trace)
+        else:
+            forecasts = (self.runtime.forecast(request.context, request.horizon) for request in requests)
         outputs = []
-        for request in requests:
+        for request, forecast in zip(requests, forecasts, strict=True):
             # Moirai's current wrapper returns CPU tensors via its NumPy API.
             # Tensor runtimes already return on the execution device.
-            output = self.runtime.forecast(request.context, request.horizon).to(request.context.device)
+            output = forecast.to(request.context.device)
             validate_forecast(request, output, len(self.settings.quantiles))
             outputs.append(output)
         rows = max(len(request.item_ids) for request in requests)

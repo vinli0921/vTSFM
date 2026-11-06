@@ -6,8 +6,8 @@ the CPU example can be used before the live worker integration exists.
 
 TimesFM implements `ForecastExecutor` for prepared batches of independent rows
 with equal true history lengths and fully observed values after left padding.
-The live serving wrapper calls the same tensor forecast core per request.
-Shared execution across HTTP requests is tracked in #11.
+The live serving wrapper can use this contract for compatible HTTP requests
+scheduled together. Individual forecasts use the same tensor forecast core.
 
 ## Inputs, planning, and outputs
 
