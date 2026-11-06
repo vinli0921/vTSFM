@@ -10,13 +10,17 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.parse import DictEmbeddingItems, MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import BaseDummyInputsBuilder, BaseMultiModalProcessor, BaseProcessingInfo
 
+from .transport import encode_metadata
 
 MODALITY = 'timeseries'
 
 
 def fields():
-    return {name: MultiModalFieldConfig.shared(MODALITY, batch_size=1)
-            for name in ('context', 'horizon')}
+    # Shared fields split distinct requests into separate vLLM groups; the raw
+    # runner's dict.update then retains only the final group's values. Batched
+    # fields keep every request, stacking equal shapes and retaining ragged lists.
+    return {'context': MultiModalFieldConfig.batched(MODALITY),
+            'request_metadata': MultiModalFieldConfig.batched(MODALITY, keep_on_cpu=True)}
 
 
 class ForecastDataParser(MultiModalDataParser):
@@ -45,7 +49,9 @@ class ForecastInputBuilder(BaseDummyInputsBuilder):
 
     def get_dummy_mm_data(self, seq_len, mm_counts, mm_options=None):
         # Minimal warmup input; this does not represent peak request memory.
-        return {MODALITY: {'context': torch.ones(1, 32), 'horizon': 1}}
+        metadata = encode_metadata('vtsfm-dummy', [None], [32], 1, [0.5])
+        return {MODALITY: {'context': [torch.ones(1, 32)],
+                          'request_metadata': [torch.tensor(list(metadata), dtype=torch.uint8)]}}
 
 
 class ForecastMultiModalProcessor(BaseMultiModalProcessor):
@@ -56,7 +62,9 @@ class ForecastMultiModalProcessor(BaseMultiModalProcessor):
         return []
 
     def apply(self, prompt, mm_items, hf_processor_mm_kwargs, tokenization_kwargs=None, **kwargs):
-        data = mm_items[MODALITY].data
+        if mm_items[MODALITY].get_count() != 1:
+            raise ValueError('Expected one numerical payload per forecast request')
+        data = mm_items[MODALITY].get(0)
         values = {name: MultiModalFieldElem(data=data[name], field=config.field)
                   for name, config in fields().items()}
         # One placeholder token carries a whole forecast, not a count of time steps.

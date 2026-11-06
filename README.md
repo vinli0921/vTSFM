@@ -217,6 +217,7 @@ and GPU checks.
 | Chronos-2 model and numerical IO | `src/vtsfm/adapters/chronos2/` | Own model pins, preparation, group semantics, native comparison, and numerical parity |
 | Shared batching | `src/vtsfm/batching.py` | Plan compatible prepared rows and route results; execution integration remains future work |
 | Plugin integration | `src/vtsfm/plugin.py`, `src/vtsfm/cli.py` | Register lazy targets and select adapter/backend settings |
+| Numerical transport | `src/vtsfm/adapters/multimodal.py`, `transport.py` | Preserve each request's context and identity through vLLM; normal serving still schedules one request |
 | Kernel research | Adapter model attention boundary | Profile and implement family-specific kernels; not implemented yet |
 | Measurement | `benchmarks/`, `src/vtsfm/benchmark_memory.py` | Reproduce native/community/vTSFM comparisons and review raw samples |
 
@@ -231,6 +232,8 @@ baseline before optimizing.
 Assign each proposed optimization a numerical check and a measurable target.
 Read [architecture](docs/architecture.md) and [contribution guidance](CONTRIBUTING.md)
 before changing plugin discovery or the serving contract.
+See [numerical transport](docs/numerical-transport.md) for the pinned vLLM worker
+boundary and the manual checkpoint-free multi-request probe.
 
 Agents should start with [AGENTS.md](AGENTS.md); `CLAUDE.md` imports the same
 conventions. GitHub Actions runs basic Python lint, CPU tests, shell syntax
