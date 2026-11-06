@@ -74,8 +74,9 @@ Use the checkout's environments, not global Python packages:
   checkbox; it does not override disabled setup. Keep the single global
   concurrency group with `cancel-in-progress: false` so an active GPU app is not
   orphaned by a newer commit.
-- Preserve the small job's bounds: one L4, one CPU, 4096 MiB memory, one single-use
-  container, no warm pool/volumes/retries, 120-second startup, 300-second execution,
+- Preserve the small job's bounds: one GPU (L4 preferred, T4 fallback), one CPU,
+  4096 MiB memory, one single-use container, no warm pool/volumes/retries,
+  120-second startup, 300-second execution,
   240-second test timeout, and a 30-minute GitHub job. This suite checks CUDA tensor
   contracts and routing; it does not establish model parity, accuracy, or performance.
 - Record the running app ID in a fresh private file before submitting GPU work.
