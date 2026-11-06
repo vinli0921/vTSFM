@@ -217,7 +217,7 @@ and GPU checks.
 | Chronos-2 model and numerical IO | `src/vtsfm/adapters/chronos2/` | Own model pins, preparation, group semantics, native comparison, and numerical parity |
 | Shared batching | `src/vtsfm/batching.py` | Plan compatible prepared rows and route results; execution integration remains future work |
 | Plugin integration | `src/vtsfm/plugin.py`, `src/vtsfm/cli.py` | Register lazy targets and select adapter/backend settings |
-| Numerical transport | `src/vtsfm/adapters/multimodal.py`, `transport.py` | Preserve each request's context and identity through vLLM; normal serving still schedules one request |
+| Numerical transport and output routing | `src/vtsfm/adapters/multimodal.py`, `transport.py`, `pooling.py`, `src/vtsfm/worker.py` | Preserve request identity and crop per-request forecasts in actual worker slot order |
 | Kernel research | Adapter model attention boundary | Profile and implement family-specific kernels; not implemented yet |
 | Measurement | `benchmarks/`, `src/vtsfm/benchmark_memory.py` | Reproduce native/community/vTSFM comparisons and review raw samples |
 
@@ -234,6 +234,8 @@ Read [architecture](docs/architecture.md) and [contribution guidance](CONTRIBUTI
 before changing plugin discovery or the serving contract.
 See [numerical transport](docs/numerical-transport.md) for the pinned vLLM worker
 boundary and the manual checkpoint-free multi-request probe.
+TimesFM, Toto, and Moirai also expose experimental scheduled concurrency through
+`serve --max-num-seqs 3`; the default is one, and forecasts still execute separately.
 
 Agents should start with [AGENTS.md](AGENTS.md); `CLAUDE.md` imports the same
 conventions. GitHub Actions runs basic Python lint, CPU tests, shell syntax

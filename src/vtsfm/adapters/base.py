@@ -10,6 +10,7 @@ FORECAST_VLLM_ARGS = (
     '--no-enable-prefix-caching', '--skip-tokenizer-init', '--enable-mm-embeds',
     '--dtype', 'float32', '--max-model-len', '8192',
     '--max-num-batched-tokens', '8192', '--max-num-seqs', '1',
+    '--worker-cls', 'vtsfm.worker.ForecastWorker',
 )
 
 

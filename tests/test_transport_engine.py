@@ -176,7 +176,8 @@ def test_production_wrapper_rejects_multiple_forecasts_before_running_model():
     import torch
     from torch import nn
     from vtsfm.adapters.multimodal import ForecastDataParser, ForecastMultiModalProcessor
-    from vtsfm.adapters.pooling import ForecastModel
+    from vtsfm.adapters.pooling import ForecastModel, ForecastPooler
+    from vtsfm.adapters.timesfm25.spec import FORECAST_SETTINGS
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
     # Exercise real parser/processor/reducer with a tiny deterministic runtime.
@@ -201,8 +202,10 @@ def test_production_wrapper_rejects_multiple_forecasts_before_running_model():
 
     model = ForecastModel.__new__(ForecastModel)
     nn.Module.__init__(model)
+    model.pooler = ForecastPooler()
+    model.settings = FORECAST_SETTINGS
     model.runtime = SimpleNamespace(forecast=forecast)
-    with pytest.raises(ValueError, match='routing is not enabled'):
+    with pytest.raises(ValueError, match='routing worker'):
         model(torch.tensor([1, 1]), torch.tensor([0, 0]), **transported)
     assert calls == []
     single = GPUModelRunner._extract_mm_kwargs(runner,

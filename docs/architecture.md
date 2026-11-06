@@ -113,9 +113,11 @@ IDs do not enable cross-request grouped execution in the Chronos-2 runtime.
 Separately, the newer adapters' [numerical transport](numerical-transport.md)
 uses batched multimodal fields to preserve multiple request payloads and stable
 IDs at the pinned vLLM worker boundary. A checkpoint-free engine probe checks
-this path. Normal serving retains `max_num_seqs=1` and explicitly rejects
-multiple forecasts until pooled-output routing is implemented; this transport
-does not collate requests for model execution.
+this path. A pinned worker subclass resolves actual slot identities from cached
+feature metadata, and the model/pooler route variable-size forecasts accordingly.
+Normal serving retains `max_num_seqs=1`; the newer adapters expose experimental
+concurrency with `--max-num-seqs`. Each forecast still executes separately;
+collated numerical execution remains future work.
 
 The [prepared execution contract](execution-contract.md) binds a plan to validated
 input tensors and defines row-aligned results, per-request splitting, and

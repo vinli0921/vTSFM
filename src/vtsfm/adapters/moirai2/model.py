@@ -4,6 +4,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vtsfm.adapters.multimodal import ForecastInputBuilder, ForecastMultiModalProcessor, ForecastProcessingInfo
 from vtsfm.adapters.pooling import ForecastModel
 from .runtime import MoiraiRuntime
+from .spec import FORECAST_SETTINGS
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -11,3 +12,4 @@ from .runtime import MoiraiRuntime
 )
 class VTSFMMoiraiForForecasting(ForecastModel):
     runtime_class = MoiraiRuntime
+    settings = FORECAST_SETTINGS

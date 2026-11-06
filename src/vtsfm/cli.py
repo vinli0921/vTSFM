@@ -37,7 +37,7 @@ def _environment(benchmark: bool = False) -> dict[str, str]:
 
 def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
                        port: int = DEFAULT_PORT, benchmark: bool = False,
-                       adapter: str = 'chronos2'
+                       adapter: str = 'chronos2', max_num_seqs: int | None = None
                        ) -> tuple[list[str], dict[str, str]]:
     selected = get_adapter(adapter)
     if backend == 'vtsfm':
@@ -53,6 +53,12 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
     command = [str(Path(sys.executable).with_name('vllm')), 'serve', selected.model_id,
                '--revision', selected.model_revision, '--host', host, '--port', str(port),
                '--io-processor-plugin', plugin, *selected.vllm_args]
+    if max_num_seqs is not None:
+        if type(max_num_seqs) is not int or max_num_seqs < 1:
+            raise ValueError('max_num_seqs must be a positive integer')
+        if selected.name == 'chronos2' and max_num_seqs != 1:
+            raise ValueError('Concurrent forecast routing is enabled only for TimesFM, Toto, and Moirai')
+        command[command.index('--max-num-seqs') + 1] = str(max_num_seqs)
     if benchmark:
         environment['VLLM_SERVER_DEV_MODE'] = '1'
         command += ['--worker-extension-cls', 'vtsfm.benchmark_memory.MemoryMetrics']
@@ -119,6 +125,8 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument('--host', default='127.0.0.1')
     serve.add_argument('--port', type=int, default=DEFAULT_PORT)
     serve.add_argument('--benchmark', action='store_true', help='Enable local benchmark-only diagnostics')
+    serve.add_argument('--max-num-seqs', type=int,
+                       help='Scheduled forecast requests; newer adapters execute them separately (default: 1)')
     serve.add_argument('--dry-run', action='store_true', help='Print a command without starting a server')
     diagnostic = commands.add_parser('doctor', help='Check the installed environment')
     diagnostic.add_argument('--cpu', action='store_true', help='Skip imports and checks of GPU dependencies')
@@ -141,6 +149,9 @@ def main(argv: list[str] | None = None) -> int:
                   'adapter': args.adapter}
         if args.backend != 'native':
             kwargs['backend'] = args.backend
+            kwargs['max_num_seqs'] = args.max_num_seqs
+        elif args.max_num_seqs is not None:
+            raise ValueError('--max-num-seqs applies to the vLLM backend')
         command, environment = builder(**kwargs)
     except ValueError as error:
         parser.error(str(error))
