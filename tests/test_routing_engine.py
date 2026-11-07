@@ -182,7 +182,7 @@ def _encode(engine, data, prefix):
         response = processor.post_process([completed[identity]], request_id=identity)
         _check_predictions(response['predictions'], value)
         responses.append(response['predictions'])
-    assert not processor.pending
+    assert not hasattr(processor, 'pending')
     return responses
 
 
@@ -257,14 +257,17 @@ def test_scrambled_worker_slots_route_by_feature_identity_and_recover_after_bad_
     from vtsfm.adapters.multimodal import ForecastDataParser, ForecastMultiModalProcessor
     from vtsfm.adapters.timesfm25.io_processor import TimesFMIOProcessor
     from vtsfm.worker import slot_request_ids
+    from vtsfm.adapters.transport import decode_metadata
+    from vtsfm.adapters.result_transport import unpack_result
 
     cases = _cases()
     io = TimesFMIOProcessor(None, None)
     processor = object.__new__(ForecastMultiModalProcessor)
-    new, states = [], {}
+    new, states, wire_ids = [], {}, []
     for index, data in enumerate(cases):
         identity = f'original-{index}'
         prompt = io.pre_process(io.parse_data(data), request_id=identity)
+        wire_ids.append(decode_metadata(prompt['multi_modal_data']['timeseries']['request_metadata'][0])['request_id'])
         parsed = ForecastDataParser().parse_mm_data(prompt['multi_modal_data'])
         processed = processor.apply(ProcessorInputs([1], parsed), TimingContext(enabled=False))
         features = [SimpleNamespace(modality='timeseries',
@@ -275,7 +278,7 @@ def test_scrambled_worker_slots_route_by_feature_identity_and_recover_after_bad_
         pin_memory=False, requests=states, input_batch=SimpleNamespace(num_reqs=3,
         req_ids=['unrelated-internal-2', 'unrelated-internal-0', 'unrelated-internal-1']))
     transported = GPUModelRunner._extract_mm_kwargs(runner, SimpleNamespace(scheduled_new_reqs=new))
-    assert slot_request_ids(runner) == ('original-2', 'original-0', 'original-1')
+    assert slot_request_ids(runner) == tuple(wire_ids[index] for index in (2, 0, 1))
     model = RoutingProbeModel(vllm_config=SimpleNamespace(
         model_config=SimpleNamespace(hf_config=SimpleNamespace(vtsfm_config={}))))
     model.set_request_order(lambda: slot_request_ids(runner))
@@ -288,7 +291,7 @@ def test_scrambled_worker_slots_route_by_feature_identity_and_recover_after_bad_
         response = io.post_process([SimpleNamespace(outputs=SimpleNamespace(data=output))],
                                    request_id=f'original-{index}')
         _check_predictions(response['predictions'], cases[index])
-    assert model.pooler.routes is None and not io.pending
+    assert model.pooler.routes is None and not hasattr(io, 'pending')
     with pytest.raises(ValueError, match='unconsumed'):
         model.pooler(values, metadata)
 
@@ -299,7 +302,8 @@ def test_scrambled_worker_slots_route_by_feature_identity_and_recover_after_bad_
     assert model.pooler.routes is None
     model.runtime.forecast = forecast
     values = model(torch.ones(3, dtype=torch.long), torch.zeros(3, dtype=torch.long), **transported)
-    assert [tuple(output.shape) for output in model.pooler(values, metadata)] == [(3, 9, 3), (1, 9, 2), (2, 9, 5)]
+    assert [tuple(unpack_result(output)[0].shape) for output in model.pooler(values, metadata)] == [
+        (3, 9, 3), (1, 9, 2), (2, 9, 5)]
 
 
 @pytest.mark.skipif(os.environ.get('VTSFM_ROUTING_REAL_ADAPTER') not in ('timesfm25', 'toto2', 'moirai2'),
