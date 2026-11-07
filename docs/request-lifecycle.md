@@ -3,6 +3,8 @@
 TimesFM, Toto, and Moirai use stateless shared IO on **vLLM 0.33.0 Model Runner
 V1, FP32, eager execution, one GPU**. Chronos-2 retains its separate upstream
 integration. Real-checkpoint lifecycle validation currently targets TimesFM.
+TimesFM's [numerical admission limits](numerical-admission.md) apply to both
+offline and HTTP requests; direct `LLM` construction must also use 1–4 slots.
 
 ## State ownership
 

@@ -36,6 +36,7 @@ They are alternatives in this diagram, not simultaneous resident services.
 | `src/vtsfm/adapters/chronos2/` | Chronos-2 pins, launch settings, model, numerical IO, and native comparator |
 | `src/vtsfm/batching.py` | Runtime-independent reference planner for compatible prepared work and output routing |
 | `src/vtsfm/execution.py` | CPU-safe prepared tensor, capability, and result contracts for future shared execution |
+| `src/vtsfm/admission.py` | CPU-safe request/model-call limits and shared resident tensor accounting |
 | `src/vtsfm/config.py` | Shared dependency pins/defaults and compatibility aliases for Chronos-2 model pins |
 | `src/vtsfm/plugin.py` | Lazy architecture registration and adapter-selected IO factory for the `vtsfm` entry points |
 | `src/vtsfm/adapters/transport.py`, `multimodal.py` | Request-preserving raw multimodal fields; single-request model execution remains the default |
@@ -130,6 +131,10 @@ conservative model capability metadata. TimesFM implements the prepared
 executor for equal-length independent rows. The runner supplies scheduled
 requests in slot order. The shared execution helper plans batches, calls the
 executor, and splits outputs by request ID before the pooler crops each slot.
+TimesFM's [numerical admission policy](numerical-admission.md) checks request
+cost before submission, validates scheduled residency at startup, and splits
+compatible model calls by row/work budgets. The adapter owns its patch/block
+cost formula and measured ceilings; other model families do not inherit them.
 
 ## Benchmark contract
 

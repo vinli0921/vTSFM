@@ -15,6 +15,7 @@ from vtsfm.config import (
     DEFAULT_PORT, FORECAST_BATCH_ROWS_ENV, MAX_FORECAST_BATCH_ROWS, PYTHON_VERSION, serving_pins,
 )
 from vtsfm.adapters import get_adapter, list_adapters
+from vtsfm.admission import FORECAST_LIMITS_ENV, resolve_limits
 
 
 def _check_address(host: str, port: int, benchmark: bool) -> None:
@@ -37,7 +38,8 @@ def _environment(benchmark: bool = False) -> dict[str, str]:
 def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
                        port: int = DEFAULT_PORT, benchmark: bool = False,
                        adapter: str = 'chronos2', max_num_seqs: int | None = None,
-                       forecast_batch_rows: int | None = None
+                       forecast_batch_rows: int | None = None,
+                       forecast_limits: str | None = None,
                        ) -> tuple[list[str], dict[str, str]]:
     selected = get_adapter(adapter)
     if backend == 'vtsfm':
@@ -49,6 +51,7 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
     _check_address(host, port, benchmark)
     environment = _environment(benchmark)
     environment.pop(FORECAST_BATCH_ROWS_ENV, None)
+    environment.pop(FORECAST_LIMITS_ENV, None)
     environment['VLLM_PLUGINS'] = plugin
     environment['VTSFM_ADAPTER'] = selected.name
     # MRV2 does not support the plugin pooling task in the published releases.
@@ -70,6 +73,18 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
         if type(forecast_batch_rows) is not int or not 2 <= forecast_batch_rows <= MAX_FORECAST_BATCH_ROWS:
             raise ValueError(f'--forecast-batch-rows must be between 2 and {MAX_FORECAST_BATCH_ROWS}')
         environment[FORECAST_BATCH_ROWS_ENV] = str(forecast_batch_rows)
+    if selected.name == 'timesfm25' and selected.admission_limits is not None:
+        encoded = Path(forecast_limits).read_text() if forecast_limits is not None else None
+        limits = resolve_limits(selected.admission_limits, encoded)
+        slots = int(command[command.index('--max-num-seqs') + 1])
+        # TimesFM owns its model-specific cost; importing it is CPU-safe.
+        from vtsfm.adapters.timesfm25.admission import forecast_cost
+        limits.validate_launch(slots, forecast_cost(
+            limits.max_request_rows, limits.max_context, limits.max_horizon))
+        # Resolve a file once so frontend/worker see the exact same policy.
+        environment[FORECAST_LIMITS_ENV] = json.dumps(asdict(limits), separators=(',', ':'))
+    elif forecast_limits is not None:
+        raise ValueError('--forecast-limits currently supports only TimesFM')
     if benchmark:
         environment['VLLM_SERVER_DEV_MODE'] = '1'
         command += ['--worker-extension-cls', 'vtsfm.benchmark_memory.MemoryMetrics']
@@ -139,6 +154,8 @@ def main(argv: list[str] | None = None) -> int:
                        help='Maximum scheduled forecast requests (default: 1)')
     serve.add_argument('--forecast-batch-rows', type=int,
                        help='Enable experimental TimesFM batching with this fused series limit (2–16)')
+    serve.add_argument('--forecast-limits', metavar='JSON_FILE',
+                       help='Tighten TimesFM request/execution limits using a JSON policy file')
     serve.add_argument('--dry-run', action='store_true', help='Print a command without starting a server')
     diagnostic = commands.add_parser('doctor', help='Check the installed environment')
     diagnostic.add_argument('--cpu', action='store_true', help='Skip imports and checks of GPU dependencies')
@@ -163,16 +180,19 @@ def main(argv: list[str] | None = None) -> int:
             kwargs['backend'] = args.backend
             kwargs['max_num_seqs'] = args.max_num_seqs
             kwargs['forecast_batch_rows'] = args.forecast_batch_rows
+            kwargs['forecast_limits'] = args.forecast_limits
         elif args.max_num_seqs is not None:
             raise ValueError('--max-num-seqs applies to the vLLM backend')
         elif args.forecast_batch_rows is not None:
             raise ValueError('--forecast-batch-rows applies to the vLLM backend')
+        elif args.forecast_limits is not None:
+            raise ValueError('--forecast-limits applies to the vLLM backend')
         command, environment = builder(**kwargs)
-    except ValueError as error:
+    except (ValueError, OSError) as error:
         parser.error(str(error))
     if args.dry_run:
         keys = ('VTSFM_ADAPTER', 'VLLM_PLUGINS', 'VLLM_USE_V2_MODEL_RUNNER', 'VLLM_SERVER_DEV_MODE',
-                'OMP_NUM_THREADS', 'HF_HUB_DISABLE_TELEMETRY', FORECAST_BATCH_ROWS_ENV)
+                'OMP_NUM_THREADS', 'HF_HUB_DISABLE_TELEMETRY', FORECAST_BATCH_ROWS_ENV, FORECAST_LIMITS_ENV)
         print(json.dumps({'command': command, 'environment': {
             key: environment[key] for key in keys if key in environment}}, indent=2))
         return 0

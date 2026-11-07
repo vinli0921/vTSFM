@@ -124,6 +124,13 @@ for supported inputs, concurrent serving, cancellation, and the manual TimesFM
 lifecycle suite. Response metadata travels with each result; IO keeps no pending
 request map.
 
+TimesFM now enforces a measured numerical envelope: at most 16 series per
+request, context 8192, horizon 1024, and four scheduled requests. The worker
+splits compatible work within execution budgets. Use `--forecast-limits FILE`
+to tighten the policy; see [numerical admission](docs/numerical-admission.md) for
+defaults, errors, memory measurements, and the manual GPU suite. Toto/Moirai
+admission envelopes remain separate follow-up work.
+
 Toto uses Python 3.12.12 and a pinned upstream revision. Moirai keeps its
 NumPy 1.26 dependencies and explicitly overrides its Torch
 upper bound and vLLM's OpenCV requirement in `scripts/moirai2-overrides.txt`.

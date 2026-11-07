@@ -4,6 +4,7 @@ import json
 from vtsfm.adapters.base import AdapterSpec, FORECAST_VLLM_ARGS
 from vtsfm.adapters.forecast import ForecastSettings
 from vtsfm.execution import ExecutionCapabilities
+from .admission import DEFAULT_LIMITS
 
 MODEL_ID = 'google/timesfm-2.5-200m-pytorch'
 MODEL_REVISION = '1d952420fba87f3c6dee4f240de0f1a0fbc790e3'
@@ -23,6 +24,7 @@ TIMESFM25 = AdapterSpec(
         '--hf-overrides', json.dumps({'architectures': ['VTSFMTimesFMForForecasting']}),
     ),
     supports_group_attention=False,
+    admission_limits=DEFAULT_LIMITS,
     execution_capabilities=ExecutionCapabilities(
         max_context=FORECAST_SETTINGS.max_context, max_horizon=FORECAST_SETTINGS.max_horizon,
         quantiles=FORECAST_SETTINGS.quantiles, input_patch_size=32, output_block_size=128,

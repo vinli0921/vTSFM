@@ -94,3 +94,38 @@ def test_oversized_result_metadata_fails_before_engine_submission():
     data['inputs'][0]['item_id'] = 'x' * (1024 * 1024 + 1)
     with pytest.raises(ValueError):
         processor.pre_process(processor.parse_data(data))
+
+
+def test_direct_timesfm_launch_checks_limits_before_loading_model(monkeypatch):
+    from vtsfm.adapters.timesfm25.model import VTSFMTimesFMForForecasting
+
+    def forbid_model_load(*args, **kwargs):
+        pytest.fail('Unsafe launch reached checkpoint/model construction')
+
+    monkeypatch.setattr(VTSFMTimesFMForForecasting, 'runtime_class', forbid_model_load)
+    config = SimpleNamespace(scheduler_config=SimpleNamespace(max_num_seqs=5))
+    with pytest.raises(ValueError, match='scheduled requests'):
+        VTSFMTimesFMForForecasting(vllm_config=config)
+    config.scheduler_config.max_num_seqs = 4
+    monkeypatch.setenv('VTSFM_FORECAST_LIMITS', '{"max_forward_bytes":1}')
+    with pytest.raises(ValueError, match='resident bytes'):
+        VTSFMTimesFMForForecasting(vllm_config=config)
+
+
+def test_over_budget_offline_preprocessing_allocates_no_context(monkeypatch):
+    import torch
+
+    monkeypatch.setenv('VTSFM_FORECAST_LIMITS', '{"max_request_rows":1}')
+    processor = _processor()
+    data = _payload(1)
+    data['inputs'] *= 2
+
+    def forbid_allocation(*args, **kwargs):
+        pytest.fail('Rejected request allocated a context tensor')
+
+    monkeypatch.setattr(torch, 'full', forbid_allocation)
+    with pytest.raises(ValueError, match='rows'):
+        processor.parse_data(data)
+    # Direct preprocess callers receive the same guard even without parse_data.
+    with pytest.raises(ValueError, match='rows'):
+        processor.pre_process((data['inputs'], 2, [0.5]))

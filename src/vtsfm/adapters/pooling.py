@@ -12,6 +12,7 @@ from vllm.plugins.io_processors.interface import IOProcessor
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 
 from vtsfm.config import FORECAST_BATCH_ROWS_ENV, MAX_FORECAST_BATCH_ROWS
+from vtsfm.admission import FORECAST_LIMITS_ENV, forward_resident_bytes, resolve_limits
 
 from .execution_batch import execute_scheduled
 from .forecast import ForecastSettings, format_predictions, parse_request
@@ -65,9 +66,18 @@ class ForecastModel(nn.Module, IsAttentionFree, SupportsMultiModal):
     is_pooling_model = True
     packed_modules_mapping = {}
     batch_spec = None
+    admission_cost = None
 
     def __init__(self, *, vllm_config, prefix=''):
         super().__init__()
+        defaults = self.batch_spec.admission_limits if self.batch_spec is not None else None
+        self.forecast_limits = resolve_limits(defaults, os.environ.get(FORECAST_LIMITS_ENV)) if defaults else None
+        if self.forecast_limits is not None:
+            limits = self.forecast_limits
+            # Check direct LLM/vllm launches too, before loading the checkpoint.
+            slots = getattr(getattr(vllm_config, 'scheduler_config', None), 'max_num_seqs', 1)
+            limits.validate_launch(slots, self.admission_cost(
+                limits.max_request_rows, limits.max_context, limits.max_horizon))
         self.runtime = self.runtime_class(vllm_config.model_config.hf_config.vtsfm_config)
         self.model = self.runtime.model
         self.pooler = ForecastPooler()
@@ -115,9 +125,20 @@ class ForecastModel(nn.Module, IsAttentionFree, SupportsMultiModal):
                 self.pooler.profiling = True
                 return torch.zeros(length, 1, len(self.settings.quantiles), 1, device=positions.device)
             raise ValueError('Forecast placeholders do not match worker request count')
+        limits = getattr(self, 'forecast_limits', None)
+        if limits is not None:
+            costs = [self.admission_cost(len(request.item_ids), request.context.shape[1], request.horizon)
+                     for request in requests]
+            # Frontend admission + startup slot checks guarantee these bounds.
+            # These assertions protect internal callers, not normal overload handling.
+            for cost in costs:
+                limits.validate_request(cost)
+            if len(requests) > limits.max_scheduled_requests or forward_resident_bytes(costs) > limits.max_forward_bytes:
+                raise ValueError('Scheduled forecast inputs exceed the configured resident envelope')
         if self.forecast_batch_rows and len(requests) > 1:
             forecasts = execute_scheduled(self.runtime, self.batch_spec, requests,
-                                          self.forecast_batch_rows, self.forecast_batch_trace)
+                                          self.forecast_batch_rows, self.forecast_batch_trace,
+                                          limits=limits, cost_for_shape=self.admission_cost)
         else:
             forecasts = (self.runtime.forecast(request.context, request.horizon) for request in requests)
         outputs = []
@@ -144,12 +165,27 @@ class ForecastModel(nn.Module, IsAttentionFree, SupportsMultiModal):
 
 class ForecastIOProcessor(IOProcessor):
     settings: ForecastSettings
+    admission_spec = None
+    admission_cost = None
+
+    def __init__(self, vllm_config, renderer):
+        super().__init__(vllm_config, renderer)
+        defaults = self.admission_spec.admission_limits if self.admission_spec is not None else None
+        self.forecast_limits = resolve_limits(defaults, os.environ.get(FORECAST_LIMITS_ENV)) if defaults else None
+
+    def _check_limits(self, inputs, horizon):
+        if self.forecast_limits is not None:
+            self.forecast_limits.validate_request(self.admission_cost(
+                len(inputs), max(len(item['target']) for item in inputs), horizon))
 
     def parse_data(self, data):
-        return parse_request(data, self.settings)
+        parsed = parse_request(data, self.settings)
+        self._check_limits(parsed[0], parsed[1])
+        return parsed
 
     def pre_process(self, prompt, request_id=None, **kwargs):
         inputs, horizon, levels = prompt
+        self._check_limits(inputs, horizon)
         item_ids = [item.get('item_id') for item in inputs]
         # Reject oversized output metadata here, before submitting GPU work.
         encode_result_metadata(item_ids, horizon, levels)
