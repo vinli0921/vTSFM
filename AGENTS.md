@@ -127,6 +127,13 @@ Use the checkout's environments, not global Python packages:
   not load real models or replace model parity, accuracy, or performance checks.
   Do not add a noisy performance merge threshold or silently loosen parity
   tolerances to make an optimization pass.
+- Shared IO has no pending map; output metadata travels in the versioned result
+  tensor. See [request lifecycle](docs/request-lifecycle.md). For lifecycle
+  changes, run the opt-in TimesFM offline/HTTP failure and cancellation suite
+  on the idle GPU. Keep its test-only fault hooks out of normal serving. V1
+  worker model exceptions can be engine-fatal; distinguish clean restart from
+  recovery within a healthy engine. Offline synchronous `LLM` calls are
+  sequential; concurrent clients use the HTTP/async path.
 
 Keep handoffs short: what changed, why, checks run, and remaining limitations.
 These conventions take inspiration from [vLLM's agent guide](https://github.com/vllm-project/vllm/blob/main/AGENTS.md),

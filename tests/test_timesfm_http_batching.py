@@ -154,6 +154,10 @@ def test_real_timesfm_http_requests_share_model_execution(tmp_path):
                 _compare(future.result(timeout=60), isolated[label], cases[label])
         assert trace.exists(), f'No worker executions recorded; see {log}'
         events = [json.loads(line) for line in trace.read_text().splitlines()]
+        # Wire IDs are unique per invocation even for reused HTTP headers.
+        # This test deliberately assigns distinct headers for trace attribution.
+        for event in events:
+            event['request_ids'] = [identity.rsplit(':', 1)[0] for identity in event['request_ids']]
 
     by_id = {request_id: label for wave in completed.values() for request_id, label, _ in wave}
     relevant = [event for event in events if any(rid in by_id for rid in event['request_ids'])]

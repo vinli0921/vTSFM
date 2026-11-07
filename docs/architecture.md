@@ -39,6 +39,7 @@ They are alternatives in this diagram, not simultaneous resident services.
 | `src/vtsfm/config.py` | Shared dependency pins/defaults and compatibility aliases for Chronos-2 model pins |
 | `src/vtsfm/plugin.py` | Lazy architecture registration and adapter-selected IO factory for the `vtsfm` entry points |
 | `src/vtsfm/adapters/transport.py`, `multimodal.py` | Request-preserving raw multimodal fields; single-request model execution remains the default |
+| `src/vtsfm/adapters/result_transport.py` | Versioned self-describing forecast results; shared IO needs no pending metadata map |
 | `src/vtsfm/cli.py` | Build commands/environments and start the selected backend without GPU imports for help |
 | `src/vtsfm/models/chronos2.py`, `src/vtsfm/io_processor.py`, `src/vtsfm/native_server.py` | Compatibility shims for the previous implementation paths |
 | `src/vtsfm/benchmark_memory.py` | Optional worker memory counters used in benchmark mode |
@@ -115,6 +116,10 @@ uses batched multimodal fields to preserve multiple request payloads and stable
 IDs at the pinned vLLM worker boundary. A checkpoint-free engine probe checks
 this path. A pinned worker subclass resolves actual slot identities from cached
 feature metadata, and the model/pooler route variable-size forecasts accordingly.
+The pooled tensor carries each request's response metadata as well as FP32
+forecast bytes. Stateless IO supports sequential offline DataPrompts and
+concurrent HTTP requests without depending on postprocessing for cleanup; see
+[request lifecycle](request-lifecycle.md).
 Normal serving uses `max_num_seqs=1`. TimesFM, Toto, and Moirai expose concurrency
 with `--max-num-seqs`. With `--forecast-batch-rows`, TimesFM can combine
 compatible requests that vLLM has already scheduled in the same worker forward.

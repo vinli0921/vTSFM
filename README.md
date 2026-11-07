@@ -118,6 +118,12 @@ quantile head, flip invariance, positivity, and crossing correction.
 Toto uses the documented 768-point block decoding setting. Moirai uses the
 upstream recursive quantile forecast unchanged.
 
+The shared IO also supports sequential offline `LLM.encode({'data': payload},
+pooling_task='plugin')` calls. See [request lifecycle](docs/request-lifecycle.md)
+for supported inputs, concurrent serving, cancellation, and the manual TimesFM
+lifecycle suite. Response metadata travels with each result; IO keeps no pending
+request map.
+
 Toto uses Python 3.12.12 and a pinned upstream revision. Moirai keeps its
 NumPy 1.26 dependencies and explicitly overrides its Torch
 upper bound and vLLM's OpenCV requirement in `scripts/moirai2-overrides.txt`.

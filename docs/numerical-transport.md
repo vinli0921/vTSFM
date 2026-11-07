@@ -29,11 +29,13 @@ different requests and copies contexts to the worker device. Metadata uses
 `keep_on_cpu=True` and is decoded without copying the numerical context back to
 the CPU.
 
-Version-1 metadata contains the request ID, item IDs, true per-series history
+Version-1 metadata contains an invocation ID, item IDs, true per-series history
 lengths, horizon, and requested quantiles. `decode_requests` validates the wire
 layout, matching row counts/lengths, and unique request IDs. It retains different
 shapes and settings without treating them as execution-compatible. Transport
-order is not a guarantee about vLLM's pooled-output slots.
+order is not a guarantee about vLLM's pooled-output slots. Every preprocessing
+call appends a UUID to its external ID (or `vtsfm` when omitted). Reusing an HTTP
+`X-Request-Id` therefore cannot collide with another numerical payload.
 
 ## Output routing
 
@@ -58,9 +60,10 @@ not edit vLLM source or replace a runner method. This bridge supports **vLLM
 3. Pads the validated outputs into one worker tensor in slot order, shaped
    `[requests, maximum_series_count, native_quantiles, maximum_horizon]`.
 
-`ForecastPooler` crops each slot back to its own variable-size tensor. Pooling
-consumes the shape layout once; it does not retain forecast tensors in a pending
-dictionary. IO selects each request's quantiles and restores its item IDs. Wrong
+`ForecastPooler` crops each slot and packs it with its response metadata into a
+versioned uint8 tensor. Pooling consumes the CPU layout/metadata once; it does
+not retain forecast tensors in a pending dictionary. The frontend has no pending
+map either: IO decodes that result, selects quantiles, and restores item IDs. Wrong
 row counts or output axes produce errors rather than another request's results.
 
 ## Current execution boundary
@@ -103,9 +106,9 @@ CUDA_VISIBLE_DEVICES=0 VTSFM_RUN_TIMESFM_BATCHING=1 PYTHONPATH=src:tests \
 The test starts a loopback server, queues distinct HTTP requests, and checks
 the worker's completed execution trace against each isolated forecast.
 
-When no request ID is supplied, preprocessing generates a transport UUID. This
-does not fix the existing `pending[None]` state or provide offline-call lifecycle
-support; that remains [issue #13](https://github.com/vinli0921/vTSFM/issues/13).
+See [request lifecycle and offline forecasts](request-lifecycle.md) for the
+result format, supported `LLM.encode` input, cancellation behavior, and manual
+TimesFM tests. No vLLM failure callback or frontend metadata registry is needed.
 
 ## Manual transport probe
 
