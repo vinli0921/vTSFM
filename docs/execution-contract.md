@@ -5,9 +5,10 @@ adapters. It imports no Torch, vLLM, NumPy, or model packages. Its validation an
 the CPU example can be used before the live worker integration exists.
 
 The current serving wrappers still call whole upstream forecasts through
-`adapters/pooling.py`. They do not yet implement this contract. Model tensor
-ports (#8–#10), transport (#6), live output routing (#7), and shared execution
-(#11) remain separate work.
+`adapters/pooling.py`. Toto implements `ForecastExecutor` for prepared batches
+of independent rows with equal true history lengths; its live serving wrapper
+calls the same tensor forecast core per request. Other model tensor ports
+(#9/#10) and shared execution (#11) remain separate work.
 
 ## Inputs, planning, and outputs
 
@@ -56,7 +57,7 @@ support:
 | Adapter | Context / horizon limit | Input patch / output block | Execution dtype |
 | --- | --- | --- | --- |
 | TimesFM 2.5 | 8192 / 1024 | 32 / 128 | FP32 |
-| Toto 2 | 8192 / 1024 | checkpoint-configured (`None`) / 768 | FP32 |
+| Toto 2 | 8192 / 1024 | 32 / 768 | FP32 |
 | Moirai 2.0 | 7168 / 1024 | checkpoint-configured (`None`) / checkpoint-configured (`None`) | FP32 |
 
 All three declare independent singleton groups, nine available quantiles
@@ -65,6 +66,14 @@ stepping. Their existing HTTP paths still accept unequal histories; these flags
 gate the new contract until adapter parity tests establish safe collation.
 Unknown patch/block sizes stay `None` until the loaded checkpoint supplies them.
 Chronos-2 has no declaration for this boundary yet.
+
+Toto's executor passes each prepared row to official `Toto2Model.forecast` as a
+separate one-variate batch element, so variate attention never mixes series.
+It zeroes unobserved values, crops padding beyond the true history, and keeps
+upstream causal scaling, block decoding with median feedback, and output
+transforms. Upstream Toto still owns its attention and KV cache; this is not
+vLLM-managed decoding. Its 32-point patch size comes from the pinned checkpoint
+config, and tests compare it with the loaded model.
 
 `PreparedRequest.workload` reports logical rows, context points, forecast values,
 and patch/block counts when sizes are known. These are dimensions, not predicted
