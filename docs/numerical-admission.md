@@ -1,7 +1,8 @@
 # TimesFM numerical admission and execution limits
 
-TimesFM forecasts occupy one vLLM placeholder token regardless of series count,
-context, or horizon. Token budgets do not bound the model's numerical work. The
+Whole TimesFM forecasts occupy one vLLM placeholder token regardless of series
+count, context, or horizon. Optional block mode uses one marker per 128-point
+forecast block. Neither marker count bounds the model's numerical work. The
 TimesFM adapter therefore applies a separate policy on vLLM 0.33.0 Model Runner
 V1, eager FP32, one GPU. Toto and Moirai do not yet declare validated admission
 policies; their measurement and enablement remain in issue #12.
@@ -100,10 +101,13 @@ allocator reservation**. The startup slot check makes this bound conservative
 for every supported mixture; no expected overload rejection is deferred until
 the live worker, where a V1 exception could terminate the engine.
 
-This is a GPU execution envelope. It does not bound the total number of queued
-CPU payloads or introduce host queue backpressure. Forecast-block scheduling,
-bounded online queues, and fairness remain in issue #15. Cancellation and
-restart semantics are described in [request lifecycle](request-lifecycle.md).
+This is a GPU execution envelope. Whole-forecast mode does not bound queued
+CPU payloads unless `--forecast-queue-limit` is set. Optional
+[forecast-block scheduling](continuous-batching.md) bounds API intake by default
+and reserves these row/work limits across **all active requests together**.
+Its persistent two-pass KV caches have a separate measured memory envelope;
+the 32 MiB staging bound excludes those caches. Cancellation and restart
+semantics are described in [request lifecycle](request-lifecycle.md).
 
 ## Measurement and reproduction
 

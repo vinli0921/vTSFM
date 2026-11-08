@@ -2,8 +2,9 @@
 
 vTSFM is a general TSFM extension for vLLM. Chronos-2's
 model and IO classes inherit the pinned community
-integration. The project owns adapter discovery, plugin registration, and a
-separate metadata batching planner; inference still delegates to upstream behavior.
+integration. The project owns adapter discovery, plugin registration, compatibility
+batching and optional TimesFM forecast-block scheduling. Execution preserves the
+pinned upstream numerical behavior.
 
 TimesFM 2.5, Toto 2 313M, and Moirai 2.0 small use `adapters/pooling.py` and
 `adapters/multimodal.py` for the same whole-forecast execution pattern. TimesFM
@@ -37,6 +38,8 @@ They are alternatives in this diagram, not simultaneous resident services.
 | `src/vtsfm/batching.py` | Runtime-independent reference planner for compatible prepared work and output routing |
 | `src/vtsfm/execution.py` | CPU-safe prepared tensor, capability, and result contracts for future shared execution |
 | `src/vtsfm/admission.py` | CPU-safe request/model-call limits and shared resident tensor accounting |
+| `src/vtsfm/stepping.py` | CPU-safe resumable adapter contract and compatible block-call planning |
+| `src/vtsfm/continuous_scheduler.py`, `block_worker.py`, `block_pooling.py` | Pinned V1 block scheduling, slot/lifecycle hooks, and active adapter state |
 | `src/vtsfm/config.py` | Shared dependency pins/defaults and compatibility aliases for Chronos-2 model pins |
 | `src/vtsfm/plugin.py` | Lazy architecture registration and adapter-selected IO factory for the `vtsfm` entry points |
 | `src/vtsfm/adapters/transport.py`, `multimodal.py` | Request-preserving raw multimodal fields; single-request model execution remains the default |
@@ -135,6 +138,10 @@ TimesFM's [numerical admission policy](numerical-admission.md) checks request
 cost before submission, validates scheduled residency at startup, and splits
 compatible model calls by row/work budgets. The adapter owns its patch/block
 cost formula and measured ceilings; other model families do not inherit them.
+The optional [continuous path](continuous-batching.md) resumes TimesFM between
+forecast blocks. vLLM schedules one marker per block and returns results only at
+completion. The adapter owns both flip-pass caches; shared policy bounds total
+active state and individual packed calls.
 
 ## Benchmark contract
 
@@ -187,7 +194,7 @@ Synthetic numerical inputs are permitted only for explicitly labeled smoke tests
 
 ## Future research boundaries
 
-Live cross-request batching, tensor packing, grouped attention kernels,
+Cross-model batching, grouped attention kernels,
 a common public numerical HTTP schema across all models, and MCP
 integration are not implemented. Keep proposed changes behind clear boundaries
 and demonstrate numerical parity before interpreting performance.

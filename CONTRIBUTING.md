@@ -10,10 +10,10 @@ remain manual. There is no required pre-commit gate.
 Start with the [architecture guide](docs/architecture.md).
 For tensor adapters and shared worker work, use the
 [prepared execution contract](docs/execution-contract.md) and its CPU example.
-Chronos-2 delegates to the pinned Chronos integration. TimesFM, Toto, and Moirai
-use whole-forecast pooling wrappers. Shared batching is a metadata planner outside
-live serving; do not describe an optimization as implemented until code,
-numerical checks, and measurements exist.
+Chronos-2 delegates to the pinned Chronos integration. TimesFM supports compatible
+whole-forecast batching and opt-in [forecast-block scheduling](docs/continuous-batching.md).
+Toto and Moirai retain whole-forecast pooling wrappers. Do not describe an
+optimization as implemented until code, numerical checks, and measurements exist.
 
 ## Local checks
 
@@ -85,8 +85,8 @@ precision/approximation or optimization changes and retain the raw evidence.
    the prepared input/output shapes when implementing `ForecastExecutor`.
    Preserve independent requests and cross-learning semantics. Keep the shared
    planner independent of model imports; model-specific target/covariate filtering
-   and kernels belong in the adapter. The planner is not yet wired into serving,
-   so planning tests alone do not validate execution or performance.
+   and kernels belong in the adapter. Live TimesFM execution uses the shared worker
+   planner; metadata planning tests alone do not validate execution or performance.
 5. Verify CPU-safe discovery and selection, invalid-name failures, preparation and
    output semantics, and numerical parity on an idle GPU with matching native
    inputs. Record model-specific launch requirements and benchmark limitations.
@@ -106,11 +106,12 @@ Report end-to-end HTTP latency and series/s with one outstanding request unless 
 separate concurrency experiment is explicitly specified. Do not call native-only
 model timings a matched comparison to the HTTP path.
 
-The current workload is sequential requests of univariate sensor/history windows
-with `cross_learning=false`. It does not validate grouped attention, covariates,
-concurrent clients, or live cross-request batching. Add separate workload and
-correctness coverage before making claims about those behaviors. A metadata
-planner change alone is not a GPU optimization or a measured speedup.
+The original benchmark uses sequential univariate sensor/history windows with
+`cross_learning=false`. The separate continuous-batching harness replays concurrent
+arrivals, and its manual TimesFM tests cover shared calls and request lifecycle.
+Neither validates grouped-attention optimizations or covariates. Add separate
+workload and correctness coverage before making those claims. A metadata planner
+change alone is not a GPU optimization or a measured speedup.
 
 Use a free GPU and port. The runner must refuse foreign GPU workloads or an
 occupied port and clean up only processes it launched. Never stop an existing

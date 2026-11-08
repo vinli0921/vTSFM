@@ -1,5 +1,6 @@
 """Carry prepared numerical requests through vLLM's multimodal interface."""
 
+import os
 import uuid
 
 import torch
@@ -11,7 +12,8 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.parse import DictEmbeddingItems, MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import BaseDummyInputsBuilder, BaseMultiModalProcessor, BaseProcessingInfo
 
-from .transport import encode_metadata
+from .transport import decode_metadata, encode_metadata
+from vtsfm.stepping import CONTINUOUS_ENV
 
 MODALITY = 'timeseries'
 
@@ -71,9 +73,11 @@ class ForecastMultiModalProcessor(BaseMultiModalProcessor):
         data = mm_items[MODALITY].get(0)
         values = {name: MultiModalFieldElem(data=data[name], field=config.field)
                   for name, config in fields().items()}
-        # One placeholder token carries a whole forecast, not a count of time steps.
+        # In block mode each marker is one forecast block, never a numeric value.
+        blocks = ((decode_metadata(data['request_metadata'])['horizon'] + 127) // 128
+                  if os.environ.get(CONTINUOUS_ENV) == '1' else 1)
         return mm_input(
-            prompt_token_ids=[1],
+            prompt_token_ids=[1] * blocks,
             mm_kwargs=MultiModalKwargsItems({MODALITY: [MultiModalKwargsItem(values)]}),
             mm_hashes={MODALITY: [uuid.uuid4().hex]},
             mm_placeholders={MODALITY: [PlaceholderRange(offset=0, length=0)]},

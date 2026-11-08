@@ -138,3 +138,22 @@ def test_limits_are_visible_in_a_cpu_safe_dry_run():
                               '--dry-run'], check=True, capture_output=True, text=True)
     limits = json.loads(json.loads(process.stdout)['environment']['VTSFM_FORECAST_LIMITS'])
     assert limits['max_scheduled_requests'] == 4 and limits['max_context'] == 8192
+
+
+def test_continuous_mode_selects_its_pinned_bridge_and_bounded_queue(monkeypatch):
+    from vtsfm.cli import build_vllm_command
+
+    command, environment = build_vllm_command(adapter='timesfm25', continuous_batching=True)
+    assert environment['VTSFM_CONTINUOUS_BATCHING'] == '1'
+    assert command[command.index('--worker-cls') + 1] == 'vtsfm.block_worker.ForecastBlockWorker'
+    assert command[command.index('--scheduler-cls') + 1] == 'vtsfm.continuous_scheduler.ForecastBlockScheduler'
+    assert command[command.index('--max-num-queued-reqs') + 1] == '16'
+    assert command[command.index('--max-num-seqs') + 1] == '4'
+    assert '--no-async-scheduling' in command and '--enable-chunked-prefill' in command
+    monkeypatch.setenv('VTSFM_CONTINUOUS_BATCHING', '1')
+    _, normal = build_vllm_command(adapter='timesfm25')
+    assert 'VTSFM_CONTINUOUS_BATCHING' not in normal
+    with pytest.raises(ValueError, match='only TimesFM'):
+        build_vllm_command(adapter='toto2', continuous_batching=True)
+    with pytest.raises(ValueError, match='positive integer'):
+        build_vllm_command(adapter='timesfm25', forecast_queue_limit=0)
