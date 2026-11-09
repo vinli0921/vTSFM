@@ -205,7 +205,7 @@ def test_model_capabilities_match_existing_supported_io_and_gate_future_batching
     with pytest.raises(ValueError):
         capabilities.validate_key(replace(key, dtype='bfloat16'))
     assert not capabilities.supports_ragged_batching
-    assert not capabilities.supports_block_stepping
+    assert capabilities.supports_block_stepping is (name == 'timesfm25')
 
 
 def test_import_and_capability_discovery_do_not_load_gpu_or_model_packages():

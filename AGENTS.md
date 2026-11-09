@@ -91,8 +91,8 @@ Use the checkout's environments, not global Python packages:
   and memory methodology. Distinguish observed, imputed, and synthetic data.
 - Describe only what is implemented and measured. TimesFM can execute compatible
   whole forecasts together and enforces a validated numerical envelope. Toto and
-  Moirai retain their upstream forecast paths. None implements forecast-block
-  continuous scheduling or a new attention kernel.
+  Moirai retain their upstream forecast paths. TimesFM can opt into forecast-block
+  scheduling; no new attention kernel or vLLM-managed KV is claimed.
 - Use an idle GPU and free port for benchmarks. Do not interrupt another
   person's workload or change shared drivers/services without authorization.
   Clean up only processes and artifacts owned by the experiment.
@@ -128,6 +128,14 @@ Use the checkout's environments, not global Python packages:
   not load real models or replace model parity, accuracy, or performance checks.
   Do not add a noisy performance merge threshold or silently loosen parity
   tolerances to make an optimization pass.
+- For [continuous batching](docs/continuous-batching.md), keep the pinned V1
+  synchronous scheduler/worker hooks isolated. Prompt markers count forecast
+  blocks, never observations. Count all active caches toward global numerical
+  capacity; vLLM owns bounded HTTP intake and cancellation. Shared AR calls need
+  matching physical cache positions and independently owned request buffers.
+  Serving changes need real staggered-arrival, completion, error/cancellation,
+  parity and peak-memory checks. Keep timing passes untraced and queue diagnostics
+  separately labeled.
 - Follow [numerical admission](docs/numerical-admission.md) for TimesFM limits.
   Request overload must fail before EngineCore submission. Split scheduled work
   within model-call budgets; validate the full resident slot envelope at startup.

@@ -23,7 +23,7 @@ result contains everything needed to format that request's forecast:
 | Alignment | Zero padding to a four-byte boundary |
 | FP32 bytes | Native forecast `[series, native_quantiles, horizon]`, without precision conversion |
 
-The pooler returns one contiguous uint8 vector per scheduled request. Small
+The whole-forecast pooler returns one contiguous uint8 vector per scheduled request. Small
 metadata moves to the forecast device; packing copies forecast bytes into that
 vector, making a strided crop contiguous when needed. vLLM performs the normal
 result copy to the CPU. Postprocessing validates the header and exact length,
@@ -41,6 +41,13 @@ collectors. Cancelling an in-flight whole-forecast request cannot preempt its
 CUDA work: that forward can finish before the abort is applied. Other requests
 retain their own results. A caller using `AsyncLLM` directly must follow vLLM's
 abort/iterator-lifecycle contract.
+
+The optional [TimesFM block path](continuous-batching.md) keeps request-local
+GPU state between iterations, returns `None` for incomplete blocks and the same
+result vector at completion. Its worker releases cancelled state before the next
+iteration, including zero-compute housekeeping. Cancellation cannot interrupt a
+CUDA block already executing. The manual block suite separately checks staggered
+completion, cancellation, queue overload and response-formatting failures.
 
 Validation, submission, and postprocessing failures are recoverable request
 errors. A model exception inside V1's worker can terminate EngineCore; the
