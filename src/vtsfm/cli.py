@@ -17,6 +17,7 @@ from vtsfm.config import (
 from vtsfm.adapters import get_adapter, list_adapters
 from vtsfm.admission import FORECAST_LIMITS_ENV, resolve_limits
 from vtsfm.stepping import CONTINUOUS_ENV
+from vtsfm.compilation import EXECUTION_ENV, EXECUTION_MODES, validate_execution
 
 
 def _check_address(host: str, port: int, benchmark: bool) -> None:
@@ -43,6 +44,7 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
                        forecast_limits: str | None = None,
                        continuous_batching: bool = False,
                        forecast_queue_limit: int | None = None,
+                       forecast_execution: str = 'eager',
                        ) -> tuple[list[str], dict[str, str]]:
     selected = get_adapter(adapter)
     if backend == 'vtsfm':
@@ -52,6 +54,9 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
     else:
         raise ValueError(f'Backend {backend!r} is unavailable for adapter {adapter!r}')
     _check_address(host, port, benchmark)
+    validate_execution(selected.name, forecast_execution, continuous=continuous_batching)
+    if forecast_execution != 'eager' and backend != 'vtsfm':
+        raise ValueError('--forecast-execution supports the vTSFM backend only')
     if continuous_batching:
         if selected.name != 'timesfm25' or backend != 'vtsfm':
             raise ValueError('Forecast-block continuous batching currently supports only TimesFM/vtsfm')
@@ -64,6 +69,13 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
     environment.pop(FORECAST_BATCH_ROWS_ENV, None)
     environment.pop(FORECAST_LIMITS_ENV, None)
     environment.pop(CONTINUOUS_ENV, None)
+    environment.pop(EXECUTION_ENV, None)
+    if forecast_execution == 'compile':
+        environment[EXECUTION_ENV] = forecast_execution
+        # These must reach the child before Torch/Triton imports. Eager mode
+        # keeps its existing environment and never inherits a compile request.
+        environment['TRITON_DEFAULT_FP_FUSION'] = '0'
+        environment['NVIDIA_TF32_OVERRIDE'] = '0'
     environment['VLLM_PLUGINS'] = plugin
     environment['VTSFM_ADAPTER'] = selected.name
     # MRV2 does not support the plugin pooling task in the published releases.
@@ -181,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
                        help='Enable experimental TimesFM forecast-block scheduling (default: 4 slots, 16 fused rows)')
     serve.add_argument('--forecast-queue-limit', type=int,
                        help='Maximum TimesFM HTTP requests waiting/running (block mode default: 16; overflow: 503)')
+    serve.add_argument('--forecast-execution', choices=EXECUTION_MODES, default='eager',
+                       help='Opt-in guarded neural compilation; current-stack GPU validation pending')
     serve.add_argument('--dry-run', action='store_true', help='Print a command without starting a server')
     diagnostic = commands.add_parser('doctor', help='Check the installed environment')
     diagnostic.add_argument('--cpu', action='store_true', help='Skip imports and checks of GPU dependencies')
@@ -208,6 +222,7 @@ def main(argv: list[str] | None = None) -> int:
             kwargs['forecast_limits'] = args.forecast_limits
             kwargs['continuous_batching'] = args.continuous_batching
             kwargs['forecast_queue_limit'] = args.forecast_queue_limit
+            kwargs['forecast_execution'] = args.forecast_execution
         elif args.max_num_seqs is not None:
             raise ValueError('--max-num-seqs applies to the vLLM backend')
         elif args.forecast_batch_rows is not None:
@@ -216,13 +231,15 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError('--forecast-limits applies to the vLLM backend')
         elif args.continuous_batching or args.forecast_queue_limit is not None:
             raise ValueError('Forecast-block and queue settings apply to the vLLM backend')
+        elif args.forecast_execution != 'eager':
+            raise ValueError('--forecast-execution applies to the vLLM backend')
         command, environment = builder(**kwargs)
     except (ValueError, OSError) as error:
         parser.error(str(error))
     if args.dry_run:
         keys = ('VTSFM_ADAPTER', 'VLLM_PLUGINS', 'VLLM_USE_V2_MODEL_RUNNER', 'VLLM_SERVER_DEV_MODE',
                 'OMP_NUM_THREADS', 'HF_HUB_DISABLE_TELEMETRY', FORECAST_BATCH_ROWS_ENV, FORECAST_LIMITS_ENV,
-                CONTINUOUS_ENV)
+                CONTINUOUS_ENV, EXECUTION_ENV, 'TRITON_DEFAULT_FP_FUSION', 'NVIDIA_TF32_OVERRIDE')
         print(json.dumps({'command': command, 'environment': {
             key: environment[key] for key in keys if key in environment}}, indent=2))
         return 0

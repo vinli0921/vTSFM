@@ -6,6 +6,7 @@ from toto2 import Toto2Model
 from toto2.configuration import Toto2ModelConfig
 
 from vtsfm.execution import ExecutionResult, PreparedBatch
+from vtsfm.compilation import configure_compilation
 
 from .spec import DECODE_BLOCK_SIZE, FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TOTO2
 
@@ -13,6 +14,7 @@ from .spec import DECODE_BLOCK_SIZE, FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION
 class TotoRuntime:
     def __init__(self, config):
         self.model = Toto2Model(Toto2ModelConfig(**config))
+        configure_compilation(self, 'toto2')
 
     @torch.inference_mode()
     def forecast(self, context, horizon):

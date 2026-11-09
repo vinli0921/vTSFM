@@ -6,6 +6,7 @@ from timesfm.torch.util import revin
 from torch.nn import functional as F
 
 from vtsfm.execution import ExecutionResult, PreparedBatch
+from vtsfm.compilation import configure_compilation
 
 from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TIMESFM25
 
@@ -13,6 +14,7 @@ from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TIMESFM25
 class TimesFMRuntime:
     def __init__(self, config):
         self.model = timesfm.TimesFM_2p5_200M_torch(torch_compile=False).model
+        configure_compilation(self, 'timesfm25')
 
     @torch.inference_mode()
     def forecast(self, context, horizon):

@@ -2,11 +2,13 @@
 
 import torch
 from uni2ts.model.moirai2 import Moirai2Forecast, Moirai2Module
+from vtsfm.compilation import configure_compilation
 
 
 class MoiraiRuntime:
     def __init__(self, config):
         self.model = Moirai2Module(**config)
+        configure_compilation(self, 'moirai2')
 
     def forecast(self, context, horizon):
         # The official predict API takes NumPy histories and returns NumPy forecasts.

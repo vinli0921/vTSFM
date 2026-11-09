@@ -175,6 +175,11 @@ pre-merge evidence.
 
 ## Run a comparison
 
+The initial [guarded neural compilation draft](docs/compiled-execution.md) is
+opt-in with `--forecast-execution compile` for TimesFM, Toto and Moirai. It keeps
+native eager boundaries and requires current-stack GPU qualification; no serving
+speedup is claimed. Normal eager execution remains the default.
+
 Benchmarks require exclusive access to the selected GPU and a free port. The
 runner refuses occupied resources, launches its own servers sequentially, and
 cleans up only children it owns. It never stops another person's service. Stop
