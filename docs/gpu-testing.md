@@ -5,9 +5,10 @@ Modal for relevant, trusted same-repository pull requests, including drafts.
 Maintainers can also select **Run workflow**. The existing CPU workflow continues
 to run on pushes and pull requests. No always-on GPU VM is needed.
 
-This initial suite covers the prepared execution contract, planner, and CUDA
-tensor routing. It runs `tests/test_cuda_contract.py`, `tests/test_execution.py`,
-and `tests/test_batching.py`. It does not download checkpoints, run the vLLM
+This suite covers the prepared execution contract, planner, CUDA tensor routing,
+and the stateless forecast result format. It runs `tests/test_cuda_contract.py`,
+`tests/test_execution.py`, `tests/test_batching.py`, and
+`tests/test_result_transport.py`. It does not download checkpoints, run the vLLM
 server, measure forecast accuracy, or produce performance baselines. Passing it
 does not verify the driver on the team's separate GPU VM; run that machine's
 health check after boot and before experiments. Full-model serving/parity,
@@ -16,7 +17,7 @@ idle, suitably sized GPU (the reference baseline uses an A100).
 
 Automatic runs are limited to changes in the planner, prepared execution
 contract, adapter metadata used by that contract, its fake adapter example,
-the three selected test files, Modal runner/setup tests, or their workflow and
+pooling/result transport, the selected test files, Modal runner/setup tests, or their workflow and
 dependency configuration. The exact filters live in
 [`gpu-tests.yml`](../.github/workflows/gpu-tests.yml). PRs changing only documentation
 or unrelated model code do not trigger this suite. There is no GPU `push`

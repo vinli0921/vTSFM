@@ -39,6 +39,7 @@ They are alternatives in this diagram, not simultaneous resident services.
 | `src/vtsfm/config.py` | Shared dependency pins/defaults and compatibility aliases for Chronos-2 model pins |
 | `src/vtsfm/plugin.py` | Lazy architecture registration and adapter-selected IO factory for the `vtsfm` entry points |
 | `src/vtsfm/adapters/transport.py`, `multimodal.py` | Request-preserving raw multimodal fields; single-request model execution remains the default |
+| `src/vtsfm/adapters/result_transport.py` | Versioned self-describing forecast results; shared IO needs no pending metadata map |
 | `src/vtsfm/cli.py` | Build commands/environments and start the selected backend without GPU imports for help |
 | `src/vtsfm/models/chronos2.py`, `src/vtsfm/io_processor.py`, `src/vtsfm/native_server.py` | Compatibility shims for the previous implementation paths |
 | `src/vtsfm/benchmark_memory.py` | Optional worker memory counters used in benchmark mode |
@@ -106,25 +107,29 @@ use the resulting compatibility keys, row counts, and group boundaries; it canno
 infer those numerical semantics. Attention kernels and other model execution
 optimizations likewise belong inside the relevant adapter.
 
-The planner is a CPU-testable reference for later scheduler/worker integration.
-It is not connected to the vLLM serving path and adds no queue admission, tensor
-packing, GPU execution, or attention kernels. Its group
-IDs do not enable cross-request grouped execution in the Chronos-2 runtime.
+The planner produces CPU-testable metadata. The experimental TimesFM serving
+path feeds its plans into the adapter's prepared executor. Queue admission and
+attention kernels have separate boundaries.
 
 Separately, the newer adapters' [numerical transport](numerical-transport.md)
 uses batched multimodal fields to preserve multiple request payloads and stable
 IDs at the pinned vLLM worker boundary. A checkpoint-free engine probe checks
 this path. A pinned worker subclass resolves actual slot identities from cached
 feature metadata, and the model/pooler route variable-size forecasts accordingly.
-Normal serving retains `max_num_seqs=1`; the newer adapters expose experimental
-concurrency with `--max-num-seqs`. Each forecast still executes separately;
-collated numerical execution remains future work.
+The pooled tensor carries each request's response metadata as well as FP32
+forecast bytes. Stateless IO supports sequential offline DataPrompts and
+concurrent HTTP requests without depending on postprocessing for cleanup; see
+[request lifecycle](request-lifecycle.md).
+Normal serving uses `max_num_seqs=1`. TimesFM, Toto, and Moirai expose concurrency
+with `--max-num-seqs`. With `--forecast-batch-rows`, TimesFM can combine
+compatible requests that vLLM has already scheduled in the same worker forward.
 
 The [prepared execution contract](execution-contract.md) binds a plan to validated
 input tensors and defines row-aligned results, per-request splitting, and
 conservative model capability metadata. TimesFM implements the prepared
-executor for equal-length independent rows. The live worker uses the same
-TimesFM tensor forecast core for each scheduled request.
+executor for equal-length independent rows. The runner supplies scheduled
+requests in slot order. The shared execution helper plans batches, calls the
+executor, and splits outputs by request ID before the pooler crops each slot.
 
 ## Benchmark contract
 

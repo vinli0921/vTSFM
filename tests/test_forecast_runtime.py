@@ -77,10 +77,13 @@ def test_pooling_matches_official_forecast(monkeypatch):
     assert transported['prompt_token_ids'] == [1]
     output = wrapper(torch.tensor([1]), torch.tensor([0]), **transported['mm_kwargs'].get_data())
     np.testing.assert_allclose(output[0].cpu().numpy(), expected, rtol=1e-4, atol=1e-4)
-    response = io.post_process([SimpleNamespace(outputs=SimpleNamespace(data=output))], request_id='smoke')
+    pooling_metadata = SimpleNamespace(pooling_params=[None], prompt_lens=torch.ones(1, dtype=torch.long),
+        get_pooling_cursor=lambda: SimpleNamespace(num_scheduled_tokens_cpu=torch.ones(1, dtype=torch.long)))
+    pooled, = wrapper.pooler(output, pooling_metadata)
+    response = io.post_process([SimpleNamespace(outputs=SimpleNamespace(data=pooled))], request_id='smoke')
     assert [row['item_id'] for row in response['predictions']] == ['0', '1']
     assert len(response['predictions'][0]['0.5']) == horizon
-    assert not io.pending
+    assert not hasattr(io, 'pending')
     dummy = processor.get_dummy_mm_inputs({'timeseries': 1})
     tokens = torch.tensor(dummy['prompt_token_ids'])
     assert wrapper(tokens, torch.zeros_like(tokens), **dummy['mm_kwargs'].get_data()).shape == (8192, 1, 9, 1)

@@ -11,7 +11,9 @@ from pathlib import Path
 import platform
 import sys
 
-from vtsfm.config import DEFAULT_PORT, PYTHON_VERSION, serving_pins
+from vtsfm.config import (
+    DEFAULT_PORT, FORECAST_BATCH_ROWS_ENV, MAX_FORECAST_BATCH_ROWS, PYTHON_VERSION, serving_pins,
+)
 from vtsfm.adapters import get_adapter, list_adapters
 
 
@@ -34,7 +36,8 @@ def _environment(benchmark: bool = False) -> dict[str, str]:
 
 def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
                        port: int = DEFAULT_PORT, benchmark: bool = False,
-                       adapter: str = 'chronos2', max_num_seqs: int | None = None
+                       adapter: str = 'chronos2', max_num_seqs: int | None = None,
+                       forecast_batch_rows: int | None = None
                        ) -> tuple[list[str], dict[str, str]]:
     selected = get_adapter(adapter)
     if backend == 'vtsfm':
@@ -45,6 +48,7 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
         raise ValueError(f'Backend {backend!r} is unavailable for adapter {adapter!r}')
     _check_address(host, port, benchmark)
     environment = _environment(benchmark)
+    environment.pop(FORECAST_BATCH_ROWS_ENV, None)
     environment['VLLM_PLUGINS'] = plugin
     environment['VTSFM_ADAPTER'] = selected.name
     # MRV2 does not support the plugin pooling task in the published releases.
@@ -58,6 +62,14 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
         if selected.name == 'chronos2' and max_num_seqs != 1:
             raise ValueError('Concurrent forecast routing is enabled only for TimesFM, Toto, and Moirai')
         command[command.index('--max-num-seqs') + 1] = str(max_num_seqs)
+    if forecast_batch_rows is not None:
+        if selected.name != 'timesfm25' or backend != 'vtsfm':
+            raise ValueError('Forecast batching currently supports only TimesFM through vTSFM')
+        if max_num_seqs is None or max_num_seqs < 2:
+            raise ValueError('Forecast batching requires --max-num-seqs of at least 2')
+        if type(forecast_batch_rows) is not int or not 2 <= forecast_batch_rows <= MAX_FORECAST_BATCH_ROWS:
+            raise ValueError(f'--forecast-batch-rows must be between 2 and {MAX_FORECAST_BATCH_ROWS}')
+        environment[FORECAST_BATCH_ROWS_ENV] = str(forecast_batch_rows)
     if benchmark:
         environment['VLLM_SERVER_DEV_MODE'] = '1'
         command += ['--worker-extension-cls', 'vtsfm.benchmark_memory.MemoryMetrics']
@@ -124,7 +136,9 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument('--port', type=int, default=DEFAULT_PORT)
     serve.add_argument('--benchmark', action='store_true', help='Enable local benchmark-only diagnostics')
     serve.add_argument('--max-num-seqs', type=int,
-                       help='Scheduled forecast requests; newer adapters execute them separately (default: 1)')
+                       help='Maximum scheduled forecast requests (default: 1)')
+    serve.add_argument('--forecast-batch-rows', type=int,
+                       help='Enable experimental TimesFM batching with this fused series limit (2–16)')
     serve.add_argument('--dry-run', action='store_true', help='Print a command without starting a server')
     diagnostic = commands.add_parser('doctor', help='Check the installed environment')
     diagnostic.add_argument('--cpu', action='store_true', help='Skip imports and checks of GPU dependencies')
@@ -148,14 +162,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.backend != 'native':
             kwargs['backend'] = args.backend
             kwargs['max_num_seqs'] = args.max_num_seqs
+            kwargs['forecast_batch_rows'] = args.forecast_batch_rows
         elif args.max_num_seqs is not None:
             raise ValueError('--max-num-seqs applies to the vLLM backend')
+        elif args.forecast_batch_rows is not None:
+            raise ValueError('--forecast-batch-rows applies to the vLLM backend')
         command, environment = builder(**kwargs)
     except ValueError as error:
         parser.error(str(error))
     if args.dry_run:
         keys = ('VTSFM_ADAPTER', 'VLLM_PLUGINS', 'VLLM_USE_V2_MODEL_RUNNER', 'VLLM_SERVER_DEV_MODE',
-                'OMP_NUM_THREADS', 'HF_HUB_DISABLE_TELEMETRY')
+                'OMP_NUM_THREADS', 'HF_HUB_DISABLE_TELEMETRY', FORECAST_BATCH_ROWS_ENV)
         print(json.dumps({'command': command, 'environment': {
             key: environment[key] for key in keys if key in environment}}, indent=2))
         return 0

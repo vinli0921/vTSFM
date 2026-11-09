@@ -72,3 +72,19 @@ def test_chronos_keeps_single_request_baseline():
     from vtsfm.cli import build_vllm_command
     with pytest.raises(ValueError, match='only for'):
         build_vllm_command(adapter='chronos2', max_num_seqs=3)
+
+
+def test_forecast_batching_is_opt_in_and_requires_timesfm_worker_slots(monkeypatch):
+    from vtsfm.cli import build_vllm_command
+
+    monkeypatch.setenv('VTSFM_FORECAST_BATCH_ROWS', '8')
+    _, normal = build_vllm_command(adapter='timesfm25', max_num_seqs=4)
+    assert 'VTSFM_FORECAST_BATCH_ROWS' not in normal
+    _, enabled = build_vllm_command(adapter='timesfm25', max_num_seqs=4, forecast_batch_rows=8)
+    assert enabled['VTSFM_FORECAST_BATCH_ROWS'] == '8'
+    with pytest.raises(ValueError, match='--max-num-seqs'):
+        build_vllm_command(adapter='timesfm25', forecast_batch_rows=8)
+    with pytest.raises(ValueError, match='TimesFM'):
+        build_vllm_command(adapter='toto2', max_num_seqs=4, forecast_batch_rows=8)
+    with pytest.raises(ValueError, match='2 and 16'):
+        build_vllm_command(adapter='timesfm25', max_num_seqs=4, forecast_batch_rows=17)
