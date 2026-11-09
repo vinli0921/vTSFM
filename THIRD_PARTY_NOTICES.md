@@ -54,6 +54,14 @@ The TimesFM adapter follows the preprocessing and postprocessing in Google's
 
 ## Other runtime dependencies
 
+The optional conformal-calibration integration adapts the sliding-origin loop
+from [sktime 1.2.0](https://github.com/sktime/sktime/blob/v1.2.0/sktime/forecasting/conformal.py),
+copyright The sktime developers, BSD-3-Clause. Its copyright, conditions and
+disclaimer are retained in `src/vtsfm/recipes/conformal.py`. The interval estimator
+itself remains an installed dependency. The recipe entry point follows
+[AssetOpsBench composition.py](https://github.com/IBM/AssetOpsBench/blob/e844f6468c6c68b328022e7ca8e31da140842cc7/src/servers/tsfm/engine/composition.py),
+under Apache-2.0; only the calibration estimator is replaced.
+
 vLLM, PyTorch, Transformers, NumPy, FastAPI, and other installed packages ship their
 own license information. Consult the installed distributions and upstream license
 files when redistributing an environment. GPU drivers and CUDA components have

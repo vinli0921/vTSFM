@@ -1,0 +1,107 @@
+# Adapted from sktime 1.2.0's conformal calibration loop.
+# Source: sktime/forecasting/conformal.py (authors fkiraly and bethrice44).
+# BSD 3-Clause License
+#
+# Copyright (c) 2019 - present, The sktime developers.
+#
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+# * Redistributions of source code must retain the above copyright notice, this
+#   list of conditions and the following disclaimer.
+#
+# * Redistributions in binary form must reproduce the above copyright notice,
+#   this list of conditions and the following disclaimer in the documentation
+#   and/or other materials provided with the distribution.
+#
+# * Neither the name of the copyright holder nor the names of its
+#   contributors may be used to endorse or promote products derived from
+#   this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#
+
+
+"""Bounded calibration batches for sktime's existing interval calculations.
+
+Only the sliding-origin forecast loop changes. sktime retains interval quantiles,
+coverage, the final fitted forecast, and its signed-residual convention.
+"""
+
+import numpy as np
+import pandas as pd
+from sktime.datatypes import convert_to
+from sktime.forecasting.conformal import ConformalIntervals
+
+
+class BatchedConformalIntervals(ConformalIntervals):
+    """Use an explicit point-forecast batch callback during initial calibration.
+
+    ``batch_predict(forecasters, future_indexes)`` receives fitted, independent clones
+    and their original future indexes. It must return one point-forecast Series
+    per clone, with exactly the target index. Contexts and horizons can differ;
+    the callback owns any model-specific collation or grouping restrictions.
+    """
+
+    def __init__(self, forecaster, batch_predict, batch_size=64, method='empirical',
+                 initial_window=None, sample_frac=None, verbose=False, n_jobs=None):
+        if not callable(batch_predict):
+            raise TypeError('batch_predict must be callable')
+        if type(batch_size) is not int or not 1 <= batch_size <= 256:
+            raise ValueError('batch_size must be an integer in [1,256]')
+        if sample_frac is not None:
+            raise ValueError('Batched calibration does not support sampled origins')
+        self.batch_predict = batch_predict
+        self.batch_size = batch_size
+        super().__init__(forecaster=forecaster, method=method,
+                         initial_window=initial_window, sample_frac=sample_frac,
+                         verbose=verbose, n_jobs=n_jobs)
+        self.set_tags(**{'capability:update': False})
+
+    def _update(self, y, X=None, update_params=True):
+        raise NotImplementedError('Batched conformal updates have not been implemented')
+
+    def _compute_sliding_residuals(self, y, X, forecaster, initial_window,
+                                   sample_frac, update=False):
+        if X is not None or update or sample_frac is not None:
+            raise ValueError('Batched calibration supports initial univariate fits without X or sampling')
+        if isinstance(y.index, pd.MultiIndex):
+            raise ValueError('Batched calibration requires one univariate series')
+        y = convert_to(y, 'pd.Series')
+        first = self._parse_initial_window(y, initial_window)
+        index = y.iloc[first:].index
+        residuals = pd.DataFrame(index=index, columns=index, dtype=float)
+
+        for start in range(first, len(y), self.batch_size):
+            origins = range(start, min(start + self.batch_size, len(y)))
+            clones, targets = [], []
+            for origin in origins:
+                target = y.iloc[origin:]
+                fitted = forecaster.clone().fit(y.iloc[:origin], fh=target.index)
+                clones.append(fitted)
+                targets.append(target)
+            predictions = tuple(self.batch_predict(tuple(clones), tuple(target.index for target in targets)))
+            if len(predictions) != len(clones):
+                raise ValueError('Calibration batch must return exactly one forecast per origin')
+            for origin, fitted, target, prediction in zip(origins, clones, targets, predictions):
+                if (not isinstance(prediction, pd.Series)
+                        or not prediction.index.equals(target.index)
+                        or not np.isfinite(prediction.to_numpy(dtype=float)).all()):
+                    raise ValueError('Calibration forecast must be finite and preserve the target index')
+                residuals.loc[y.index[origin], target.index] = (
+                    target.to_numpy(dtype=float) - prediction.to_numpy(dtype=float))
+                # Retain the same per-origin fitted objects as sktime. Updates
+                # are intentionally unsupported until their extension is batched.
+                self.forecasters_.append({'id': str(y.index[origin]), 'forecaster': fitted})
+        return residuals
