@@ -251,11 +251,17 @@ class NativeForecaster:
                     horizon=horizon, decode_block_size=768)[:, :, 0, :].permute(1, 0, 2)
                 values = values.cpu().numpy()
             else:
-                runner = self.forecast_class(
-                    module=reference, prediction_length=horizon, context_length=context_length,
-                    target_dim=1, feat_dynamic_real_dim=0, past_feat_dynamic_real_dim=0,
-                ).to(device=device, dtype=torch.float32).eval()
-                values = runner.predict(histories)
+                # Batched predict pads shorter histories by repeating their first
+                # value as observed, which changes normalization. Forecast each
+                # history length separately; equal lengths still share one call.
+                values = np.empty((len(histories), len(self.settings.quantiles), horizon), dtype=np.float32)
+                for length in sorted(set(map(len, histories))):
+                    rows = [index for index, history in enumerate(histories) if len(history) == length]
+                    runner = self.forecast_class(
+                        module=reference, prediction_length=horizon, context_length=length,
+                        target_dim=1, feat_dynamic_real_dim=0, past_feat_dynamic_real_dim=0,
+                    ).to(device=device, dtype=torch.float32).eval()
+                    values[rows] = runner.predict([histories[index] for index in rows])
         values = np.asarray(values)
         shape = (len(inputs), len(self.settings.quantiles), horizon)
         if values.shape != shape:
