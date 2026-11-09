@@ -131,8 +131,7 @@ The [prepared execution contract](execution-contract.md) binds a plan to validat
 input tensors and defines row-aligned results, per-request splitting, and
 conservative model capability metadata. 
 
-Moirai implements the prepared
-executor for equal-length independent rows, and its live worker path uses the
+Moirai implements the prepared executor for independent rows, including ragged lengths, and its live worker path uses the
 same tensor forecast core for each scheduled request.
 
 TimesFM implements the prepared

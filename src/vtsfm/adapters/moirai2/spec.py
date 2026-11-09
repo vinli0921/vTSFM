@@ -31,8 +31,9 @@ MOIRAI2 = AdapterSpec(
         max_context=FORECAST_SETTINGS.max_context, max_horizon=FORECAST_SETTINGS.max_horizon,
         quantiles=FORECAST_SETTINGS.quantiles, supports_point_forecast=False,
         input_patch_size=PATCH_SIZE, output_block_size=OUTPUT_BLOCK_SIZE,
+        supports_ragged_batching=True,
         # Horizons beyond one block recurse on all 9 quantile trajectories (9x rows).
-        # The runtime masks ragged padding, but keep this False until the GPU
-        # ragged regression in tests/test_moirai_runtime.py passes.
+        # Ragged rows are masked as padding; tests/test_moirai_runtime.py checks
+        # them against isolated official forecasts on the GPU.
     ),
 )

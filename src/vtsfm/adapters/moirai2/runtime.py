@@ -28,8 +28,7 @@ class MoiraiRuntime:
             raise ValueError('Batch key does not match the Moirai checkpoint')
         capabilities = MOIRAI2.execution_capabilities
         capabilities.validate_key(key)
-        # Equal capabilities also exclude grouped rows (multivariate input) and,
-        # until the regression passes, ragged lengths; the contract enforces both.
+        # Equal capabilities also exclude grouped rows (multivariate input).
         if batch.requests[0].capabilities != capabilities:
             raise ValueError('Prepared batch must use the Moirai execution capabilities')
         device = next(self.model.parameters()).device
@@ -63,7 +62,7 @@ class MoiraiRuntime:
         Moirai2Forecast.forward owns patching, sample/time IDs, normalization,
         the recursive quantile loop, and cropping to the horizon. This replaces
         only upstream predict's NumPy preprocessing, whose ragged left padding
-        repeats each history's first value as observed (see docs/moirai-tensor-path.md).
+        repeats each history's first value as observed.
         """
         # Zero matches what upstream gives an isolated history's partial patch,
         # and keeps NaN out of the scaler, where NaN * False would still be NaN.
