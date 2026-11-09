@@ -124,6 +124,26 @@ for supported inputs, concurrent serving, cancellation, and the manual TimesFM
 lifecycle suite. Response metadata travels with each result; IO keeps no pending
 request map.
 
+TimesFM now enforces a measured numerical envelope: at most 16 series per
+request, context 8192, horizon 1024, and four scheduled requests. The worker
+splits compatible work within execution budgets. Use `--forecast-limits FILE`
+to tighten the policy; see [numerical admission](docs/numerical-admission.md) for
+defaults, errors, memory measurements, and the manual GPU suite. Toto/Moirai
+admission envelopes remain separate follow-up work.
+
+TimesFM also supports experimental forecast-block continuous batching:
+
+```bash
+./scripts/serve.sh --adapter timesfm25 --continuous-batching --port 8001
+```
+
+Requests can join and finish between 128-point forecast blocks. The default is
+four slots, bounded active numerical work, and 16 waiting/running requests per
+API process (overflow: HTTP 503). Final responses are unchanged. See
+[continuous batching](docs/continuous-batching.md) for adapter-owned caches, the
+pinned V1 scheduler/worker hooks, parity tests, memory measurements and offered-load
+benchmarks. This mode is opt-in.
+
 Toto uses Python 3.12.12 and a pinned upstream revision. Moirai keeps its
 NumPy 1.26 dependencies and explicitly overrides its Torch
 upper bound and vLLM's OpenCV requirement in `scripts/moirai2-overrides.txt`.
@@ -234,7 +254,8 @@ and GPU checks.
 | --- | --- | --- |
 | Adapter metadata and discovery | `src/vtsfm/adapters/base.py`, `src/vtsfm/adapters/registry.py` | Describe and resolve model families without importing runtimes |
 | Chronos-2 model and numerical IO | `src/vtsfm/adapters/chronos2/` | Own model pins, preparation, group semantics, native comparison, and numerical parity |
-| Shared batching | `src/vtsfm/batching.py` | Plan compatible prepared rows and route results; execution integration remains future work |
+| Shared batching | `src/vtsfm/batching.py` | Plan compatible prepared rows and route results; used by live TimesFM whole-forecast batching |
+| Forecast-block scheduling | `src/vtsfm/stepping.py`, `continuous_scheduler.py`, `block_worker.py`, `block_pooling.py` | Schedule resumable TimesFM forecasts with request-owned state and bounded intake |
 | Plugin integration | `src/vtsfm/plugin.py`, `src/vtsfm/cli.py` | Register lazy targets and select adapter/backend settings |
 | Numerical transport and output routing | `src/vtsfm/adapters/multimodal.py`, `transport.py`, `pooling.py`, `src/vtsfm/worker.py` | Preserve request identity and crop per-request forecasts in actual worker slot order |
 | Kernel research | Adapter model attention boundary | Profile and implement family-specific kernels; not implemented yet |
