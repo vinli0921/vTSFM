@@ -7,7 +7,9 @@ the CPU example can be used before the live worker integration exists.
 TimesFM implements `ForecastExecutor` for prepared batches of independent rows
 with equal true history lengths and fully observed values after left padding.
 The live serving wrapper can use this contract for compatible HTTP requests
-scheduled together. Individual forecasts use the same tensor forecast core.
+scheduled together. Individual forecasts use the same tensor forecast core. Toto also
+implements the prepared executor for equal-length independent rows; its live
+wrapper uses the same tensor forecast core per request.
 
 ## Inputs, planning, and outputs
 
@@ -56,7 +58,7 @@ support:
 | Adapter | Context / horizon limit | Input patch / output block | Execution dtype |
 | --- | --- | --- | --- |
 | TimesFM 2.5 | 8192 / 1024 | 32 / 128 | FP32 |
-| Toto 2 | 8192 / 1024 | checkpoint-configured (`None`) / 768 | FP32 |
+| Toto 2 | 8192 / 1024 | 32 / 768 | FP32 |
 | Moirai 2.0 | 7168 / 1024 | checkpoint-configured (`None`) / checkpoint-configured (`None`) | FP32 |
 
 All three declare independent singleton groups, nine available quantiles
@@ -73,6 +75,14 @@ history lengths across requests to preserve the isolated normalization width.
 It checks finite values and the observed mask before decoding, which uses a
 scalar validation sync and rejects internal gaps. The HTTP path validates
 finite histories at request parsing.
+
+Toto's executor passes each prepared row to official `Toto2Model.forecast` as a
+separate one-variate batch element, so variate attention never mixes series.
+It zeroes unobserved values, crops padding beyond the true history, and keeps
+upstream causal scaling, block decoding with median feedback, and output
+transforms. Upstream Toto still owns its attention and KV cache; this is not
+vLLM-managed decoding. Its 32-point patch size comes from the pinned checkpoint
+config, and tests compare it with the loaded model.
 
 `PreparedRequest.workload` reports logical rows, context points, forecast values,
 and patch/block counts when sizes are known. These are dimensions, not predicted
