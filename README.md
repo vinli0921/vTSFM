@@ -7,11 +7,10 @@ IO, and serving settings.
 The `vtsfm` plugin uses the pinned Chronos-2 integration; the original `chronos2`
 plugin remains available as a comparator.
 
-Shared batching has a CPU-only reference planner for compatibility, request and
-row budgets, independent attention groups, and output routing. It is not connected
-to live serving and does not pack tensors or execute GPU work. Model-specific
-normalization, patching, covariates, group semantics, and future attention kernels
-belong to each adapter. There are no new batching or attention speedups here. The
+Shared batching uses a CPU-safe planner for compatibility, request and row
+budgets, and output routing. TimesFM can opt into executing compatible scheduled
+requests together. Model-specific normalization, patching, covariates, group
+semantics, and attention kernels belong to each adapter. The
 [historical results](docs/baselines/2026-10-20/README.md) measure the community
 Chronos plugin against native inference, before vTSFM-specific optimization.
 
@@ -113,10 +112,37 @@ the requested quantiles and item IDs, without a synthetic `mean` field. Covariat
 cross-learning, and multivariate targets are rejected. Context limits are 8192 for
 TimesFM/Toto and 7168 for Moirai, reserving room for the prediction horizon.
 
-TimesFM uses the official example's normalization, continuous quantile head,
-flip invariance, positivity, and crossing correction, with compilation disabled.
+TimesFM keeps histories and forecast tensors on the model device and uses the
+pinned upstream decoder. It preserves the reference normalization, continuous
+quantile head, flip invariance, positivity, and crossing correction.
 Toto uses the documented 768-point block decoding setting. Moirai uses the
 upstream recursive quantile forecast unchanged.
+
+The shared IO also supports sequential offline `LLM.encode({'data': payload},
+pooling_task='plugin')` calls. See [request lifecycle](docs/request-lifecycle.md)
+for supported inputs, concurrent serving, cancellation, and the manual TimesFM
+lifecycle suite. Response metadata travels with each result; IO keeps no pending
+request map.
+
+TimesFM now enforces a measured numerical envelope: at most 16 series per
+request, context 8192, horizon 1024, and four scheduled requests. The worker
+splits compatible work within execution budgets. Use `--forecast-limits FILE`
+to tighten the policy; see [numerical admission](docs/numerical-admission.md) for
+defaults, errors, memory measurements, and the manual GPU suite. Toto/Moirai
+admission envelopes remain separate follow-up work.
+
+TimesFM also supports experimental forecast-block continuous batching:
+
+```bash
+./scripts/serve.sh --adapter timesfm25 --continuous-batching --port 8001
+```
+
+Requests can join and finish between 128-point forecast blocks. The default is
+four slots, bounded active numerical work, and 16 waiting/running requests per
+API process (overflow: HTTP 503). Final responses are unchanged. See
+[continuous batching](docs/continuous-batching.md) for adapter-owned caches, the
+pinned V1 scheduler/worker hooks, parity tests, memory measurements and offered-load
+benchmarks. This mode is opt-in.
 
 Toto uses Python 3.12.12 and a pinned upstream revision. Moirai keeps its
 NumPy 1.26 dependencies and explicitly overrides its Torch
@@ -228,7 +254,8 @@ and GPU checks.
 | --- | --- | --- |
 | Adapter metadata and discovery | `src/vtsfm/adapters/base.py`, `src/vtsfm/adapters/registry.py` | Describe and resolve model families without importing runtimes |
 | Chronos-2 model and numerical IO | `src/vtsfm/adapters/chronos2/` | Own model pins, preparation, group semantics, native comparison, and numerical parity |
-| Shared batching | `src/vtsfm/batching.py` | Plan compatible prepared rows and route results; execution integration remains future work |
+| Shared batching | `src/vtsfm/batching.py` | Plan compatible prepared rows and route results; used by live TimesFM whole-forecast batching |
+| Forecast-block scheduling | `src/vtsfm/stepping.py`, `continuous_scheduler.py`, `block_worker.py`, `block_pooling.py` | Schedule resumable TimesFM forecasts with request-owned state and bounded intake |
 | Plugin integration | `src/vtsfm/plugin.py`, `src/vtsfm/cli.py` | Register lazy targets and select adapter/backend settings |
 | Numerical transport and output routing | `src/vtsfm/adapters/multimodal.py`, `transport.py`, `pooling.py`, `src/vtsfm/worker.py` | Preserve request identity and crop per-request forecasts in actual worker slot order |
 | Kernel research | Adapter model attention boundary | Profile and implement family-specific kernels; not implemented yet |
@@ -247,8 +274,10 @@ Read [architecture](docs/architecture.md) and [contribution guidance](CONTRIBUTI
 before changing plugin discovery or the serving contract.
 See [numerical transport](docs/numerical-transport.md) for the pinned vLLM worker
 boundary and the manual checkpoint-free multi-request probe.
-TimesFM, Toto, and Moirai also expose experimental scheduled concurrency through
-`serve --max-num-seqs 3`; the default is one, and forecasts still execute separately.
+TimesFM, Toto, and Moirai expose scheduled concurrency through
+`serve --max-num-seqs 3`; the default is one. For experimental TimesFM
+whole-forecast batching, combine `--max-num-seqs 4` with
+`--forecast-batch-rows 8`. See the [batching boundaries](docs/numerical-transport.md#current-execution-boundary).
 
 Agents should start with [AGENTS.md](AGENTS.md); `CLAUDE.md` imports the same
 conventions. GitHub Actions runs basic Python lint, CPU tests, shell syntax

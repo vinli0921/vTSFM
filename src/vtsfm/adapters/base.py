@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 
 from vtsfm.execution import ExecutionCapabilities
+from vtsfm.admission import ForecastLimits
 
 
 FORECAST_VLLM_ARGS = (
@@ -33,3 +34,4 @@ class AdapterSpec:
     vllm_args: tuple[str, ...]
     supports_group_attention: bool = False
     execution_capabilities: ExecutionCapabilities | None = None
+    admission_limits: ForecastLimits | None = None

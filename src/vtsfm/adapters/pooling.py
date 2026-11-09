@@ -1,5 +1,6 @@
 """Whole-forecast pooling, following the Chronos plugin's execution pattern."""
 
+import os
 import uuid
 
 import torch
@@ -10,18 +11,23 @@ from vllm.model_executor.models.interfaces_base import attn_type
 from vllm.plugins.io_processors.interface import IOProcessor
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 
+from vtsfm.config import FORECAST_BATCH_ROWS_ENV, MAX_FORECAST_BATCH_ROWS
+from vtsfm.admission import FORECAST_LIMITS_ENV, forward_resident_bytes, resolve_limits
+
+from .execution_batch import execute_scheduled
 from .forecast import ForecastSettings, format_predictions, parse_request
 from .multimodal import MODALITY
+from .result_transport import encode_result_metadata, pack_result, unpack_result
 from .transport import decode_requests, encode_metadata
 from .routing import order_requests, validate_forecast
 
 
 class ForecastPooler(Pooler):
-    """Crop padded worker rows to variable-size per-request [series, Q, H].
+    """Crop padded forecasts and attach their small, self-describing IO metadata.
 
     Forward and pooling run consecutively in the pinned eager V1 worker. Only
-    shapes are retained between them; pooling consumes these once, including on
-    failure. GPU outputs live in the returned tensor, never in a pending dict.
+    CPU metadata is retained between them; pooling consumes it once, including
+    on failure. GPU outputs live in the returned tensor, never in a pending dict.
     """
 
     def __init__(self):
@@ -47,8 +53,8 @@ class ForecastPooler(Pooler):
             raise ValueError('Whole-forecast pooling requires complete one-token requests')
         if hidden_states.shape[0] != len(routes):
             raise ValueError('Forecast output row count does not match pooling requests')
-        return [hidden_states[index, :rows, :, :horizon]
-                for index, (rows, horizon) in enumerate(routes)]
+        return [pack_result(hidden_states[index, :rows, :, :horizon], metadata)
+                for index, (rows, horizon, metadata) in enumerate(routes)]
 
 
 # Attention stays inside the upstream model; vLLM does not manage its KV cache.
@@ -59,13 +65,31 @@ class ForecastModel(nn.Module, IsAttentionFree, SupportsMultiModal):
     supports_multimodal_raw_input_only = True
     is_pooling_model = True
     packed_modules_mapping = {}
+    batch_spec = None
+    admission_cost = None
 
     def __init__(self, *, vllm_config, prefix=''):
         super().__init__()
+        from vtsfm.stepping import CONTINUOUS_ENV
+        if os.environ.get(CONTINUOUS_ENV) == '1' and (self.batch_spec is None or self.batch_spec.name != 'timesfm25'):
+            raise ValueError('Forecast-block execution currently supports only TimesFM')
+        defaults = self.batch_spec.admission_limits if self.batch_spec is not None else None
+        self.forecast_limits = resolve_limits(defaults, os.environ.get(FORECAST_LIMITS_ENV)) if defaults else None
+        if self.forecast_limits is not None:
+            limits = self.forecast_limits
+            # Check direct LLM/vllm launches too, before loading the checkpoint.
+            slots = getattr(getattr(vllm_config, 'scheduler_config', None), 'max_num_seqs', 1)
+            limits.validate_launch(slots, self.admission_cost(
+                limits.max_request_rows, limits.max_context, limits.max_horizon))
         self.runtime = self.runtime_class(vllm_config.model_config.hf_config.vtsfm_config)
         self.model = self.runtime.model
         self.pooler = ForecastPooler()
         self.request_order = None
+        self.forecast_batch_rows = int(os.environ.get(FORECAST_BATCH_ROWS_ENV, '0'))
+        if self.forecast_batch_rows and (self.batch_spec is None
+                or not 2 <= self.forecast_batch_rows <= MAX_FORECAST_BATCH_ROWS):
+            raise ValueError('Unsupported adapter or row cap for experimental forecast batching')
+        self.forecast_batch_trace = os.environ.get('VTSFM_FORECAST_BATCH_TRACE')
 
     def set_request_order(self, callback):
         self.request_order = callback
@@ -81,6 +105,9 @@ class ForecastModel(nn.Module, IsAttentionFree, SupportsMultiModal):
 
     @torch.inference_mode()
     def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None, **kwargs):
+        executor = getattr(self, 'block_executor', None)
+        if executor is not None:
+            return executor.forward(input_ids, positions, inputs_embeds=inputs_embeds, **kwargs)
         length = length_from_prompt_token_ids_or_embeds(input_ids, inputs_embeds)
         self.pooler.routes = None
         self.pooler.profiling = False
@@ -104,12 +131,27 @@ class ForecastModel(nn.Module, IsAttentionFree, SupportsMultiModal):
                 self.pooler.profiling = True
                 return torch.zeros(length, 1, len(self.settings.quantiles), 1, device=positions.device)
             raise ValueError('Forecast placeholders do not match worker request count')
+        limits = getattr(self, 'forecast_limits', None)
+        if limits is not None:
+            costs = [self.admission_cost(len(request.item_ids), request.context.shape[1], request.horizon)
+                     for request in requests]
+            # Frontend admission + startup slot checks guarantee these bounds.
+            # These assertions protect internal callers, not normal overload handling.
+            for cost in costs:
+                limits.validate_request(cost)
+            if len(requests) > limits.max_scheduled_requests or forward_resident_bytes(costs) > limits.max_forward_bytes:
+                raise ValueError('Scheduled forecast inputs exceed the configured resident envelope')
+        if self.forecast_batch_rows and len(requests) > 1:
+            forecasts = execute_scheduled(self.runtime, self.batch_spec, requests,
+                                          self.forecast_batch_rows, self.forecast_batch_trace,
+                                          limits=limits, cost_for_shape=self.admission_cost)
+        else:
+            forecasts = (self.runtime.forecast(request.context, request.horizon) for request in requests)
         outputs = []
-        for request in requests:
-            # Bring-up TimesFM/Moirai wrappers still return CPU tensors via
-            # upstream NumPy APIs. Preserve their existing output staging until
-            # the tensor adapter ports (#9/#10) remove those round trips.
-            output = self.runtime.forecast(request.context, request.horizon).to(request.context.device)
+        for request, forecast in zip(requests, forecasts, strict=True):
+            # Moirai's current wrapper returns CPU tensors via its NumPy API.
+            # Tensor runtimes already return on the execution device.
+            output = forecast.to(request.context.device)
             validate_forecast(request, output, len(self.settings.quantiles))
             outputs.append(output)
         rows = max(len(request.item_ids) for request in requests)
@@ -117,7 +159,9 @@ class ForecastModel(nn.Module, IsAttentionFree, SupportsMultiModal):
         packed = outputs[0].new_zeros((length, rows, len(self.settings.quantiles), horizon))
         for index, (request, output) in enumerate(zip(requests, outputs)):
             packed[index, :len(request.item_ids), :, :request.horizon] = output
-        self.pooler.routes = tuple((len(request.item_ids), request.horizon) for request in requests)
+        self.pooler.routes = tuple((len(request.item_ids), request.horizon,
+            encode_result_metadata(request.item_ids, request.horizon, request.quantile_levels))
+            for request in requests)
         return packed
 
     def load_weights(self, weights):
@@ -127,32 +171,52 @@ class ForecastModel(nn.Module, IsAttentionFree, SupportsMultiModal):
 
 class ForecastIOProcessor(IOProcessor):
     settings: ForecastSettings
+    admission_spec = None
+    admission_cost = None
 
     def __init__(self, vllm_config, renderer):
         super().__init__(vllm_config, renderer)
-        self.pending = {}
+        from vtsfm.stepping import CONTINUOUS_ENV
+        if os.environ.get(CONTINUOUS_ENV) == '1' and (self.admission_spec is None or self.admission_spec.name != 'timesfm25'):
+            raise ValueError('Forecast-block IO currently supports only TimesFM')
+        defaults = self.admission_spec.admission_limits if self.admission_spec is not None else None
+        self.forecast_limits = resolve_limits(defaults, os.environ.get(FORECAST_LIMITS_ENV)) if defaults else None
+
+    def _check_limits(self, inputs, horizon):
+        if self.forecast_limits is not None:
+            self.forecast_limits.validate_request(self.admission_cost(
+                len(inputs), max(len(item['target']) for item in inputs), horizon))
 
     def parse_data(self, data):
-        return parse_request(data, self.settings)
+        parsed = parse_request(data, self.settings)
+        self._check_limits(parsed[0], parsed[1])
+        return parsed
 
     def pre_process(self, prompt, request_id=None, **kwargs):
         inputs, horizon, levels = prompt
+        self._check_limits(inputs, horizon)
+        item_ids = [item.get('item_id') for item in inputs]
+        # Reject oversized output metadata here, before submitting GPU work.
+        encode_result_metadata(item_ids, horizon, levels)
         context = torch.full((len(inputs), max(len(x['target']) for x in inputs)), float('nan'))
         for row, item in zip(context, inputs):
             row[-len(item['target']):] = torch.tensor(item['target'], dtype=torch.float32)
-        self.pending[request_id] = ([item.get('item_id') for item in inputs], horizon, levels)
-        metadata = encode_metadata(request_id or f'vtsfm-{uuid.uuid4().hex}',
-            [item.get('item_id') for item in inputs], [len(item['target']) for item in inputs], horizon, levels)
-        return {'prompt_token_ids': [1], 'multi_modal_data': {
+        # HTTP headers can repeat and offline calls omit IDs. Each numerical
+        # payload therefore needs an invocation ID independent of either case.
+        identity = f'{request_id or "vtsfm"}:{uuid.uuid4().hex}'
+        metadata = encode_metadata(identity, item_ids,
+            [len(item['target']) for item in inputs], horizon, levels)
+        from vtsfm.stepping import CONTINUOUS_ENV
+        blocks = (horizon + 127) // 128 if os.environ.get(CONTINUOUS_ENV) == '1' else 1
+        return {'prompt_token_ids': [1] * blocks, 'multi_modal_data': {
             MODALITY: {'context': [context],
                        'request_metadata': [torch.tensor(list(metadata), dtype=torch.uint8)]}}}
 
     def post_process(self, model_output, request_id=None, **kwargs):
-        item_ids, horizon, levels = self.pending.pop(request_id)
         if len(model_output) != 1:
             raise ValueError('Expected one whole-forecast output')
-        output = model_output[0].outputs.data
-        if output.ndim == 4 and output.shape[0] == 1:
-            output = output.squeeze(0)
+        output, item_ids, horizon, levels = unpack_result(model_output[0].outputs.data)
+        if horizon > self.settings.max_horizon or any(q not in self.settings.quantiles for q in levels):
+            raise ValueError('Forecast result metadata does not match adapter settings')
         # vLLM wraps plugin data with the HTTP request ID and creation time.
         return format_predictions(output, item_ids, levels, horizon, self.settings)

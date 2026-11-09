@@ -2,13 +2,15 @@
 
 vTSFM is a general TSFM extension for vLLM. Chronos-2's
 model and IO classes inherit the pinned community
-integration. The project owns adapter discovery, plugin registration, and a
-separate metadata batching planner; inference still delegates to upstream behavior.
+integration. The project owns adapter discovery, plugin registration, compatibility
+batching and optional TimesFM forecast-block scheduling. Execution preserves the
+pinned upstream numerical behavior.
 
 TimesFM 2.5, Toto 2 313M, and Moirai 2.0 small use `adapters/pooling.py` and
-`adapters/multimodal.py` for the same whole-forecast execution pattern. Each
-adapter's `runtime.py` constructs the official model and calls its forecasting
-API. Each adapter's `spec.py` owns its forecast limits, defaults, and output
+`adapters/multimodal.py` for the same whole-forecast execution pattern. TimesFM
+uses a device-resident tensor path around the upstream decoder. Toto and Moirai
+call their upstream forecast APIs. Each adapter's `spec.py` owns its forecast
+limits, defaults, and output
 quantile order; shared IO consumes those settings. `hf_config.py` bridges the
 upstream configuration files into vLLM without requiring a Transformers
 implementation. These adapters expose independent univariate quantile forecasts.
@@ -35,9 +37,13 @@ They are alternatives in this diagram, not simultaneous resident services.
 | `src/vtsfm/adapters/chronos2/` | Chronos-2 pins, launch settings, model, numerical IO, and native comparator |
 | `src/vtsfm/batching.py` | Runtime-independent reference planner for compatible prepared work and output routing |
 | `src/vtsfm/execution.py` | CPU-safe prepared tensor, capability, and result contracts for future shared execution |
+| `src/vtsfm/admission.py` | CPU-safe request/model-call limits and shared resident tensor accounting |
+| `src/vtsfm/stepping.py` | CPU-safe resumable adapter contract and compatible block-call planning |
+| `src/vtsfm/continuous_scheduler.py`, `block_worker.py`, `block_pooling.py` | Pinned V1 block scheduling, slot/lifecycle hooks, and active adapter state |
 | `src/vtsfm/config.py` | Shared dependency pins/defaults and compatibility aliases for Chronos-2 model pins |
 | `src/vtsfm/plugin.py` | Lazy architecture registration and adapter-selected IO factory for the `vtsfm` entry points |
 | `src/vtsfm/adapters/transport.py`, `multimodal.py` | Request-preserving raw multimodal fields; single-request model execution remains the default |
+| `src/vtsfm/adapters/result_transport.py` | Versioned self-describing forecast results; shared IO needs no pending metadata map |
 | `src/vtsfm/cli.py` | Build commands/environments and start the selected backend without GPU imports for help |
 | `src/vtsfm/models/chronos2.py`, `src/vtsfm/io_processor.py`, `src/vtsfm/native_server.py` | Compatibility shims for the previous implementation paths |
 | `src/vtsfm/benchmark_memory.py` | Optional worker memory counters used in benchmark mode |
@@ -105,25 +111,37 @@ use the resulting compatibility keys, row counts, and group boundaries; it canno
 infer those numerical semantics. Attention kernels and other model execution
 optimizations likewise belong inside the relevant adapter.
 
-The planner is a CPU-testable reference for later scheduler/worker integration.
-It is not connected to the vLLM serving path and adds no queue admission, tensor
-packing, GPU execution, or attention kernels. Its group
-IDs do not enable cross-request grouped execution in the Chronos-2 runtime.
+The planner produces CPU-testable metadata. The experimental TimesFM serving
+path feeds its plans into the adapter's prepared executor. Queue admission and
+attention kernels have separate boundaries.
 
 Separately, the newer adapters' [numerical transport](numerical-transport.md)
 uses batched multimodal fields to preserve multiple request payloads and stable
 IDs at the pinned vLLM worker boundary. A checkpoint-free engine probe checks
 this path. A pinned worker subclass resolves actual slot identities from cached
 feature metadata, and the model/pooler route variable-size forecasts accordingly.
-Normal serving retains `max_num_seqs=1`; the newer adapters expose experimental
-concurrency with `--max-num-seqs`. Each forecast still executes separately;
-collated numerical execution remains future work.
+The pooled tensor carries each request's response metadata as well as FP32
+forecast bytes. Stateless IO supports sequential offline DataPrompts and
+concurrent HTTP requests without depending on postprocessing for cleanup; see
+[request lifecycle](request-lifecycle.md).
+Normal serving uses `max_num_seqs=1`. TimesFM, Toto, and Moirai expose concurrency
+with `--max-num-seqs`. With `--forecast-batch-rows`, TimesFM can combine
+compatible requests that vLLM has already scheduled in the same worker forward.
 
 The [prepared execution contract](execution-contract.md) binds a plan to validated
 input tensors and defines row-aligned results, per-request splitting, and
-conservative model capability metadata. It is available for independent runtime
-and adapter development; the current whole-forecast serving wrappers do not yet
-implement that boundary.
+conservative model capability metadata. TimesFM implements the prepared
+executor for equal-length independent rows. The runner supplies scheduled
+requests in slot order. The shared execution helper plans batches, calls the
+executor, and splits outputs by request ID before the pooler crops each slot.
+TimesFM's [numerical admission policy](numerical-admission.md) checks request
+cost before submission, validates scheduled residency at startup, and splits
+compatible model calls by row/work budgets. The adapter owns its patch/block
+cost formula and measured ceilings; other model families do not inherit them.
+The optional [continuous path](continuous-batching.md) resumes TimesFM between
+forecast blocks. vLLM schedules one marker per block and returns results only at
+completion. The adapter owns both flip-pass caches; shared policy bounds total
+active state and individual packed calls.
 
 ## Benchmark contract
 
@@ -176,7 +194,7 @@ Synthetic numerical inputs are permitted only for explicitly labeled smoke tests
 
 ## Future research boundaries
 
-Live cross-request batching, tensor packing, grouped attention kernels,
+Cross-model batching, grouped attention kernels,
 a common public numerical HTTP schema across all models, and MCP
 integration are not implemented. Keep proposed changes behind clear boundaries
 and demonstrate numerical parity before interpreting performance.

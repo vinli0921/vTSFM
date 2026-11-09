@@ -60,6 +60,7 @@ def run_gpu_checks(root: Path = Path('/workspace')) -> dict[str, str]:
     subprocess.run([
         sys.executable, '-m', 'pytest', '-q', '-s', '-p', 'no:cacheprovider',
         'tests/test_cuda_contract.py', 'tests/test_execution.py', 'tests/test_batching.py',
+        'tests/test_result_transport.py',
     ], cwd=root, env=environment, check=True, timeout=240)
     torch.cuda.synchronize()
     return {**info, 'result': 'passed'}

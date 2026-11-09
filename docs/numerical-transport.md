@@ -29,11 +29,13 @@ different requests and copies contexts to the worker device. Metadata uses
 `keep_on_cpu=True` and is decoded without copying the numerical context back to
 the CPU.
 
-Version-1 metadata contains the request ID, item IDs, true per-series history
+Version-1 metadata contains an invocation ID, item IDs, true per-series history
 lengths, horizon, and requested quantiles. `decode_requests` validates the wire
 layout, matching row counts/lengths, and unique request IDs. It retains different
 shapes and settings without treating them as execution-compatible. Transport
-order is not a guarantee about vLLM's pooled-output slots.
+order is not a guarantee about vLLM's pooled-output slots. Every preprocessing
+call appends a UUID to its external ID (or `vtsfm` when omitted). Reusing an HTTP
+`X-Request-Id` therefore cannot collide with another numerical payload.
 
 ## Output routing
 
@@ -58,9 +60,10 @@ not edit vLLM source or replace a runner method. This bridge supports **vLLM
 3. Pads the validated outputs into one worker tensor in slot order, shaped
    `[requests, maximum_series_count, native_quantiles, maximum_horizon]`.
 
-`ForecastPooler` crops each slot back to its own variable-size tensor. Pooling
-consumes the shape layout once; it does not retain forecast tensors in a pending
-dictionary. IO selects each request's quantiles and restores its item IDs. Wrong
+`ForecastPooler` crops each slot and packs it with its response metadata into a
+versioned uint8 tensor. Pooling consumes the CPU layout/metadata once; it does
+not retain forecast tensors in a pending dictionary. The frontend has no pending
+map either: IO decodes that result, selects quantiles, and restores item IDs. Wrong
 row counts or output axes produce errors rather than another request's results.
 
 ## Current execution boundary
@@ -72,26 +75,43 @@ explicit experimental option for TimesFM, Toto, and Moirai:
 ./scripts/serve.sh --adapter toto2 --max-num-seqs 3 --port 8001
 ```
 
-The flag changes scheduling capacity. Each request still runs an individual
-whole forecast; [issue #11](https://github.com/vinli0921/vTSFM/issues/11) will
-collate compatible requests into shared numerical execution. Stable numerical
-workload/memory admission remains [issue #12](https://github.com/vinli0921/vTSFM/issues/12),
-so the request-count flag is not a memory bound. Mixed shapes can increase the
-padded output allocation. This path does not implement
-continuous batching or vLLM-managed attention/KV caching and makes no accuracy
-or performance claim.
+TimesFM can opt into whole-forecast batching for requests vLLM places in the
+same worker forward:
+
+```bash
+./scripts/serve.sh --adapter timesfm25 --max-num-seqs 4 --forecast-batch-rows 8 --port 8001
+```
+
+The planner combines consecutive requests with matching dense history length
+and horizon. The executor computes all native quantiles and HTTP response
+formatting selects each request's own quantiles. Each batch contains up to
+four requests and the configured row cap. Ragged, oversized, or unmatched
+requests execute individually. The cap bounds fused rows. Numerical workload
+and memory admission for TimesFM now use a separate
+[numerical policy](numerical-admission.md), including standalone requests and
+all scheduled slots. Toto/Moirai envelopes remain in
+[issue #12](https://github.com/vinli0921/vTSFM/issues/12).
+Forecast-block scheduling is tracked in [issue #15](https://github.com/vinli0921/vTSFM/issues/15).
 
 Wire metadata is separate from the [prepared execution contract](execution-contract.md).
-Model adapters will prepare `PreparedRequest` tensors and masks in issues
-#8/#9/#10; shared execution will consume `PreparedBatch` in #11. Normalization,
-patching, model attention, and output semantics remain adapter responsibilities.
-The current TimesFM/Moirai bring-up wrappers still use upstream NumPy APIs and
-return CPU tensors. Output staging preserves that existing behavior; these paths
-do not yet provide the transfer-free execution contract of the tensor adapters.
+The batch helper builds `PreparedBatch` only when several requests will share
+execution. Validating those prepared masks synchronizes with the GPU.
+Normalization, patching, attention, and output semantics belong to the adapter.
+Moirai's current NumPy wrapper returns CPU tensors for the worker to stage.
 
-When no request ID is supplied, preprocessing generates a transport UUID. This
-does not fix the existing `pending[None]` state or provide offline-call lifecycle
-support; that remains [issue #13](https://github.com/vinli0921/vTSFM/issues/13).
+Run the real TimesFM batching check on an idle Linux GPU:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 VTSFM_RUN_TIMESFM_BATCHING=1 PYTHONPATH=src:tests \
+  .venv-timesfm25/bin/python -m pytest tests/test_timesfm_http_batching.py -q -s
+```
+
+The test starts a loopback server, queues distinct HTTP requests, and checks
+the worker's completed execution trace against each isolated forecast.
+
+See [request lifecycle and offline forecasts](request-lifecycle.md) for the
+result format, supported `LLM.encode` input, cancellation behavior, and manual
+TimesFM tests. No vLLM failure callback or frontend metadata registry is needed.
 
 ## Manual transport probe
 
