@@ -2,10 +2,12 @@
 
 import torch
 from uni2ts.model.moirai2 import Moirai2Forecast, Moirai2Module
+from vtsfm.precision import configure_precision
 
 
 class MoiraiRuntime:
     def __init__(self, config):
+        self.precision = configure_precision('moirai2')
         self.model = Moirai2Module(**config)
 
     def forecast(self, context, horizon):

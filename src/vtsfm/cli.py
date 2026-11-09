@@ -17,6 +17,7 @@ from vtsfm.config import (
 from vtsfm.adapters import get_adapter, list_adapters
 from vtsfm.admission import FORECAST_LIMITS_ENV, resolve_limits
 from vtsfm.stepping import CONTINUOUS_ENV
+from vtsfm.precision import PRECISION_ENV, PRECISIONS, TF32_OVERRIDE_ENV, validate_precision
 
 
 def _check_address(host: str, port: int, benchmark: bool) -> None:
@@ -43,8 +44,12 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
                        forecast_limits: str | None = None,
                        continuous_batching: bool = False,
                        forecast_queue_limit: int | None = None,
+                       forecast_precision: str = 'fp32',
                        ) -> tuple[list[str], dict[str, str]]:
     selected = get_adapter(adapter)
+    validate_precision(adapter, forecast_precision)
+    if forecast_precision != 'fp32' and backend != 'vtsfm':
+        raise ValueError('Experimental precision requires the vTSFM backend')
     if backend == 'vtsfm':
         plugin = 'vtsfm'
     elif backend in ('upstream', selected.upstream_io_plugin) and selected.upstream_io_plugin:
@@ -53,6 +58,8 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
         raise ValueError(f'Backend {backend!r} is unavailable for adapter {adapter!r}')
     _check_address(host, port, benchmark)
     if continuous_batching:
+        if forecast_precision != 'fp32':
+            raise ValueError('Forecast-block continuous batching currently requires FP32 precision')
         if selected.name != 'timesfm25' or backend != 'vtsfm':
             raise ValueError('Forecast-block continuous batching currently supports only TimesFM/vtsfm')
         max_num_seqs = 4 if max_num_seqs is None else max_num_seqs
@@ -64,6 +71,10 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
     environment.pop(FORECAST_BATCH_ROWS_ENV, None)
     environment.pop(FORECAST_LIMITS_ENV, None)
     environment.pop(CONTINUOUS_ENV, None)
+    # Ambient worker settings must not silently change a newly launched server.
+    environment[PRECISION_ENV] = forecast_precision
+    if selected.name != 'chronos2':
+        environment[TF32_OVERRIDE_ENV] = '1' if forecast_precision == 'tf32' else '0'
     environment['VLLM_PLUGINS'] = plugin
     environment['VTSFM_ADAPTER'] = selected.name
     # MRV2 does not support the plugin pooling task in the published releases.
@@ -181,6 +192,8 @@ def main(argv: list[str] | None = None) -> int:
                        help='Enable experimental TimesFM forecast-block scheduling (default: 4 slots, 16 fused rows)')
     serve.add_argument('--forecast-queue-limit', type=int,
                        help='Maximum TimesFM HTTP requests waiting/running (block mode default: 16; overflow: 503)')
+    serve.add_argument('--forecast-precision', choices=PRECISIONS, default='fp32',
+                       help='Experimental model precision: TF32 matmuls, or native BF16 for Toto only')
     serve.add_argument('--dry-run', action='store_true', help='Print a command without starting a server')
     diagnostic = commands.add_parser('doctor', help='Check the installed environment')
     diagnostic.add_argument('--cpu', action='store_true', help='Skip imports and checks of GPU dependencies')
@@ -208,6 +221,7 @@ def main(argv: list[str] | None = None) -> int:
             kwargs['forecast_limits'] = args.forecast_limits
             kwargs['continuous_batching'] = args.continuous_batching
             kwargs['forecast_queue_limit'] = args.forecast_queue_limit
+            kwargs['forecast_precision'] = args.forecast_precision
         elif args.max_num_seqs is not None:
             raise ValueError('--max-num-seqs applies to the vLLM backend')
         elif args.forecast_batch_rows is not None:
@@ -216,13 +230,15 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError('--forecast-limits applies to the vLLM backend')
         elif args.continuous_batching or args.forecast_queue_limit is not None:
             raise ValueError('Forecast-block and queue settings apply to the vLLM backend')
+        elif args.forecast_precision != 'fp32':
+            raise ValueError('--forecast-precision applies to the vTSFM backend')
         command, environment = builder(**kwargs)
     except (ValueError, OSError) as error:
         parser.error(str(error))
     if args.dry_run:
         keys = ('VTSFM_ADAPTER', 'VLLM_PLUGINS', 'VLLM_USE_V2_MODEL_RUNNER', 'VLLM_SERVER_DEV_MODE',
                 'OMP_NUM_THREADS', 'HF_HUB_DISABLE_TELEMETRY', FORECAST_BATCH_ROWS_ENV, FORECAST_LIMITS_ENV,
-                CONTINUOUS_ENV)
+                CONTINUOUS_ENV, PRECISION_ENV, TF32_OVERRIDE_ENV)
         print(json.dumps({'command': command, 'environment': {
             key: environment[key] for key in keys if key in environment}}, indent=2))
         return 0

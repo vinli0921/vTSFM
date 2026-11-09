@@ -6,17 +6,25 @@ from toto2 import Toto2Model
 from toto2.configuration import Toto2ModelConfig
 
 from vtsfm.execution import ExecutionResult, PreparedBatch
+from vtsfm.precision import configure_precision
 
 from .spec import DECODE_BLOCK_SIZE, FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TOTO2
 
 
 class TotoRuntime:
     def __init__(self, config):
+        self.precision = configure_precision('toto2')
         self.model = Toto2Model(Toto2ModelConfig(**config))
+        if self.precision == 'bf16':
+            from dd_unit_scaling import RMSNorm
+            from toto2.model import RotaryProjection
+            from .precision import prepare_native_bf16
+
+            self._precision_handles = prepare_native_bf16(self.model, RMSNorm, RotaryProjection)
 
     @torch.inference_mode()
     def forecast(self, context, horizon):
-        context = context.to(next(self.model.parameters()).device)
+        context = context.to(device=next(self.model.parameters()).device, dtype=torch.float32)
         return self._forecast(context, torch.isfinite(context), horizon)
 
     @torch.inference_mode()
@@ -58,4 +66,5 @@ class TotoRuntime:
                   'series_ids': torch.zeros((len(target), 1), dtype=torch.long, device=target.device)}
         quantiles = self.model.forecast(inputs, horizon=horizon, decode_block_size=DECODE_BLOCK_SIZE)
         # Upstream returns [9 quantiles, rows, variates, horizon].
-        return quantiles[:, :, 0, :].permute(1, 0, 2)
+        # Compute weights may be BF16; transport and prepared outputs stay FP32.
+        return quantiles[:, :, 0, :].permute(1, 0, 2).float()

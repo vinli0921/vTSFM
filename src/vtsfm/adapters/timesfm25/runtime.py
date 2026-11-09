@@ -6,12 +6,14 @@ from timesfm.torch.util import revin
 from torch.nn import functional as F
 
 from vtsfm.execution import ExecutionResult, PreparedBatch
+from vtsfm.precision import configure_precision
 
 from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TIMESFM25
 
 
 class TimesFMRuntime:
     def __init__(self, config):
+        self.precision = configure_precision('timesfm25')
         self.model = timesfm.TimesFM_2p5_200M_torch(torch_compile=False).model
 
     @torch.inference_mode()
