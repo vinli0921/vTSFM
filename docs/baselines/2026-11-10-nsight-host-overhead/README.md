@@ -136,9 +136,9 @@ throughput loss. The GPU stays mostly idle. The cache merge/store copies add abo
 ## Files and reproduction
 
 - `summary.csv`: one row per trace, with the untraced timing and the traced per-request split.
-- The traces (26 `.nsys-rep` files, about 440 MB gzipped), `nsys stats` CSVs and per-run JSON are not
-  committed. They are kept outside the repository, on the profiling VM (`~/issue16`) and in the author's local
-  results folder. They can be published as a GitHub release if wanted.
+- The traces (26 `.nsys-rep` files, about 440 MB with the largest gzipped), `nsys stats` CSVs and per-run JSON
+  are not committed. They are attached to the release
+  [`profiling-nsight-a100-2026-11-10`](https://github.com/vinli0921/vTSFM/releases/tag/profiling-nsight-a100-2026-11-10).
 - Reproduce with `benchmarks/nsight/run.sh OUT_DIR timesfm25 toto2 moirai2` (set `NSYS`, `AOB_ROOT`,
   `HF_HOME`, and `METROPT_DATA` for the block-mode case). One ordered pass per configuration, without
   repeats or confidence intervals.
