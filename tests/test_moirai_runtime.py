@@ -295,6 +295,22 @@ def test_forecast_matches_official_at_block_boundaries_and_recursion(moirai, hor
 
 @pytest.mark.gpu
 @requires_moirai
+@pytest.mark.parametrize('horizon', [1, 16, 65])
+def test_public_forecast_owns_only_requested_output_storage(moirai, horizon):
+    """A short output must not pin full-context or patch-rounded predictions.
+
+    One predicted patch can already be contiguous while still viewing the
+    much larger context+future quantile grid, so contiguous() alone is unsafe.
+    """
+    histories = [signal(128), signal(128, 1.0)]
+    actual = moirai.runtime.forecast(nan_padded(moirai, histories), horizon)
+    assert_forecast(actual, official(moirai, histories, horizon), moirai)
+    assert actual.is_contiguous() and actual.storage_offset() == 0
+    assert actual.untyped_storage().nbytes() == actual.numel() * actual.element_size()
+
+
+@pytest.mark.gpu
+@requires_moirai
 def test_forecast_matches_official_at_declared_limits(moirai):
     capabilities = get_adapter('moirai2').execution_capabilities
     histories = [signal(capabilities.max_context), signal(capabilities.max_context, 1.0)]

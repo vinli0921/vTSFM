@@ -8,9 +8,24 @@ separate GPU measurements for the declared shape envelope.
 
 from dataclasses import dataclass, fields, replace
 import json
+from importlib import import_module
 from typing import Iterable
 
 FORECAST_LIMITS_ENV = 'VTSFM_FORECAST_LIMITS'
+
+
+def resolve_cost(spec):
+    """Load an adapter's CPU-only shape cost from its lazy descriptor."""
+    path = spec.admission_cost
+    if spec.admission_limits is None or not isinstance(path, str):
+        raise ValueError(f'Adapter {spec.name!r} has no numerical admission policy')
+    module, separator, name = path.partition(':')
+    if not separator or not module or not name or ':' in name:
+        raise ValueError(f'Invalid admission cost path for {spec.name!r}')
+    cost = getattr(import_module(module), name)
+    if not callable(cost):
+        raise ValueError(f'Admission cost for {spec.name!r} must be callable')
+    return cost
 
 
 def _positive_integer(value, name):

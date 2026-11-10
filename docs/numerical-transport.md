@@ -87,11 +87,12 @@ and horizon. The executor computes all native quantiles and HTTP response
 formatting selects each request's own quantiles. Each batch contains up to
 four requests and the configured row cap. Ragged, oversized, or unmatched
 requests execute individually. The cap bounds fused rows. Numerical workload
-and memory admission for TimesFM now use a separate
+and memory admission use adapter-specific
 [numerical policy](numerical-admission.md), including standalone requests and
-all scheduled slots. Toto/Moirai envelopes remain in
-[issue #12](https://github.com/vinli0921/vTSFM/issues/12).
-Forecast-block scheduling is tracked in [issue #15](https://github.com/vinli0921/vTSFM/issues/15).
+all scheduled slots. Toto/Moirai candidate policies and live fusion must pass the
+manual validation in [issue #12](https://github.com/vinli0921/vTSFM/issues/12)
+before their capacity is called measured. TimesFM forecast-block scheduling is
+implemented separately in [issue #15](https://github.com/vinli0921/vTSFM/issues/15).
 
 Wire metadata is separate from the [prepared execution contract](execution-contract.md).
 The batch helper builds `PreparedBatch` only when several requests will share

@@ -110,8 +110,8 @@ use the resulting compatibility keys, row counts, and group boundaries; it canno
 infer those numerical semantics. Attention kernels and other model execution
 optimizations likewise belong inside the relevant adapter.
 
-The planner produces CPU-testable metadata. The experimental TimesFM serving
-path feeds its plans into the adapter's prepared executor. Queue admission and
+The planner produces CPU-testable metadata. Numerical serving feeds its plans
+into the selected adapter's prepared executor under its cost policy. Queue admission and
 attention kernels have separate boundaries.
 
 Separately, the newer adapters' [numerical transport](numerical-transport.md)
@@ -124,7 +124,7 @@ forecast bytes. Stateless IO supports sequential offline DataPrompts and
 concurrent HTTP requests without depending on postprocessing for cleanup; see
 [request lifecycle](request-lifecycle.md).
 Normal serving uses `max_num_seqs=1`. TimesFM, Toto, and Moirai expose concurrency
-with `--max-num-seqs`. With `--forecast-batch-rows`, TimesFM can combine
+with `--max-num-seqs`. With `--forecast-batch-rows`, numerical adapters can combine
 compatible requests that vLLM has already scheduled in the same worker forward.
 
 The [prepared execution contract](execution-contract.md) binds a plan to validated
@@ -138,10 +138,11 @@ TimesFM implements the prepared
 executor for equal-length independent rows. The runner supplies scheduled
 requests in slot order. The shared execution helper plans batches, calls the
 executor, and splits outputs by request ID before the pooler crops each slot.
-TimesFM's [numerical admission policy](numerical-admission.md) checks request
+Each adapter's [numerical admission policy](numerical-admission.md) checks request
 cost before submission, validates scheduled residency at startup, and splits
 compatible model calls by row/work budgets. The adapter owns its patch/block
-cost formula and measured ceilings; other model families do not inherit them.
+cost formula and ceilings; other model families do not inherit them. Toto and
+Moirai candidate caps still require the documented real-model GPU qualification.
 The optional [continuous path](continuous-batching.md) resumes TimesFM between
 forecast blocks. vLLM schedules one marker per block and returns results only at
 completion. The adapter owns both flip-pass caches; shared policy bounds total
