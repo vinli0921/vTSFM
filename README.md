@@ -115,8 +115,10 @@ TimesFM/Toto and 7168 for Moirai, reserving room for the prediction horizon.
 TimesFM keeps histories and forecast tensors on the model device and uses the
 pinned upstream decoder. It preserves the reference normalization, continuous
 quantile head, flip invariance, positivity, and crossing correction.
-Toto uses the documented 768-point block decoding setting. Moirai uses the
-upstream recursive quantile forecast unchanged.
+Toto uses the documented 768-point block decoding setting. Moirai keeps
+histories and forecasts on the model device and calls the pinned upstream
+`Moirai2Forecast.forward`, including its recursive quantile forecast. Shorter
+histories in a request are masked as padding, so each forecasts as it would alone.
 
 Moirai has an experimental, opt-in attention path for long contexts:
 `VTSFM_MOIRAI_ATTENTION=univariate ./scripts/serve.sh --adapter moirai2`. It runs

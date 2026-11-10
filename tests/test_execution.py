@@ -204,7 +204,8 @@ def test_model_capabilities_match_existing_supported_io_and_gate_future_batching
         capabilities.validate_key(replace(key, context_length=settings.max_context + 1))
     with pytest.raises(ValueError):
         capabilities.validate_key(replace(key, dtype='bfloat16'))
-    assert not capabilities.supports_ragged_batching
+    # Only Moirai has GPU ragged parity evidence (tests/test_moirai_runtime.py).
+    assert capabilities.supports_ragged_batching == (name == 'moirai2')
     assert capabilities.supports_block_stepping is (name == 'timesfm25')
 
 

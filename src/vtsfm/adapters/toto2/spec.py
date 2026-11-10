@@ -12,6 +12,8 @@ FORECAST_SETTINGS = ForecastSettings(
     quantiles=(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
     default_horizon=96, default_quantiles=(0.1, 0.5, 0.9),
 )
+DECODE_BLOCK_SIZE = 768
+PATCH_SIZE = 32  # From config.json at MODEL_REVISION; GPU tests check the loaded model.
 TOTO2 = AdapterSpec(
     name='toto2', model_id=MODEL_ID, model_revision=MODEL_REVISION,
     architectures=('VTSFMTotoForForecasting',),
@@ -25,8 +27,8 @@ TOTO2 = AdapterSpec(
     supports_group_attention=True,
     execution_capabilities=ExecutionCapabilities(
         max_context=FORECAST_SETTINGS.max_context, max_horizon=FORECAST_SETTINGS.max_horizon,
-        quantiles=FORECAST_SETTINGS.quantiles, output_block_size=768,
-        supports_point_forecast=False, execution_options=(('decode_block_size', '768'),),
-        # Input patch size is checkpoint-configured; populate it after loading.
+        quantiles=FORECAST_SETTINGS.quantiles, input_patch_size=PATCH_SIZE,
+        output_block_size=DECODE_BLOCK_SIZE, supports_point_forecast=False,
+        execution_options=(('decode_block_size', str(DECODE_BLOCK_SIZE)),),
     ),
 )
