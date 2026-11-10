@@ -4,6 +4,7 @@ import torch
 from uni2ts.model.moirai2 import Moirai2Forecast, Moirai2Module
 
 from vtsfm.execution import ExecutionResult, PreparedBatch
+from vtsfm.compilation import compile_core, execution_mode
 
 from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, MOIRAI2
 
@@ -11,6 +12,8 @@ from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, MOIRAI2
 class MoiraiRuntime:
     def __init__(self, config):
         self.model = Moirai2Module(**config)
+        if execution_mode() == 'compile':
+            compile_model(self.model)
 
     @torch.inference_mode()
     def forecast(self, context, horizon):
@@ -77,3 +80,22 @@ class MoiraiRuntime:
         # Upstream returns [rows, 9 quantiles, horizon] for univariate targets.
         return runner(past_target=target.unsqueeze(-1), past_observed_target=observed.unsqueeze(-1),
                       past_is_pad=padding)
+
+
+def compile_model(model):
+    """Compile the encoder; keep scaling and recursive quantiles upstream/eager."""
+    from uni2ts.module.attention import GroupedQueryAttention
+    from uni2ts.module.ffn import FeedForward
+    from uni2ts.module.norm import RMSNorm
+    from uni2ts.module.position.attn_projection import QueryKeyProjection
+
+    native_calls = []
+    for module in model.encoder.modules():
+        if isinstance(module, QueryKeyProjection):
+            # Static Python shape metadata: avoid cached-property locks in tracing.
+            _ = module.proj_width, module.split_sizes
+        if isinstance(module, (RMSNorm, GroupedQueryAttention)):
+            native_calls.append((module, 'forward'))
+        if isinstance(module, FeedForward):
+            native_calls.append((module, 'activation'))
+    compile_core(model.encoder, native_calls)

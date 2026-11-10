@@ -175,6 +175,11 @@ compares matching native/vLLM HTTP workloads. See the [model integration guide](
 for environment setup, idle-GPU requirements, per-model selection, and saved
 pre-merge evidence.
 
+`--forecast-execution compile` opts TimesFM, Toto and Moirai into experimental
+neural compilation. Eager execution stays the default. See
+[compiled execution](docs/compiled-execution.md) for the native numerical
+boundaries, manual validation commands and remaining qualification work.
+
 ## Run a comparison
 
 Benchmarks require exclusive access to the selected GPU and a free port. The

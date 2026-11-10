@@ -40,7 +40,8 @@ def test_matched_http_performance(model_run):
                             import requests as http
                             with http.Session() as session:
                                 session.trust_env = False
-                                result = session.post(server['url'] + '/pooling', json=payload, timeout=60)
+                                result = session.post(server['url'] + '/pooling', json=payload,
+                                                      timeout=server['parity_timeout_s'])
                                 result.raise_for_status()
                                 return result.json()
                         pool = ThreadPoolExecutor(max_workers=clients)
@@ -58,12 +59,14 @@ def test_matched_http_performance(model_run):
                             cancel=server['stop'], record_path=run['output'] / 'points' /
                             f'{backend}-{case["name"]}-clients{clients}.json')
                         point.update(backend=backend, case=case['name'],
+                                     forecast_execution=run['metadata']['forecast_execution'][backend],
                                      context_lengths=[len(item['target']) for item in case['data']['inputs']],
                                      horizon=case['data']['parameters']['prediction_length'],
                                      payload_sha256=hashlib.sha256(encoded).hexdigest(), parity=parity)
                         points.append(point)
                         save_json(run['output'] / 'performance.json', {'points': points,
                             'source_commit': run['metadata']['commit'], 'precision': 'float32',
+                            'forecast_execution': run['metadata']['forecast_execution'],
                             'backend_order': order, 'no_automatic_performance_merge_threshold': True})
                         assert point['status'] == 'passed', f'Measured HTTP requests failed: {point}'
                         check.update(status='passed', performance={key: value for key, value in point.items()
