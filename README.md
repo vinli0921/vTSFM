@@ -232,6 +232,10 @@ fixture. See [data and measurement details](docs/architecture.md#benchmark-contr
 
 ## Reproducible runtime pins
 
+Experimental worker precision controls are documented in
+[forecast precision](docs/precision.md). FP32 remains the default; native BF16
+for Toto/Moirai and optional TF32 require explicit selection and GPU validation.
+
 | Adapter | vLLM | Torch | Torch CUDA runtime | Transformers |
 | --- | --- | --- | --- | --- |
 | TimesFM 2.5, Toto 2, Moirai 2.0 | 0.33.0 (V1 runner) | 2.14.0 | 13.0 | 5.20.2 |
