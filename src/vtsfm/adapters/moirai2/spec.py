@@ -36,7 +36,8 @@ MOIRAI2 = AdapterSpec(
 # 'upstream' (default) runs pinned uni2ts attention unchanged. 'univariate'
 # replaces it on the loaded model with an exact 4-D fused-SDPA path that drops
 # the per-head constant variate bias; valid because this adapter serves only
-# univariate rows. The server inherits the variable from the launching shell.
+# univariate rows. Univariate only: multivariate input raises ValueError.
+# The server inherits the variable from the launching shell.
 MOIRAI_ATTENTION_ENV = 'VTSFM_MOIRAI_ATTENTION'
 MOIRAI_ATTENTION_MODES = ('upstream', 'univariate')
 

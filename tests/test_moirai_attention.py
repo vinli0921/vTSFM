@@ -159,6 +159,42 @@ def test_unpadded_rows_use_is_causal_and_padded_rows_pass_a_bool_mask(lib, modul
         uninstall()
 
 
+def test_multivariate_rows_raise_without_verify(lib, module):
+    torch = lib.torch
+    attention = module.encoder.layers[0].self_attn
+    uninstall = lib.attention.install_univariate_attention(module)
+    try:
+        x = torch.randn(1, 4, TINY['d_model'])
+        var_id = torch.tensor([[0, 0, 1, 1]])
+        time_id = torch.tensor([[0, 1, 0, 1]])
+        with torch.inference_mode(), pytest.raises(ValueError, match='exact only for univariate input'):
+            attention(x, x, x, query_var_id=var_id, kv_var_id=var_id,
+                      query_time_id=time_id, kv_time_id=time_id)
+        single = torch.zeros(1, 4, dtype=torch.long)
+        with torch.inference_mode():
+            attention(x, x, x, query_var_id=single, kv_var_id=single, query_time_id=time_id, kv_time_id=time_id)
+    finally:
+        uninstall()
+
+
+def test_variate_check_runs_once_per_forward_pass(lib, module, monkeypatch):
+    calls = []
+    original = lib.attention._VariateCheck.check
+
+    def counting(self, *ids):
+        cached = self.ref is not None and ids and self.ref() is ids[0]
+        calls.append(not cached)
+        return original(self, *ids)
+
+    monkeypatch.setattr(lib.attention._VariateCheck, 'check', counting)
+    uninstall = lib.attention.install_univariate_attention(module)
+    try:
+        _forecast(lib, module, _context(lib, 2, 64), 64)  # one pass, two layers
+    finally:
+        uninstall()
+    assert len(calls) == TINY['num_layers'] and sum(calls) == 1
+
+
 def test_verify_rejects_more_than_one_variate(lib, module):
     torch = lib.torch
     attention = module.encoder.layers[0].self_attn

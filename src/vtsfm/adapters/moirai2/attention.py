@@ -13,8 +13,14 @@ replaces each layer's attention on one model instance with a 4-D call that keeps
 only the boolean packed-causal mask, or uses ``is_causal`` when that mask is a
 plain lower triangle (no padding).
 
-Only use this for univariate inputs (``target_dim == 1``). vTSFM's Moirai runtime
-rejects grouped/multivariate rows, so it meets that condition.
+Univariate only. The vTSFM Moirai runtime forecasts each series independently
+(``target_dim=1``), so every row it builds is univariate. Multivariate input is
+not supported: there the bias differs between same-variate and cross-variate
+pairs and changes the result, so the patched forward raises ``ValueError``
+instead of dropping it. The check runs once per module forward pass (every layer
+receives the same variate-ID tensor). Supporting multivariate input would need
+the bias kept, for example FlexAttention with a block mask plus a ``score_mod``
+for the per-head variate bias.
 """
 
 import hashlib
@@ -59,18 +65,41 @@ class _MaskState:
         return self.causal
 
 
+MULTIVARIATE_ERROR = ('VTSFM_MOIRAI_ATTENTION=univariate is exact only for univariate input, but a row has '
+                      'more than one variate ID; use VTSFM_MOIRAI_ATTENTION=upstream')
+
+
+class _VariateCheck:
+    """Reject multivariate rows once per module call.
+
+    The encoder passes the same variate-ID tensor object to every layer, so a
+    weak reference lets later layers reuse the result: one host sync per pass.
+    """
+
+    def __init__(self):
+        self.ref = None
+
+    def check(self, *ids):
+        ids = tuple(value for value in ids if value is not None)
+        if not ids or (self.ref is not None and self.ref() is ids[0]):
+            return
+        first = ids[0][..., :1]
+        if not all(bool((value == first).all()) for value in ids):
+            raise ValueError(MULTIVARIATE_ERROR)
+        self.ref = weakref.ref(ids[0])
+
+
 def _univariate_forward(self, query, key, value, attn_mask=None, query_var_id=None, kv_var_id=None,
-                        query_time_id=None, kv_time_id=None, *, state, verify):
+                        query_time_id=None, kv_time_id=None, *, state, variates, verify):
+    if verify:
+        variates.ref = None  # force the check on every call
+    variates.check(query_var_id, kv_var_id)
     groups, per_group = self.num_groups, self.heads_per_group
     query = self.q_norm(rearrange(self.q_proj(query), '... l (g h d) -> ... g h l d', g=groups, h=per_group))
     key = self.k_norm(repeat(self.k_proj(key), '... l (g d) -> ... g h l d', g=groups, h=per_group))
     value = repeat(self.v_proj(value), '... l (g d) -> ... g h l d', g=groups, h=per_group)
     query_var_id, kv_var_id = self._get_var_id(query, key, query_var_id, kv_var_id)
     query_time_id, kv_time_id = self._get_time_id(query, key, query_time_id, kv_time_id)
-    if verify and query_var_id is not None:
-        first = query_var_id[..., :1]
-        if not (bool((query_var_id == first).all()) and bool((kv_var_id == first).all())):
-            raise ValueError('Univariate Moirai attention received more than one variate ID per row')
     query, key = self._qk_proj(query, key, query_var_id=query_var_id, kv_var_id=kv_var_id,
                                query_time_id=query_time_id, kv_time_id=kv_time_id)
 
@@ -94,7 +123,8 @@ def _univariate_forward(self, query, key, value, attn_mask=None, query_var_id=No
 def install_univariate_attention(module, *, verify=False, check_source=True):
     """Patch one ``Moirai2Module`` instance in place; return a function that undoes it.
 
-    ``verify=True`` checks variate IDs on every call (one host sync per layer).
+    Multivariate rows always raise ``ValueError`` (checked once per forward pass).
+    ``verify=True`` repeats that check in every layer (one host sync per layer).
     """
     if check_source:
         digest = upstream_forward_digest()
@@ -102,6 +132,7 @@ def install_univariate_attention(module, *, verify=False, check_source=True):
             raise RuntimeError(f'uni2ts GroupedQueryAttention.forward changed (sha256 {digest}); '
                                'revalidate the univariate attention patch before using it')
     state = _MaskState()
+    variates = _VariateCheck()
     patched = []
     for layer in module.encoder.layers:
         attention = layer.self_attn
@@ -109,7 +140,7 @@ def install_univariate_attention(module, *, verify=False, check_source=True):
             raise RuntimeError('Moirai attention already has an instance-level forward')
 
         def forward(self, *args, **kwargs):
-            return _univariate_forward(self, *args, state=state, verify=verify, **kwargs)
+            return _univariate_forward(self, *args, state=state, variates=variates, verify=verify, **kwargs)
 
         attention.forward = types.MethodType(forward, attention)
         patched.append(attention)
