@@ -89,9 +89,10 @@ Use the checkout's environments, not global Python packages:
 - Save a baseline before optimizing. Compare matching workloads and settings;
   record revisions, hardware, precision, warmups, timing boundaries, failures,
   and memory methodology. Distinguish observed, imputed, and synthetic data.
-- Describe only what is implemented and measured. TimesFM can execute compatible
-  whole forecasts together and enforces a validated numerical envelope. Toto and
-  Moirai retain their upstream forecast paths. TimesFM can opt into forecast-block
+- Describe only what is implemented and measured. Whole-forecast batching uses
+  each adapter's own cost policy. TimesFM has a measured numerical envelope;
+  Toto/Moirai candidate caps still require the documented idle-GPU validation.
+  TimesFM can opt into forecast-block
   scheduling; no new attention kernel or vLLM-managed KV is claimed.
 - Use an idle GPU and free port for benchmarks. Do not interrupt another
   person's workload or change shared drivers/services without authorization.
@@ -137,12 +138,16 @@ Use the checkout's environments, not global Python packages:
   Serving changes need real staggered-arrival, completion, error/cancellation,
   parity and peak-memory checks. Keep timing passes untraced and queue diagnostics
   separately labeled.
-- Follow [numerical admission](docs/numerical-admission.md) for TimesFM limits.
+- Follow [numerical admission](docs/numerical-admission.md) for each model's limits.
   Request overload must fail before EngineCore submission. Split scheduled work
   within model-call budgets; validate the full resident slot envelope at startup.
   JSON overrides may tighten measured ceilings only. The shared resident-byte
   bound excludes model scratch/weights; raising ceilings needs fresh GPU peak
-  measurements. Keep Toto/Moirai admission support unclaimed until validated.
+  measurements. Run `tests/test_model_admission.py` with
+  `VTSFM_RUN_ADMISSION_ADAPTER=toto2` or `moirai2` in that adapter's environment;
+  candidate policy metadata is not measured model capacity. Do not silently
+  raise Moirai's eight-row or Toto's sixteen-row candidate caps. Compact public
+  outputs must not retain larger native scratch allocations through views.
 - Shared IO has no pending map; output metadata travels in the versioned result
   tensor. See [request lifecycle](docs/request-lifecycle.md). For lifecycle
   changes, run the opt-in TimesFM offline/HTTP failure and cancellation suite

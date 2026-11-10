@@ -12,7 +12,8 @@ For tensor adapters and shared worker work, use the
 [prepared execution contract](docs/execution-contract.md) and its CPU example.
 Chronos-2 delegates to the pinned Chronos integration. TimesFM supports compatible
 whole-forecast batching and opt-in [forecast-block scheduling](docs/continuous-batching.md).
-Toto and Moirai retain whole-forecast pooling wrappers. Do not describe an
+Toto and Moirai have candidate admission/batching paths whose GPU qualification
+is recorded in [numerical admission](docs/numerical-admission.md). Do not describe an
 optimization as implemented until code, numerical checks, and measurements exist.
 
 ## Local checks
@@ -85,7 +86,7 @@ precision/approximation or optimization changes and retain the raw evidence.
    the prepared input/output shapes when implementing `ForecastExecutor`.
    Preserve independent requests and cross-learning semantics. Keep the shared
    planner independent of model imports; model-specific target/covariate filtering
-   and kernels belong in the adapter. Live TimesFM execution uses the shared worker
+   and kernels belong in the adapter. Live numerical execution uses the shared worker
    planner; metadata planning tests alone do not validate execution or performance.
 5. Verify CPU-safe discovery and selection, invalid-name failures, preparation and
    output semantics, and numerical parity on an idle GPU with matching native

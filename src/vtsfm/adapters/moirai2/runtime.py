@@ -83,5 +83,9 @@ class MoiraiRuntime:
             target_dim=1, feat_dynamic_real_dim=0, past_feat_dynamic_real_dim=0,
         ).to(context.device).eval()
         # Upstream returns [rows, 9 quantiles, horizon] for univariate targets.
-        return runner(past_target=target.unsqueeze(-1), past_observed_target=observed.unsqueeze(-1),
-                      past_is_pad=padding)
+        quantiles = runner(past_target=target.unsqueeze(-1), past_observed_target=observed.unsqueeze(-1),
+                           past_is_pad=padding)
+        # A one-patch result can be a contiguous view into the full-context
+        # quantile grid; longer crops may retain patch-rounded predictions.
+        # Own exactly the public bytes used by shared resident accounting.
+        return quantiles.clone(memory_format=torch.contiguous_format)
