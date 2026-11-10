@@ -7,9 +7,8 @@ batching and optional TimesFM forecast-block scheduling. Execution preserves the
 pinned upstream numerical behavior.
 
 TimesFM 2.5, Toto 2 313M, and Moirai 2.0 small use `adapters/pooling.py` and
-`adapters/multimodal.py` for the same whole-forecast execution pattern. TimesFM
-uses a device-resident tensor path around the upstream decoder. Toto and Moirai
-call their upstream forecast APIs. Each adapter's `spec.py` owns its forecast
+`adapters/multimodal.py` for the same whole-forecast execution pattern. TimesFM, Toto, and Moirai
+all use a device-resident tensor path around the upstream decoder. Each adapter's `spec.py` owns its forecast
 limits, defaults, and output
 quantile order; shared IO consumes those settings. `hf_config.py` bridges the
 upstream configuration files into vLLM without requiring a Transformers
@@ -130,7 +129,12 @@ compatible requests that vLLM has already scheduled in the same worker forward.
 
 The [prepared execution contract](execution-contract.md) binds a plan to validated
 input tensors and defines row-aligned results, per-request splitting, and
-conservative model capability metadata. TimesFM implements the prepared
+conservative model capability metadata. 
+
+Moirai implements the prepared executor for independent rows, including ragged lengths, and its live worker path uses the
+same tensor forecast core for each scheduled request.
+
+TimesFM implements the prepared
 executor for equal-length independent rows. The runner supplies scheduled
 requests in slot order. The shared execution helper plans batches, calls the
 executor, and splits outputs by request ID before the pooler crops each slot.

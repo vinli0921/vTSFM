@@ -12,6 +12,9 @@ FORECAST_SETTINGS = ForecastSettings(
     quantiles=(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
     default_horizon=96, default_quantiles=(0.1, 0.5, 0.9),
 )
+# From config.json at MODEL_REVISION; GPU tests check the loaded checkpoint.
+PATCH_SIZE = 16
+OUTPUT_BLOCK_SIZE = PATCH_SIZE * 4  # patch_size * num_predict_token per decoder pass
 MOIRAI2 = AdapterSpec(
     name='moirai2', model_id=MODEL_ID, model_revision=MODEL_REVISION,
     architectures=('VTSFMMoiraiForForecasting',),
@@ -27,7 +30,10 @@ MOIRAI2 = AdapterSpec(
     execution_capabilities=ExecutionCapabilities(
         max_context=FORECAST_SETTINGS.max_context, max_horizon=FORECAST_SETTINGS.max_horizon,
         quantiles=FORECAST_SETTINGS.quantiles, supports_point_forecast=False,
-        # patch_size and patch_size * num_predict_token come from the checkpoint.
-        # Ragged batching stays disabled pending the #10 masking/parity checks.
+        input_patch_size=PATCH_SIZE, output_block_size=OUTPUT_BLOCK_SIZE,
+        supports_ragged_batching=True,
+        # Horizons beyond one block recurse on all 9 quantile trajectories (9x rows).
+        # Ragged rows are masked as padding; tests/test_moirai_runtime.py checks
+        # them against isolated official forecasts on the GPU.
     ),
 )

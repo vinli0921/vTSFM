@@ -5,7 +5,7 @@ adapters. It imports no Torch, vLLM, NumPy, or model packages. Its validation an
 the CPU example can be used before the live worker integration exists.
 
 The current serving wrappers still call whole upstream forecasts through
-`adapters/pooling.py`. Toto and TimesFM implements `ForecastExecutor` for prepared batches
+`adapters/pooling.py`. Toto, Moirai, and TimesFM implement `ForecastExecutor` for prepared batches
 of independent rows with equal true history lengths and fully observed values after left padding. The live serving wrapper can use this contract for compatible HTTP requests
 scheduled together. Individual forecasts use the same tensor forecast core.
 
@@ -57,14 +57,23 @@ support:
 | --- | --- | --- | --- |
 | TimesFM 2.5 | 8192 / 1024 | 32 / 128 | FP32 |
 | Toto 2 | 8192 / 1024 | 32 / 768 | FP32 |
-| Moirai 2.0 | 7168 / 1024 | checkpoint-configured (`None`) / checkpoint-configured (`None`) | FP32 |
+| Moirai 2.0 | 7168 / 1024 | 16 / 64 | FP32 |
 
 All three declare independent singleton groups, nine available quantiles
-(0.1–0.9), no point-only output, and no validated ragged batching or block
-stepping. Their existing HTTP paths still accept unequal histories; these flags
-gate the new contract until adapter parity tests establish safe collation.
+(0.1–0.9), no point-only output, and no block stepping. TimesFM and Toto declare
+no validated ragged batching. Their existing HTTP paths still accept unequal
+histories; the flag gates the new contract until adapter parity tests establish
+safe collation.
 Unknown patch/block sizes stay `None` until the loaded checkpoint supplies them.
 Chronos-2 has no declaration for this boundary yet.
+
+Moirai's sizes come from the pinned `config.json`: 16-point patches and four
+predicted patches per decoder pass. Horizons beyond 64 points recurse over all
+nine quantile trajectories. The HTTP path masks shorter histories in a request
+as padding, so each row forecasts as it would alone; batched upstream `predict`
+does not. The prepared executor uses the same masking for ragged batches, which
+GPU tests check against isolated official forecasts. It rejects interior gaps
+because upstream's causal-mean imputation is not reproduced.
 
 TimesFM's HTTP path supports ragged histories within a request. Its outer
 normalization includes the zero left padding up to the next 32-point patch of

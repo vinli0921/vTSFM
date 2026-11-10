@@ -97,7 +97,7 @@ Wire metadata is separate from the [prepared execution contract](execution-contr
 The batch helper builds `PreparedBatch` only when several requests will share
 execution. Validating those prepared masks synchronizes with the GPU.
 Normalization, patching, attention, and output semantics belong to the adapter.
-Moirai's current NumPy wrapper returns CPU tensors for the worker to stage.
+Moirai's tensor path returns forecasts on the execution device.
 
 Run the real TimesFM batching check on an idle Linux GPU:
 
