@@ -31,3 +31,21 @@ MOIRAI2 = AdapterSpec(
         # Ragged batching stays disabled pending the #10 masking/parity checks.
     ),
 )
+
+# Experimental attention implementation for the Moirai runtime (issue #24).
+# 'upstream' (default) runs pinned uni2ts attention unchanged. 'univariate'
+# replaces it on the loaded model with an exact 4-D fused-SDPA path that drops
+# the per-head constant variate bias; valid because this adapter serves only
+# univariate rows. The server inherits the variable from the launching shell.
+MOIRAI_ATTENTION_ENV = 'VTSFM_MOIRAI_ATTENTION'
+MOIRAI_ATTENTION_MODES = ('upstream', 'univariate')
+
+
+def resolve_attention_mode(environ=None):
+    """Return the selected attention mode; reject unknown values explicitly."""
+    import os
+
+    value = (os.environ if environ is None else environ).get(MOIRAI_ATTENTION_ENV, 'upstream')
+    if value not in MOIRAI_ATTENTION_MODES:
+        raise ValueError(f'{MOIRAI_ATTENTION_ENV} must be one of {", ".join(MOIRAI_ATTENTION_MODES)}; got {value!r}')
+    return value
