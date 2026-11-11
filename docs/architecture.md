@@ -142,7 +142,7 @@ Each adapter's [numerical admission policy](numerical-admission.md) checks reque
 cost before submission, validates scheduled residency at startup, and splits
 compatible model calls by row/work budgets. The adapter owns its patch/block
 cost formula and ceilings; other model families do not inherit them. Toto and
-Moirai candidate caps still require the documented real-model GPU qualification.
+Moirai caps are qualified by the documented A100 native/HTTP and memory probes.
 The optional [continuous path](continuous-batching.md) resumes TimesFM between
 forecast blocks. vLLM schedules one marker per block and returns results only at
 completion. The adapter owns both flip-pass caches; shared policy bounds total

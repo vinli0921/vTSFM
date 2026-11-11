@@ -90,8 +90,8 @@ Use the checkout's environments, not global Python packages:
   record revisions, hardware, precision, warmups, timing boundaries, failures,
   and memory methodology. Distinguish observed, imputed, and synthetic data.
 - Describe only what is implemented and measured. Whole-forecast batching uses
-  each adapter's own cost policy. TimesFM has a measured numerical envelope;
-  Toto/Moirai candidate caps still require the documented idle-GPU validation.
+  each adapter's own cost policy. TimesFM, Toto and Moirai have measured A100
+  numerical envelopes; changes to their runtime or ceilings need fresh validation.
   TimesFM can opt into forecast-block
   scheduling; no new attention kernel or vLLM-managed KV is claimed.
 - Use an idle GPU and free port for benchmarks. Do not interrupt another
@@ -145,9 +145,11 @@ Use the checkout's environments, not global Python packages:
   bound excludes model scratch/weights; raising ceilings needs fresh GPU peak
   measurements. Run `tests/test_model_admission.py` with
   `VTSFM_RUN_ADMISSION_ADAPTER=toto2` or `moirai2` in that adapter's environment;
-  candidate policy metadata is not measured model capacity. Do not silently
-  raise Moirai's eight-row or Toto's sixteen-row candidate caps. Compact public
-  outputs must not retain larger native scratch allocations through views.
+  policy metadata alone is not measured model capacity. Do not silently raise
+  Moirai's eight-row or Toto's sixteen-row caps. Compact public outputs must not
+  retain larger native scratch allocations through views. Preserve Moirai's
+  explicit Lightning constructor-frame handling and GC-disabled input-lifetime
+  regression; neither per-request GC nor looser memory tolerances replaces it.
 - Shared IO has no pending map; output metadata travels in the versioned result
   tensor. See [request lifecycle](docs/request-lifecycle.md). For lifecycle
   changes, run the opt-in TimesFM offline/HTTP failure and cancellation suite

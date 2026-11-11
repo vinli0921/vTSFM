@@ -12,8 +12,8 @@ For tensor adapters and shared worker work, use the
 [prepared execution contract](docs/execution-contract.md) and its CPU example.
 Chronos-2 delegates to the pinned Chronos integration. TimesFM supports compatible
 whole-forecast batching and opt-in [forecast-block scheduling](docs/continuous-batching.md).
-Toto and Moirai have candidate admission/batching paths whose GPU qualification
-is recorded in [numerical admission](docs/numerical-admission.md). Do not describe an
+Toto and Moirai support bounded whole-forecast batching; their A100 admission
+qualification is recorded in [numerical admission](docs/numerical-admission.md). Do not describe an
 optimization as implemented until code, numerical checks, and measurements exist.
 
 ## Local checks

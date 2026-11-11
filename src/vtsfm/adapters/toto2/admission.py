@@ -3,8 +3,8 @@
 from vtsfm.admission import ForecastCost, ForecastLimits
 
 
-# Candidate FP32 shape ceilings; separate GPU measurements must establish the
-# native scratch/cache envelope before these are described as validated.
+# FP32 shape ceilings qualified on the reference A100; see numerical-admission.md.
+# Model scratch/cache peaks remain separate from shared resident accounting.
 DEFAULT_LIMITS = ForecastLimits(
     max_request_rows=16, max_context=8192, max_horizon=1024,
     max_execution_rows=16, max_execution_work=1401856,

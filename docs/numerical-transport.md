@@ -89,10 +89,10 @@ four requests and the configured row cap. Ragged, oversized, or unmatched
 requests execute individually. The cap bounds fused rows. Numerical workload
 and memory admission use adapter-specific
 [numerical policy](numerical-admission.md), including standalone requests and
-all scheduled slots. Toto/Moirai candidate policies and live fusion must pass the
-manual validation in [issue #12](https://github.com/vinli0921/vTSFM/issues/12)
-before their capacity is called measured. TimesFM forecast-block scheduling is
-implemented separately in [issue #15](https://github.com/vinli0921/vTSFM/issues/15).
+all scheduled slots. Toto/Moirai policies and live fusion were qualified with
+real-checkpoint A100 probes for [issue #12](https://github.com/vinli0921/vTSFM/issues/12).
+Re-run the manual suite when changing the execution path or envelope. TimesFM
+forecast-block scheduling is implemented separately in [issue #15](https://github.com/vinli0921/vTSFM/issues/15).
 
 Wire metadata is separate from the [prepared execution contract](execution-contract.md).
 The batch helper builds `PreparedBatch` only when several requests will share
