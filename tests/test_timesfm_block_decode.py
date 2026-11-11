@@ -177,8 +177,9 @@ def test_uniform_group_positions_match_independent_native_requests(model):
 
 
 @torch.inference_mode()
-def test_reordered_groups_and_repeated_advances_preserve_positions_and_masks(model):
-    groups, inputs, masks = _heterogeneous_prefills(model, (18, 22, 18))
+@pytest.mark.parametrize('capacities', [(18, 22, 18), (22, 22, 22)], ids=['separate', 'packed'])
+def test_reordered_groups_and_repeated_advances_preserve_positions_and_masks(model, capacities):
+    groups, inputs, masks = _heterogeneous_prefills(model, capacities)
     masks[1, 0] = True  # Preserve native cumulative masked-count promotion.
     expected, serial_caches = _serial_forward(model, inputs, masks, groups)
     order = torch.tensor([2, 0, 1])
@@ -261,6 +262,67 @@ def test_neural_layers_batch_once_and_native_masks_are_reused_across_layers(mode
 
 
 @torch.inference_mode()
+def test_equal_width_native_attention_uses_temporary_packs_and_one_mask(model, monkeypatch):
+    from vtsfm.adapters.timesfm25 import block_decode
+
+    groups, inputs, masks = _heterogeneous_prefills(model, (18, 18, 18))
+    masks[1, 0] = True
+    expected, serial_caches = _serial_forward(model, inputs, masks, groups)
+    originals = [_clone_caches(caches) for caches in groups]
+    pointers = [[(cache.key.data_ptr(), cache.value.data_ptr()) for cache in caches]
+                for caches in groups]
+    original_inputs, original_masks = inputs.clone(), masks.clone()
+    calls, packed_refs, created_masks = [], [], []
+    original_mask = block_decode.make_attn_mask
+
+    def record_mask(**kwargs):
+        mask = original_mask(**kwargs)
+        created_masks.append(mask.clone())
+        return mask
+
+    monkeypatch.setattr(block_decode, 'make_attn_mask', record_mask)
+    for index, layer in enumerate(model.stacked_xf):
+        original = layer.attn.attention_fn
+
+        def record(query, key, value, mask=None, original=original, index=index):
+            assert query.shape == (3, 4, model.h, model.hd)
+            assert key.shape == value.shape == (3, 18, model.h, model.hd)
+            assert key.data_ptr() not in [group[index].key.data_ptr() for group in groups]
+            assert value.data_ptr() not in [group[index].value.data_ptr() for group in groups]
+            torch.testing.assert_close(key, torch.cat([group[index].key for group in groups]), rtol=0, atol=0)
+            torch.testing.assert_close(value, torch.cat([group[index].value for group in groups]), rtol=0, atol=0)
+            calls.append((index, mask.data_ptr(), mask.clone()))
+            packed_refs.extend(weakref.ref(tensor) for tensor in (key, value, mask))
+            return original(query, key, value, mask=mask)
+
+        monkeypatch.setattr(layer.attn, 'attention_fn', record)
+    actual, returned = block_decode_forward(model, inputs, masks, groups, [3, 7, 1])
+    assert returned is groups
+    assert len(calls) == model.x
+    assert len(created_masks) == len(groups)
+    assert len({mask_ptr for _, mask_ptr, _ in calls}) == 1
+    for _, _, mask in calls:
+        torch.testing.assert_close(mask, torch.cat(created_masks), rtol=0, atol=0)
+    for value, reference in zip(actual, expected, strict=True):
+        torch.testing.assert_close(value, reference, rtol=1e-5, atol=1e-6)
+    for row, (caches, position) in enumerate(zip(groups, [3, 7, 1], strict=True)):
+        for layer, cache in enumerate(caches):
+            assert (cache.key.data_ptr(), cache.value.data_ptr()) == pointers[row][layer]
+            for name in ('key', 'value'):
+                tensor, saved = getattr(cache, name), getattr(originals[row][layer], name)
+                reference = getattr(serial_caches[row][layer], name)
+                torch.testing.assert_close(tensor[:, :position], saved[:, :position], rtol=0, atol=0)
+                torch.testing.assert_close(tensor[:, position:position + 4], reference[:, position:position + 4], rtol=1e-5, atol=1e-6)
+                torch.testing.assert_close(tensor[:, position + 4:], saved[:, position + 4:], rtol=0, atol=0)
+            torch.testing.assert_close(cache.next_index, serial_caches[row][layer].next_index, rtol=0, atol=0)
+            torch.testing.assert_close(cache.num_masked, serial_caches[row][layer].num_masked, rtol=0, atol=0)
+    torch.testing.assert_close(inputs, original_inputs, rtol=0, atol=0)
+    torch.testing.assert_close(masks, original_masks, rtol=0, atol=0)
+    gc.collect()
+    assert all(reference() is None for reference in packed_refs)
+
+
+@torch.inference_mode()
 def test_hoisted_metadata_is_rebuilt_for_changed_calls_and_not_retained(model, monkeypatch):
     from vtsfm.adapters.timesfm25 import block_decode
 
@@ -291,7 +353,8 @@ def test_hoisted_metadata_is_rebuilt_for_changed_calls_and_not_retained(model, m
 
 
 @torch.inference_mode()
-def test_grouped_helper_never_extracts_tensor_counter_to_host(model):
+@pytest.mark.parametrize('capacities', [(12, 14, 10), (14, 14, 14)], ids=['separate', 'packed'])
+def test_grouped_helper_never_extracts_tensor_counter_to_host(model, capacities):
     from torch.utils._python_dispatch import TorchDispatchMode
 
     class NoHostScalar(TorchDispatchMode):
@@ -300,7 +363,7 @@ def test_grouped_helper_never_extracts_tensor_counter_to_host(model):
                 raise AssertionError('decode read a Tensor scalar back to the host')
             return func(*args, **(kwargs or {}))
 
-    groups, inputs, masks = _heterogeneous_prefills(model)
+    groups, inputs, masks = _heterogeneous_prefills(model, capacities)
     with NoHostScalar():
         block_decode_forward(model, inputs, masks, groups, [3, 7, 1])
 

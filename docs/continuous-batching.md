@@ -34,23 +34,25 @@ Each request owns its normalization, masks, positivity flag, independent normal
 and flipped streams, running statistics, median feedback, quantile spread,
 output buffer and KV caches. Feedback stays separate between flip streams.
 Quantiles, crossing correction and de-normalization preserve pinned semantics.
+Prefill keeps separate flip-pass calls. AR combines normal and flipped rows in
+one neural call while retaining each stream's own statistics and feedback.
 
 Prefill calls can share a padded context width. AR calls can also combine
 requests at different physical cache positions. The pinned upstream attention
 writes every cache row through the first row's index, so simply combining those
 requests would corrupt state. Shared calls instead batch the native tokenizer,
-projections, RoPE, normalization, MLP and forecast heads, then run the native
-attention function separately on each request's own caches and masks. Each
+projections, RoPE, normalization, MLP and forecast heads. Equal-capacity groups
+temporarily gather layer K/V for one native attention call with their native
+row masks; unequal capacities keep separate native attention calls. Each
 request writes its four new patches at its CPU-known position, without reading
 a CUDA counter back to the host. Attention keeps that owner's original cache
-width. Singleton calls retain the upstream model forward. Class-source guards
+width. Singleton AR also combines its two flip streams. Class-source guards
 require revalidation before changing the pinned implementation; model methods
 and weights are not replaced.
 
-Each request retains its own persistent cache allocations. Singleton calls
-advance those buffers directly. Shared AR calls also update those exact buffers
-in place, combining only the small attention outputs and position counters.
-No full KV packing or copyback occurs during decode. Allocations and existing
+Each request retains its own persistent cache allocations. AR calls update those
+exact buffers in place; temporary per-layer attention packs do not replace them
+and require no cache copyback. Allocations and existing
 prefixes persist when requests have different capacities or are reordered.
 Initial shared prefill splits its cache once, so retiring a request cannot
 retain a peer's backing allocation.
@@ -93,10 +95,17 @@ their existing whole-forecast paths.
 
 Both flip-pass caches now persist between iterations. All active requests
 together must fit the configured execution-row/work limits: by default **16
-rows and 2,580,992 work units**, not four independent 16-row caches. New prefills
+independent input series and 2,580,992 work units**, not four independent 16-row caches. New prefills
 wait for capacity. Mixed-horizon calls conservatively charge the largest cache
 capacity for every row and split within the model-call budget, even though each
 request's attention uses its own width.
+
+Admission and fusion rows count prepared independent series. Combining both
+flip passes gives an internal AR neural batch of `2*sum(series_count)`, at most
+32 rows. The existing work charge already includes both passes. All ceilings
+and persistent KV accounting remain unchanged; the larger internal AR batch
+and temporary attention packs need fresh GPU parity and peak-memory checks.
+The historical capacity measurements below predate this variant.
 
 For the pinned 20-layer, 16-head, width-80 FP32 model:
 
@@ -172,10 +181,10 @@ CUDA_VISIBLE_DEVICES='' PYTHONPATH=src:tests:. \
 They explicitly initialize nonzero RMS scales so the mixed-position negative
 control reaches meaningful attention. The original scalar-write native batch
 must fail that control while independent native rows pass. These checks establish
-numerical behavior, original-cache ownership and the absence of full KV packing.
+numerical behavior and original-cache ownership, including temporary-pack cleanup.
 Issue #49's acceptance still needs the manual matched whole-versus-continuous
-comparison below. Whole-forecast compilation does not cover the private shared
-block decoder; block-mode measurements here use eager execution.
+comparison below. The standalone path executes native eager math for both
+whole forecasts and shared block decoding.
 
 ## Offered-load comparison
 

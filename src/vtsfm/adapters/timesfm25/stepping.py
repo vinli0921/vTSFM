@@ -5,9 +5,9 @@
 # See https://github.com/google-research/timesfm and the repository LICENSE.
 """Resumable TimesFM forecasts with adapter-owned, request-local decode caches.
 
-Shared decode calls batch neural layers and run native attention on each
-request's owned caches. No full-cache packing or copyback is needed between
-blocks, and retired requests retain no peer storage.
+Shared decode calls batch neural layers while preserving each request's owned
+caches. Temporary attention gathers never replace those caches, and retired
+requests retain no peer storage.
 """
 
 from dataclasses import dataclass, field
@@ -86,6 +86,8 @@ class TimesFMStepper:
     Inputs are FP32 tensors ``[series, raw padded history]`` with left NaNs for
     missing history. States and forecasts stay on the model device. Normal and
     sign-flipped decoders retain independent running stats, feedback and caches.
+    AR calls batch both passes, so the internal neural batch has twice the
+    independent series counted by admission; the work bound includes both flips.
     """
 
     def __init__(self, runtime):
@@ -207,10 +209,13 @@ class TimesFMStepper:
         spread = revin(spread, context_mu, context_sigma, reverse=True).reshape(rows, -1, self.model.os, self.model.q)[:, -1]
         self._store(states, stream, caches, (n, mu, sigma), point, spread)
 
-    def _advance_pass(self, states, stream):
-        inputs = torch.cat([state.passes[stream].feedback for state in states]).reshape(-1, self.model.m, self.model.p)
+    def _advance_passes(self, states):
+        # Stream-major order keeps normal and flipped statistics independent.
+        streams = [state.passes[stream] for stream in range(2) for state in states]
+        rows = sum(state.rows for state in states)
+        inputs = torch.cat([stream.feedback for stream in streams]).reshape(-1, self.model.m, self.model.p)
         masks = torch.zeros_like(inputs, dtype=torch.bool)
-        n, mu, sigma = (torch.cat([getattr(state.passes[stream], name) for state in states])
+        n, mu, sigma = (torch.cat([getattr(stream, name) for stream in streams])
                         for name in ('last_n', 'last_mu', 'last_sigma'))
         means, sigmas = [], []
         for patch in range(self.model.m):
@@ -219,20 +224,16 @@ class TimesFMStepper:
             sigmas.append(sigma)
         context_mu, context_sigma = torch.stack(means, 1), torch.stack(sigmas, 1)
         inputs = revin(inputs, context_mu, context_sigma, reverse=False)
-        if len(states) == 1:
-            caches = states[0].passes[stream].caches
-            (_, _, point, _), caches = self.model(inputs, masks, caches)
-        else:
-            from .block_decode import block_decode_forward
+        from .block_decode import block_decode_forward
 
-            (_, _, point, _), _ = block_decode_forward(
-                self.model, inputs, masks,
-                [state.passes[stream].caches for state in states],
-                [state.cache_position for state in states],
-            )
-            caches = None  # Request-owned caches were already updated in place.
+        (_, _, point, _), _ = block_decode_forward(
+            self.model, inputs, masks, [stream.caches for stream in streams],
+            [state.cache_position for _ in range(2) for state in states],
+        )
         point = revin(point, context_mu, context_sigma, reverse=True).reshape(-1, self.model.m, self.model.o, self.model.q)[:, -1]
-        self._store(states, stream, caches, (n, mu, sigma), point)
+        for stream in range(2):
+            section = slice(stream * rows, (stream + 1) * rows)
+            self._store(states, stream, None, tuple(value[section] for value in (n, mu, sigma)), point[section])
 
     def _finish_block(self, states):
         for state in states:
@@ -266,8 +267,7 @@ class TimesFMStepper:
     @torch.inference_mode()
     def advance(self, states):
         states = self._cohort(states, 'decode')
-        self._advance_pass(states, 0)
-        self._advance_pass(states, 1)
+        self._advance_passes(states)
         self._finish_block(states)
 
     def finalize(self, state):

@@ -14,13 +14,15 @@ initialization and identical per-layer updates. No counter is read back to CPU.
 
 Tokenizer, QKV, RoPE, normalization, output projection, MLP and forecast heads
 stay batched. Native masks and integer position/count metadata are built once
-per forward and reused across layers. Only native attention runs separately per
-request, using its own cache width and in-place writes. Concatenation combines
-the small four-patch attention outputs and counters; K/V is never packed.
+per forward and reused across layers. Each request updates its own K/V in place.
+Equal-width caches use temporary per-layer K/V concatenation for one batched
+native attention call; different widths keep separate native calls. Temporary
+packs never replace the owned caches or require cache copyback.
 
 The caller owns inference mode and request lifetimes. This helper never changes
-model methods or weights. Singleton and whole-forecast calls keep the original
-native path. Call ``validate_block_decode_source`` once in the stepper constructor.
+model methods or weights. Prefill and whole-forecast calls keep the original
+native path; singleton AR also batches its two flip groups through this helper.
+Call ``validate_block_decode_source`` once in the stepper constructor.
 """
 
 import hashlib
@@ -107,7 +109,8 @@ def _decode_metadata(inputs, masks, groups):
     return position, num_masked, attn_masks
 
 
-def _attention_forward(attention, inputs_q, groups, layer_index, position, num_masked, attn_masks):
+def _attention_forward(attention, inputs_q, groups, layer_index, position, num_masked, attn_masks,
+                       batched_mask):
     # Follow pinned MultiHeadAttention.forward math through the scaled Q/K/V.
     b, n_patches, _ = inputs_q.shape
 
@@ -132,8 +135,7 @@ def _attention_forward(attention, inputs_q, groups, layer_index, position, num_m
     if attention.use_per_dim_scale:
         query = attention.per_dim_scale(query)
 
-    attended = []
-    for (section, caches, start), attn_mask in zip(groups, attn_masks, strict=True):
+    for section, caches, start in groups:
         cache = caches[layer_index]
         stop = start + n_patches
         # Python integer slices use known request geometry, avoiding the native
@@ -142,21 +144,29 @@ def _attention_forward(attention, inputs_q, groups, layer_index, position, num_m
         cache.value[:, start:stop].copy_(value[section])
         cache.next_index += n_patches
         cache.num_masked = num_masked[section].clone()
-        attended.append(attention.attention_fn(
-            query[section], cache.key, cache.value, mask=attn_mask,
-        ))
 
-    x = torch.cat(attended, dim=0)
+    if batched_mask is not None:
+        # Full native widths and per-row masks are unchanged. Only these
+        # temporary gathers combine independent owners; no K/V is scattered back.
+        key = torch.cat([caches[layer_index].key for _, caches, _ in groups])
+        value = torch.cat([caches[layer_index].value for _, caches, _ in groups])
+        x = attention.attention_fn(query, key, value, mask=batched_mask)
+    else:
+        attended = [attention.attention_fn(
+            query[section], caches[layer_index].key, caches[layer_index].value, mask=attn_mask,
+        ) for (section, caches, _), attn_mask in zip(groups, attn_masks, strict=True)]
+        x = torch.cat(attended, dim=0)
     x = x.reshape(b, n_patches, attention.in_features)
     out = attention.out(x)
     return out
 
 
-def _transformer_forward(layer, input_embeddings, groups, layer_index, position, num_masked, attn_masks):
+def _transformer_forward(layer, input_embeddings, groups, layer_index, position, num_masked, attn_masks,
+                         batched_mask):
     # Preserve Transformer.forward's norm, residual and feedforward expressions.
     attn_output = _attention_forward(
         layer.attn, layer.pre_attn_ln(input_embeddings), groups, layer_index,
-        position, num_masked, attn_masks,
+        position, num_masked, attn_masks, batched_mask,
     )
     attn_output = layer.post_attn_ln(attn_output) + input_embeddings
     output_embeddings = (
@@ -175,13 +185,17 @@ def block_decode_forward(model, inputs, masks, cache_groups, positions):
     """
     groups = _decode_groups(model, inputs, masks, cache_groups, positions)
     position, num_masked, attn_masks = _decode_metadata(inputs, masks, groups)
+    capacity = groups[0][1][0].key.shape[1]
+    batched_mask = (torch.cat(attn_masks) if all(
+        caches[0].key.shape[1] == capacity for _, caches, _ in groups
+    ) else None)
     tokenizer_inputs = torch.cat([inputs, masks.to(inputs.dtype)], dim=-1)
     input_embeddings = model.tokenizer(tokenizer_inputs)
 
     output_embeddings = input_embeddings
     for i, layer in enumerate(model.stacked_xf):
         output_embeddings = _transformer_forward(
-            layer, output_embeddings, groups, i, position, num_masked, attn_masks,
+            layer, output_embeddings, groups, i, position, num_masked, attn_masks, batched_mask,
         )
     output_ts = model.output_projection_point(output_embeddings)
     output_quantile_spread = model.output_projection_quantiles(output_embeddings)

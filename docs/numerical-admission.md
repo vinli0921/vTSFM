@@ -14,7 +14,7 @@ policies; their measurement and enablement remain in issue #12.
 | Series per request | 16 |
 | Context points per series | 8,192 |
 | Forecast horizon | 1,024 |
-| Rows per model call | 16 |
+| Prepared independent series per execution | 16 |
 | Attention-work units per model call | 2,580,992 |
 | Scheduled requests (`max_num_seqs`) | 4 |
 | Shared resident tensor accounting | 32 MiB |
@@ -82,6 +82,16 @@ histories are charged at their longest padded width. All nine native quantiles
 are computed regardless of the requested subset. The prefill quantile head
 also computes more values than the cropped public output; its scratch memory
 must be measured separately.
+
+`max_execution_rows` counts prepared independent input series, not internal
+flip-pass rows. The block decoder combines both AR passes into one
+neural batch of `2*R` rows, at most 32 for the unchanged 16-series ceiling.
+Prefill retains separate normal and flipped calls. Work already charges
+`2*R*cache_capacity^2`, and both owned flip caches were already included in
+persistent KV accounting. This changes temporary execution shapes, not request,
+row, work or persistent-cache ceilings. The new 32-row internal AR shape needs
+fresh CUDA parity and capacity measurements; earlier scratch-memory results
+below do not qualify it.
 
 Frontend admission checks both request and standalone execution limits. For
 compatible dense requests, the worker computes the effective fusion row cap as

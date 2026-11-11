@@ -239,6 +239,12 @@ def _queue_counter(url):
                   if (match := pattern.match(line))]
         if values:
             totals[field] = sum(values)
+    for field in ('running', 'waiting'):
+        pattern = re.compile(r'^vllm:num_requests_' + field + r'(?:\{[^}]*\})?\s+([0-9.eE+-]+)$')
+        values = [float(match.group(1)) for line in response.text.splitlines()
+                  if (match := pattern.match(line))]
+        if values:
+            totals[field] = sum(values)
     return totals
 
 
@@ -254,6 +260,43 @@ def _allocator_stats(url, *, reset=False):
     if len(result) != 1:
         raise ValueError('Memory accounting expects exactly one GPU worker')
     return result[0]
+
+
+def _drain_requests(url, path, timeout=30.):
+    """Record an empty engine and worker before primary counters/allocator peaks."""
+    import requests
+
+    began = time.monotonic()
+    record = {'status': 'running', 'observations': []}
+    try:
+        with requests.Session() as session:
+            session.trust_env = False
+            while True:
+                engine = _queue_counter(url)
+                response = session.post(url + '/collective_rpc', json={
+                    'method': 'bench_request_state', 'args': [], 'timeout': 20}, timeout=25)
+                response.raise_for_status()
+                states = response.json()['results']
+                if len(states) != 1:
+                    raise ValueError('Request state accounting expects exactly one GPU worker')
+                state = states[0]
+                record['observations'].append({'elapsed_s': time.monotonic() - began,
+                                               'engine': engine, 'worker': state})
+                if not {'running', 'waiting'} <= engine.keys():
+                    raise RuntimeError('Required engine running/waiting gauges are unavailable')
+                if not {'worker_requests', 'worker_slots'} <= state.keys():
+                    raise RuntimeError('Required worker request/slot counts are unavailable')
+                if engine['running'] == engine['waiting'] == 0 and not any(state.values()):
+                    record['status'] = 'passed'
+                    return record
+                if time.monotonic() - began >= timeout:
+                    raise TimeoutError('Warmup requests did not drain; keep state evidence')
+                time.sleep(.05)
+    except BaseException as error:
+        record.update(status='failed', error=repr(error))
+        raise
+    finally:
+        path.write_text(json.dumps(record, indent=2) + '\n')
 
 
 def _cases(data_dir, count):
@@ -291,6 +334,10 @@ def main(argv=None):
     parser.add_argument('--data-dir', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--requests', type=int, default=100)
+    parser.add_argument('--warmup-requests', type=int, default=0,
+                        help='Untimed offered-arrival warmup per mode/scenario; zero preserves the original protocol')
+    parser.add_argument('--warmup-timeout', type=float, default=120.,
+                        help='Timeout for untimed warmup requests, including lazy compilation')
     parser.add_argument('--modes', default='single,whole,continuous')
     parser.add_argument('--scenarios', default='sparse,saturated,bursty')
     parser.add_argument('--port', type=int, default=18515)
@@ -312,6 +359,10 @@ def main(argv=None):
         parser.error('--queue-limit must be positive')
     if args.requests < 1:
         parser.error('--requests must be positive')
+    if args.warmup_requests < 0:
+        parser.error('--warmup-requests must be nonnegative')
+    if not math.isfinite(args.warmup_timeout) or args.warmup_timeout <= 0:
+        parser.error('--warmup-timeout must be finite and positive')
     if args.diagnostic_requests < 0:
         parser.error('--diagnostic-requests must be nonnegative')
     args.output = args.output.resolve()
@@ -336,7 +387,10 @@ def main(argv=None):
                 'arrival_offsets_s': offsets_by_scenario,
                 'arrival_case_indices': indices_by_scenario,
                 'input_kind': 'AssetOpsBench sensor histories with documented causal fills; repeated queries; no label scoring',
-                'settings': 'eager FP32, TF32 disabled, async scheduling disabled',
+                'settings': (f"{os.environ.get('VTSFM_FORECAST_EXECUTION', 'eager')} FP32, "
+                             'TF32 disabled, async scheduling disabled'),
+                'warmup_requests_per_scenario': args.warmup_requests,
+                'warmup_timeout_s': args.warmup_timeout,
                 'parity_reference_mode': modes[0], 'parity_tolerance': {'rtol': 1e-4, 'atol': 1e-4},
                 'diagnostic_prefix_requests': min(args.requests, args.diagnostic_requests),
                 'source_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
@@ -350,8 +404,10 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, lambda signum, frame: (_ for _ in ()).throw(SystemExit(128 + signum)))
 
     def make_arrivals(scenario, count):
-        offsets = offsets_by_scenario[scenario][:count]
-        workload_cases = [cases[index] for index in indices_by_scenario[scenario][:count]]
+        offsets = arrival_offsets(count, scenario, sparse_interval=args.sparse_interval,
+            saturated_interval=args.saturated_interval, burst_size=args.burst_size,
+            burst_interval=args.burst_interval)
+        workload_cases = [cases[index] for index in case_indices(count, scenario)]
         return [{'offset_s': offset, 'case': case['name'], 'series': len(case['data']['inputs']),
                  'encoded': json.dumps({'model': spec.model_id, 'task': 'plugin', 'data': case['data']},
                                        separators=(',', ':')).encode()}
@@ -386,7 +442,7 @@ def main(argv=None):
             # Both passes warm the same cases; numerical checks are outside replay.
             for index, case in enumerate(cases):
                 response = control.post(url + '/pooling', json={
-                    'model': spec.model_id, 'task': 'plugin', 'data': case['data']}, timeout=120)
+                    'model': spec.model_id, 'task': 'plugin', 'data': case['data']}, timeout=args.warmup_timeout)
                 response.raise_for_status()
                 predictions = response.json()['data']['predictions']
                 expected = args.output / f'expected-{index}.json'
@@ -412,6 +468,19 @@ def main(argv=None):
             primary_results = {}
             with server(mode, directory / 'primary', False) as (owner, child, trace):
                 for scenario in scenarios:
+                    if args.warmup_requests:
+                        # Exercise shared cohorts before capturing primary counters/peaks.
+                        warmup_path = directory / f'warmup-{scenario}.json'
+                        warmup = replay(url, make_arrivals(scenario, args.warmup_requests),
+                            model=spec.model_id, request_prefix=f'warmup-{mode}-{scenario}',
+                            monitor=monitor, cancel=lambda: owner.stop(child),
+                            record_path=warmup_path, timeout=args.warmup_timeout)
+                        warmup.update(mode=mode, scenario=scenario, manifest_sha256=manifest_hash,
+                                      instrumentation='untimed offered-arrival warmup; excluded from primary results')
+                        warmup_path.write_text(json.dumps(warmup, indent=2) + '\n')
+                        if warmup['completed'] != args.warmup_requests or warmup['failed'] or warmup['rejected']:
+                            raise RuntimeError(f'{mode}/{scenario} warmup failed; keep raw evidence')
+                        _drain_requests(url, directory / f'warmup-drain-{scenario}.json')
                     before = _queue_counter(url)
                     allocator_before = _allocator_stats(url, reset=True)
                     result = replay(url, make_arrivals(scenario, args.requests), model=spec.model_id,
