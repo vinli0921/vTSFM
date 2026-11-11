@@ -74,6 +74,8 @@ class _VariateCheck:
 
     The encoder passes the same variate-ID tensor object to every layer, so a
     weak reference lets later layers reuse the result: one host sync per pass.
+    A forward pre-hook on the module clears it before every call, so a caller
+    that reuses an ID buffer and edits it in place is validated again.
     """
 
     def __init__(self):
@@ -123,8 +125,12 @@ def _univariate_forward(self, query, key, value, attn_mask=None, query_var_id=No
 def install_univariate_attention(module, *, verify=False, check_source=True):
     """Patch one ``Moirai2Module`` instance in place; return a function that undoes it.
 
-    Multivariate rows always raise ``ValueError`` (checked once per forward pass).
-    ``verify=True`` repeats that check in every layer (one host sync per layer).
+    Multivariate rows always raise ``ValueError``, checked once per module call:
+    a forward pre-hook on ``module`` clears the per-call caches, so every call is
+    validated even if the caller reuses and mutates its ID tensors. Calling a
+    patched attention layer directly (not through ``module``) checks on its first
+    call only. ``verify=True`` repeats the check in every layer (one host sync
+    per layer).
     """
     if check_source:
         digest = upstream_forward_digest()
@@ -145,7 +151,14 @@ def install_univariate_attention(module, *, verify=False, check_source=True):
         attention.forward = types.MethodType(forward, attention)
         patched.append(attention)
 
+    def reset_call_caches(_module, _args):
+        state.ref = None
+        variates.ref = None
+
+    hook = module.register_forward_pre_hook(reset_call_caches)
+
     def uninstall():
+        hook.remove()
         for attention in patched:
             vars(attention).pop('forward', None)
 

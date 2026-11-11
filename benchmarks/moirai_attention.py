@@ -251,6 +251,7 @@ def snapshot(args):
     import torch
 
     out = Path(args.output)
+    out.mkdir(parents=True, exist_ok=True)
     rows = []
     for arm in ARMS:
         module = _setup(arm)

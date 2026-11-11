@@ -195,6 +195,27 @@ def test_variate_check_runs_once_per_forward_pass(lib, module, monkeypatch):
     assert len(calls) == TINY['num_layers'] and sum(calls) == 1
 
 
+def test_reused_id_buffer_is_revalidated_on_every_module_call(lib, module):
+    torch = lib.torch
+    tokens, patch = 4, TINY['patch_size']
+    target = torch.randn(1, tokens, patch)
+    observed = torch.ones(1, tokens, patch, dtype=torch.bool)
+    sample_id = torch.ones(1, tokens, dtype=torch.long)
+    time_id = torch.arange(tokens).unsqueeze(0)
+    variate_id = torch.zeros(1, tokens, dtype=torch.long)
+    prediction_mask = torch.zeros(1, tokens, dtype=torch.bool)
+    uninstall = lib.attention.install_univariate_attention(module)
+    try:
+        with torch.inference_mode():
+            module(target, observed, sample_id, time_id, variate_id, prediction_mask, training_mode=False)
+            variate_id[0, 2:] = 1  # same buffer, now multivariate
+            with pytest.raises(ValueError, match='exact only for univariate input'):
+                module(target, observed, sample_id, time_id, variate_id, prediction_mask, training_mode=False)
+    finally:
+        uninstall()
+    assert not module._forward_pre_hooks, 'uninstall should remove the cache-reset hook'
+
+
 def test_verify_rejects_more_than_one_variate(lib, module):
     torch = lib.torch
     attention = module.encoder.layers[0].self_attn
@@ -238,3 +259,23 @@ def test_runtime_installs_only_when_selected(lib, monkeypatch):
     monkeypatch.setenv(MOIRAI_ATTENTION_ENV, 'bogus')
     with pytest.raises(ValueError):
         runtime.MoiraiRuntime(TINY)
+
+
+def test_snapshot_creates_its_output_directory_before_gpu_work(tmp_path, monkeypatch):
+    from types import SimpleNamespace as Args
+
+    from benchmarks import moirai_attention as bench
+
+    class Stop(Exception):
+        pass
+
+    def stop(*args, **kwargs):
+        raise Stop
+
+    monkeypatch.setattr(bench, '_setup', stop)
+    monkeypatch.setitem(__import__('sys').modules, 'torch', __import__('types').ModuleType('torch'))
+    monkeypatch.setitem(__import__('sys').modules, 'pickle', __import__('pickle'))
+    out = tmp_path / 'new' / 'results'
+    with pytest.raises(Stop):
+        bench.snapshot(Args(output=str(out), batch=1, context=32, horizon=16))
+    assert out.is_dir()
