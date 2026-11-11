@@ -89,9 +89,14 @@ neural batch of `2*R` rows, at most 32 for the unchanged 16-series ceiling.
 Prefill retains separate normal and flipped calls. Work already charges
 `2*R*cache_capacity^2`, and both owned flip caches were already included in
 persistent KV accounting. This changes temporary execution shapes, not request,
-row, work or persistent-cache ceilings. The new 32-row internal AR shape needs
-fresh CUDA parity and capacity measurements; earlier scratch-memory results
-below do not qualify it.
+row, work or persistent-cache ceilings. Standalone eager commit `b9fffd25`
+passed fresh native-parity checks and synthetic capacity probes that exercised
+the 32-row internal AR corner. A further test-only commit, `c2b994f6`, compared
+16 ragged C8141–8192/H1024 histories with a separate official native model,
+using both one 16-series owner and four four-series owners. All nine quantiles
+passed the unchanged `1e-4` gate. See the
+[current block measurements](continuous-batching.md#checks-and-reproduction).
+The November 7 whole-forecast measurements below describe the earlier path.
 
 Frontend admission checks both request and standalone execution limits. For
 compatible dense requests, the worker computes the effective fusion row cap as
@@ -136,7 +141,8 @@ and 20 ms NVML sampling. The worker trace/fault-free memory extension is importe
 only by this manual test. Evidence JSON and logs are retained in pytest's temp
 directory; use a fresh `--basetemp` to choose an artifact directory.
 
-On November 7, 2026, the A100-SXM4-40GB probe used driver 595.91.07, Torch
+The historical whole-forecast probe on November 7, 2026 used the A100-SXM4-40GB,
+driver 595.91.07, Torch
 2.14.0+cu130, CUDA 13.0, vLLM 0.33.0 V1, eager FP32 with TF32 disabled, and
 TimesFM revision `1d952420fba87f3c6dee4f240de0f1a0fbc790e3`:
 
@@ -146,8 +152,11 @@ TimesFM revision `1d952420fba87f3c6dee4f240de0f1a0fbc790e3`:
 | 16 series, C8192, H1024 | 2.42 GiB | 2.72 GiB | 3.74 GiB |
 | Four maximum requests in one forward, four bounded model calls | 2.43 GiB | 2.72 GiB | 3.74 GiB |
 
-The observed peak leaves substantial headroom on this idle A100. These are
-finite synthetic shape probes, not an exact memory guarantee across all inputs,
-hardware, package versions, concurrent external workloads, or future kernels.
-NVML sampling can miss brief transients. Record a new baseline before raising
-caps or comparing performance. This change makes no throughput speedup claim.
+These historical whole-forecast peaks do not measure the current block
+implementation's temporary attention packs or combined flip-pass batch.
+The current block probes measured up to 3.67 GiB Torch allocated, 4.03 GiB
+reserved and 5.05 GiB sampled device residency, while persistent KV stayed at
+1.73 GiB. These finite synthetic probes are not exact memory guarantees across
+all inputs, hardware or package versions. NVML sampling can miss brief peaks.
+Record a new baseline before raising caps or comparing performance; capacity
+checks make no throughput claim.

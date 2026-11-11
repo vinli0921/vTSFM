@@ -95,17 +95,17 @@ their existing whole-forecast paths.
 
 Both flip-pass caches now persist between iterations. All active requests
 together must fit the configured execution-row/work limits: by default **16
-independent input series and 2,580,992 work units**, not four independent 16-row caches. New prefills
-wait for capacity. Mixed-horizon calls conservatively charge the largest cache
+independent input series and 2,580,992 work units**, not four independent 16-row
+caches. New prefills wait for capacity. Mixed-horizon calls charge the largest cache
 capacity for every row and split within the model-call budget, even though each
 request's attention uses its own width.
 
 Admission and fusion rows count prepared independent series. Combining both
 flip passes gives an internal AR neural batch of `2*sum(series_count)`, at most
 32 rows. The existing work charge already includes both passes. All ceilings
-and persistent KV accounting remain unchanged; the larger internal AR batch
-and temporary attention packs need fresh GPU parity and peak-memory checks.
-The historical capacity measurements below predate this variant.
+and persistent KV accounting remain unchanged. The standalone eager decoder
+at `b9fffd25` passed the native-parity and capacity checks described below,
+including the 32-row internal AR capacity corner.
 
 For the pinned 20-layer, 16-head, width-80 FP32 model:
 
@@ -116,7 +116,8 @@ persistent_KV_bytes = sum(rows * cache_capacity * 409600)
 
 The factor includes K/V and both flip streams. The default full corner is
 **1,861,222,400 bytes (1.73 GiB)** of persistent KV. Weights, prefill heads,
-initial shared-prefill splitting and allocator reservation need additional memory.
+temporary attention gathers, initial shared-prefill splitting and allocator
+reservation need additional memory.
 The old 32 MiB accounting ceiling covers shared numerical/result staging only.
 
 If the oldest waiter cannot fit, later admissions wait for that iteration while
@@ -147,27 +148,40 @@ Bounded test-only gates prove that later requests start before older ones finish
 and actual AR calls batch multiple active requests. Serving has no gate files
 or sleeps. The gates are not used for performance measurements.
 
-The original block implementation's maximum-shape A100 probe ran four four-row
-C8192/H1024 requests together, then four 16-row requests that had to execute one
-at a time under the global
-capacity limit. Persistent KV peaked at 1.73 GiB and returned to zero. The latter
-probe peaked at **4.34 GiB allocated, 4.82 GiB reserved and 5.84 GiB sampled
-device memory**. These finite synthetic probes establish measured capacity on
-the pinned idle A100; they are not exact memory guarantees on other stacks or
-under external GPU contention.
+On 2026-11-11, standalone eager commit `b9fffd25` passed 21 pinned-checkpoint
+stepper tests, three real HTTP stagger/lifecycle/capacity tests, and six
+independent native CUDA versus block-mode HTTP cases. The latter include pinned
+AssetOpsBench histories; maximum absolute error was `4.7684e-7` under the
+unchanged `rtol=atol=1e-4` gate. These runs used the A100-SXM4-40GB, driver
+595.91.07, Torch 2.14.0+cu130, vLLM 0.33.0 V1 and FP32 with TF32 disabled.
+TimesFM was pinned to revision `1d952420fba87f3c6dee4f240de0f1a0fbc790e3`.
 
-On 2026-11-11, the changed stepper passed all 21 pinned-checkpoint checks,
-all three real HTTP checks, and six independent native CUDA versus block-mode
-HTTP integration cases on the A100. The latter include pinned AssetOpsBench
-sensor histories and matched native outputs exactly. A traced shared decode
-call used cache positions `[12, 12, 4]`. Cancellation, postprocessing failure, independent
-completion and maximum-capacity deferral returned all request state to zero.
-The capacity probes retained the 1.73 GiB persistent KV bound, with a maximum
-of 3.67 GiB Torch allocated and 4.02 GiB reserved across the two probes. This
-was authorized shared-GPU correctness work; whole-device NVML residency included
-an existing unrelated job. All owned servers exited and that job was preserved.
-These observations qualify the tested capacity and lifecycle behavior;
-performance comparisons still require an idle GPU and matching baselines.
+An additional test-only commit, `c2b994f6`, compared 16 ragged synthetic histories
+of lengths 8,141–8,192 and horizon 1,024 against a separate official native model
+with compilation disabled. The unchanged whole runtime matched bitwise. The
+stepper's maximum absolute error was `9.5367e-7` for one 16-series owner and
+`2.1458e-6` for four four-series owners, across all nine quantiles. Both layouts
+executed seven AR calls with 32 internal rows, retained the same persistent KV
+bound and released all state. This adds finite full-corner native parity coverage
+under the unchanged `1e-4` gate without changing model code.
+
+Separate finite synthetic capacity probes ran four four-series C8192/H1024
+requests together, then four 16-series requests with capacity deferral. Both
+exercised 16 logical series and 32 internal AR rows, matched isolated block-mode
+responses, and retained the **1,861,222,400-byte** persistent KV bound.
+Cancellation, response-formatting failure and completion released request state;
+all owned HTTP servers stopped.
+
+| Capacity probe | Torch peak allocated | Torch peak reserved | NVML sampled device peak |
+| --- | ---: | ---: | ---: |
+| Four four-series requests sharing execution | 3.67 GiB | 4.03 GiB | 5.05 GiB |
+| Four 16-series requests, one active at a time | 3.14 GiB | 3.48 GiB | 4.51 GiB |
+
+Torch peaks were reset after `empty_cache` outside each probe. NVML sampled
+whole-device residency every 20 ms; it is separate from Torch allocator memory
+and can miss brief peaks. These finite synthetic measurements cover the tested
+shape and lifecycle behavior on this pinned stack; they are not exact total-memory
+guarantees. Use these current probes separately from historical baseline results.
 
 Tiny official-model CPU regressions need the existing TimesFM environment and
 no downloaded weights:
@@ -182,17 +196,19 @@ They explicitly initialize nonzero RMS scales so the mixed-position negative
 control reaches meaningful attention. The original scalar-write native batch
 must fail that control while independent native rows pass. These checks establish
 numerical behavior and original-cache ownership, including temporary-pack cleanup.
-Issue #49's acceptance still needs the manual matched whole-versus-continuous
-comparison below. The standalone path executes native eager math for both
-whole forecasts and shared block decoding.
+The standalone path executes native eager math for both whole forecasts and
+shared block decoding. Throughput was measured separately below.
 
 ## Offered-load comparison
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src:tests:. \
+CUDA_VISIBLE_DEVICES=0 NVIDIA_TF32_OVERRIDE=0 TRITON_DEFAULT_FP_FUSION=0 \
+  PYTHONPATH=src:tests:. \
   .venv-timesfm25/bin/python -m benchmarks.continuous \
   --data-dir data --output results/continuous-NEW --requests 100 \
-  --sparse-interval 1.0 --diagnostic-requests 24
+  --warmup-requests 100 --warmup-timeout 600 \
+  --modes whole,continuous --scenarios saturated --saturated-interval .001 \
+  --diagnostic-requests 0
 ```
 
 Single-slot whole forecasting, tuned four-slot whole batching and block mode
@@ -212,11 +228,47 @@ Reports save requests/s, series/s, p50/p95, offered-arrival sojourn/dispatch lag
 queue diagnostics, rejections, failures, Torch allocator counters, 20 ms NVML
 samples, exact commands, source hashes, and partial results. Use at least 100
 requests per point, then paired repeats/reversed mode orders before interpreting
-small differences. Repeated runner iterations and per-request attention calls
-add overhead. Evaluate the measured tradeoffs against tuned whole batching;
+small differences. Repeated runner iterations and unequal-capacity attention
+calls add overhead. Evaluate the measured tradeoffs against tuned whole batching;
 block scheduling alone establishes no speedup.
 
+### Matched eager results
+
+The 2026-11-11 A100 comparison used main model code `045bd2e7` versus the
+standalone decoder `b9fffd25`. Baseline checkout `05e08893` adds only the same
+measurement patch used by the candidate. The whole-forecast runtime was unchanged.
+Both sources used FP32 eager execution, TF32 disabled, four slots, eight fused
+logical series, queue limit 128 and four host threads. No Torch compilation was
+requested; Dynamo graph and frame counters stayed zero.
+
+Saturation offered identical two-series C512/H1024 AssetOps requests every 1 ms.
+Source order was baseline/candidate/candidate/baseline, reversing serving-mode
+order between repeats; every mode used a fresh server. Each point completed
+100 untimed concurrent warmups, drained engine and worker state, then completed
+100 timed requests. All 800 timed requests and 800 warmups completed with zero
+failures or rejections. Timing covered HTTP submission through JSON decode;
+startup, warmup, numerical checks and allocator RPCs were outside timing.
+
+| Source and mode order | Whole requests/s | Continuous requests/s | Continuous / own whole |
+| --- | ---: | ---: | ---: |
+| Baseline 1, whole then continuous | 5.183 | 2.345 | 0.452 |
+| Candidate 1, continuous then whole | 5.200 | 6.028 | 1.159 |
+| Candidate 2, whole then continuous | 5.094 | 5.838 | 1.146 |
+| Baseline 2, continuous then whole | 5.179 | 2.407 | 0.465 |
+
+On this workload, candidate continuous throughput was **2.57× and 2.43×** the
+baseline continuous throughput, and **15.9% and 14.6%** above its own whole
+control. The unchanged whole path varied from 5.09 to 5.20 requests/s; that
+variation is not attributed to the block changes. These are repeated homogeneous
+sensor queries, not a general performance or forecast-accuracy benchmark.
+
+The four pre-timing case shapes passed cross-source numerical comparison at
+`rtol=atol=1e-4`; independent native checks are described above. Timed responses
+were checked for HTTP success, request IDs and series counts, without numerical
+comparison inside timing. Source checks, exclusive GPU occupancy, warmup/drain
+checks and owned-process cleanup passed for all four jobs.
+
 The [November 7 measured baseline](baselines/2026-11-07-continuous/README.md)
-records the first complete 900-request comparison. Continuous mode is slower
-than whole-forecast batching under homogeneous saturation; the report separates
-that measured regression from the functional scheduling milestone.
+records the first complete 900-request comparison of the original block path.
+That historical implementation was slower than whole-forecast batching under
+homogeneous saturation; it does not measure the decoder described here.
