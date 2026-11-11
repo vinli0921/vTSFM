@@ -4,19 +4,21 @@
 # implementation (Copyright 2025 Google LLC), licensed under Apache-2.0.
 # https://github.com/google-research/timesfm/tree/e51928e27119cb17bebc005be2696b75e0a9e688
 # See the repository LICENSE.
-"""Private row-position-aware forward for TimesFM forecast-block decoding.
+"""Batched neural layers with request-local native attention for block decoding.
 
-Inputs are FP32 ``[rows, patches, 32]`` with matching boolean masks. Each layer's
-DecodeCache owns ``[rows, capacity, heads, head_dim]`` K/V tensors and per-row
-counters. ``next_index`` stays int32; masked counts retain native sum promotion.
-The caller owns capacity validation, inference mode and cache
-packing/writeback. Full cache capacity and the native attention function remain
-unchanged. The only mathematical-path change is replacing the pinned attention
-forward's common-position K/V write with independent per-row writes.
+Inputs are FP32 ``[sum(request_rows), 4, 32]`` with matching boolean masks.
+``cache_groups[request][layer]`` owns that request's original full-width K/V;
+``positions[request]`` is its CPU-known physical write position. Each request's
+cache counters must agree with that position. No counter is read back to CPU.
 
-This helper neither changes module methods/parameters nor replaces the original
-whole-forecast or uniform-position forward. Call ``validate_block_decode_source``
-once when constructing its stepper, rather than inspecting source in every call.
+Tokenizer, QKV, RoPE, normalization, output projection, MLP and forecast heads
+stay batched. Only native attention runs separately per request, using its own
+cache width and in-place writes. Concatenation combines the small four-patch
+attention outputs and counters; full K/V is never packed or copied back.
+
+The caller owns inference mode and request lifetimes. This helper never changes
+model methods or weights. Singleton and whole-forecast calls keep the original
+native path. Call ``validate_block_decode_source`` once in the stepper constructor.
 """
 
 import hashlib
@@ -54,14 +56,34 @@ def validate_block_decode_source(model):
         except (OSError, TypeError) as error:
             raise ValueError(f'Cannot verify pinned TimesFM {name}.forward source') from error
         if hashlib.sha256(source.encode()).hexdigest() != _PINNED_FORWARD_SHA256[name]:
-            raise ValueError(f'Mixed-position decoding requires the pinned TimesFM {name}.forward source')
+            raise ValueError(f'Block decoding requires the pinned TimesFM {name}.forward source')
 
 
-def _attention_forward(attention, inputs_q, *, decode_cache=None, patch_mask=None):
-    # Match MultiHeadAttention.forward at the pinned revision, including order.
+def _decode_groups(model, inputs, masks, cache_groups, positions):
+    """Validate CPU geometry before any cache can be changed."""
+    if inputs.ndim != 3 or inputs.shape[1:] != (model.m, model.p) or masks.shape != inputs.shape:
+        raise ValueError('Block decode requires [rows,4,32] inputs and matching masks')
+    if not cache_groups or len(cache_groups) != len(positions):
+        raise ValueError('Block decode needs one CPU position per nonempty cache group')
+    groups, cursor = [], 0
+    for caches, position in zip(cache_groups, positions, strict=True):
+        if type(position) is not int or position < 0 or len(caches) != model.x:
+            raise ValueError('Block cache groups need nonnegative integer positions and every layer')
+        # The stepper constructs every layer with identical request geometry;
+        # dtype, device and independent ownership do not change between blocks.
+        rows, capacity = caches[0].key.shape[:2]
+        if rows < 1 or position + model.m > capacity:
+            raise ValueError('Block cache request rows or write capacity are invalid')
+        groups.append((slice(cursor, cursor + rows), caches, position))
+        cursor += rows
+    if cursor != inputs.shape[0]:
+        raise ValueError('Block cache group rows must exactly partition the neural batch')
+    return groups
+
+
+def _attention_forward(attention, inputs_q, patch_mask, groups, layer_index):
+    # Follow pinned MultiHeadAttention.forward math through the scaled Q/K/V.
     b, n_patches, _ = inputs_q.shape
-    if patch_mask is None:
-        patch_mask = torch.zeros(b, n_patches, dtype=torch.bool, device=inputs_q.device)
 
     if attention.fuse_qkv:
         qkv = attention.qkv_proj(inputs_q)
@@ -74,12 +96,10 @@ def _attention_forward(attention, inputs_q, *, decode_cache=None, patch_mask=Non
         key = attention.key(inputs_q).view(b, n_patches, attention.num_heads, attention.head_dim)
         value = attention.value(inputs_q).view(b, n_patches, attention.num_heads, attention.head_dim)
 
-    if decode_cache is None:
-        num_masked = torch.sum(patch_mask.to(torch.int32), dim=-1)
-        next_index = torch.zeros_like(num_masked, dtype=torch.int32)
-    else:
-        num_masked = torch.sum(patch_mask.to(torch.int32), dim=-1) + decode_cache.num_masked
-        next_index = decode_cache.next_index.clone()
+    # Only O(rows) counters are collated; request K/V never leaves its owner.
+    next_index = torch.cat([caches[layer_index].next_index for _, caches, _ in groups]).clone()
+    num_masked = (torch.sum(patch_mask.to(torch.int32), dim=-1)
+                  + torch.cat([caches[layer_index].num_masked for _, caches, _ in groups]))
 
     if attention.use_rotary_position_embeddings:
         position = (torch.arange(n_patches, device=inputs_q.device)[None, :]
@@ -93,71 +113,62 @@ def _attention_forward(attention, inputs_q, *, decode_cache=None, patch_mask=Non
     if attention.use_per_dim_scale:
         query = attention.per_dim_scale(query)
 
-    if decode_cache is not None:
-        _, decode_cache_size, _, _ = decode_cache.value.shape
-
-        # Unlike upstream's next_index[0] slice, each row writes its own prefix
-        # extension. Unique row/column pairs avoid any scatter accumulation.
-        rows = torch.arange(b, dtype=torch.int64, device=inputs_q.device)[:, None]
-        columns = (next_index.to(torch.int64)[:, None]
-                   + torch.arange(n_patches, dtype=torch.int64, device=inputs_q.device)[None, :])
-        decode_cache.key[rows, columns] = key
-        decode_cache.value[rows, columns] = value
-
-        key = decode_cache.key
-        value = decode_cache.value
-        decode_cache.next_index += n_patches
-        decode_cache.num_masked = num_masked
+    attended = []
+    for section, caches, start in groups:
+        cache = caches[layer_index]
+        stop = start + n_patches
+        # Python integer slices use known request geometry, avoiding the native
+        # CUDA-scalar slice-bound synchronization as well as full-cache copies.
+        cache.key[:, start:stop].copy_(key[section])
+        cache.value[:, start:stop].copy_(value[section])
+        cache.next_index += n_patches
+        cache.num_masked = num_masked[section].clone()
         attn_mask = make_attn_mask(
             query_length=n_patches,
-            num_all_masked_kv=num_masked,
-            query_index_offset=next_index,
-            kv_length=decode_cache_size,
+            num_all_masked_kv=cache.num_masked,
+            query_index_offset=next_index[section],
+            kv_length=cache.value.shape[1],
         )
-    else:
-        attn_mask = make_attn_mask(query_length=n_patches, num_all_masked_kv=num_masked)
+        attended.append(attention.attention_fn(
+            query[section], cache.key, cache.value, mask=attn_mask,
+        ))
 
-    x = attention.attention_fn(query, key, value, mask=attn_mask)
+    x = torch.cat(attended, dim=0)
     x = x.reshape(b, n_patches, attention.in_features)
     out = attention.out(x)
-    return out, decode_cache
+    return out
 
 
-def _transformer_forward(layer, input_embeddings, patch_mask, decode_cache=None):
+def _transformer_forward(layer, input_embeddings, patch_mask, groups, layer_index):
     # Preserve Transformer.forward's norm, residual and feedforward expressions.
-    attn_output, decode_cache = _attention_forward(
-        layer.attn, inputs_q=layer.pre_attn_ln(input_embeddings),
-        decode_cache=decode_cache, patch_mask=patch_mask,
+    attn_output = _attention_forward(
+        layer.attn, layer.pre_attn_ln(input_embeddings), patch_mask, groups, layer_index,
     )
     attn_output = layer.post_attn_ln(attn_output) + input_embeddings
     output_embeddings = (
         layer.post_ff_ln(layer.ff1(layer.activation(layer.ff0(layer.pre_ff_ln(attn_output)))))
         + attn_output
     )
-    return output_embeddings, decode_cache
+    return output_embeddings
 
 
-def block_decode_forward(model, inputs, masks, decode_caches=None):
-    """Run native model-forward math with per-row cache positions, in place.
+def block_decode_forward(model, inputs, masks, cache_groups, positions):
+    """Batch neural layers while native attention updates each owned cache.
 
     Return the native ``((input_embeddings, output_embeddings, point, spread),
-    caches)`` structure. Only the supplied caches are mutated; the model and its
-    instance/class forward methods remain untouched.
+    cache_groups)`` structure, keeping the supplied request-major cache objects.
+    This function advances four input patches; prefill uses the native model.
     """
+    groups = _decode_groups(model, inputs, masks, cache_groups, positions)
     tokenizer_inputs = torch.cat([inputs, masks.to(inputs.dtype)], dim=-1)
     input_embeddings = model.tokenizer(tokenizer_inputs)
 
-    if decode_caches is None:
-        decode_caches = [None] * model.x
-
     output_embeddings = input_embeddings
-    new_decode_caches = []
     for i, layer in enumerate(model.stacked_xf):
-        output_embeddings, new_cache = _transformer_forward(
-            layer, output_embeddings, masks[..., -1], decode_caches[i],
+        output_embeddings = _transformer_forward(
+            layer, output_embeddings, masks[..., -1], groups, i,
         )
-        new_decode_caches.append(new_cache)
     output_ts = model.output_projection_point(output_embeddings)
     output_quantile_spread = model.output_projection_quantiles(output_embeddings)
 
-    return (input_embeddings, output_embeddings, output_ts, output_quantile_spread), new_decode_caches
+    return (input_embeddings, output_embeddings, output_ts, output_quantile_spread), cache_groups

@@ -169,3 +169,33 @@ def test_cancelled_owner_does_not_retain_peers_or_mutate_their_state(runtimes):
     torch.testing.assert_close(stepper.finalize(peer), expected, rtol=1e-4, atol=1e-4)
     stepper.release(peer)
     assert peer.tensor_bytes == 0
+
+
+def test_invalid_owners_fail_before_a_shared_decode_can_mutate_state(runtimes, monkeypatch):
+    from vtsfm.adapters.timesfm25 import block_decode
+
+    runtime, _ = runtimes
+    stepper = TimesFMStepper(runtime)
+    values = context((64,), -1)
+    state = stepper.initialize(values, 513)
+    cancelled = stepper.initialize(values, 513)
+    stepper.prefill([state, cancelled])
+    before = snapshot(state)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Invalid owners reached shared decode')
+
+    monkeypatch.setattr(block_decode, 'block_decode_forward', forbidden)
+    with pytest.raises(ValueError, match='unique'):
+        stepper.advance([state, state])
+    stepper.release(cancelled)
+    with pytest.raises(ValueError, match='released'):
+        stepper.advance([state, cancelled])
+    assert state.blocks_done == 1
+    for stream, saved in zip(state.passes, before, strict=True):
+        for cache, (key_ptr, value_ptr, key, value) in zip(stream.caches, saved, strict=True):
+            assert (cache.key.data_ptr(), cache.value.data_ptr()) == (key_ptr, value_ptr)
+            torch.testing.assert_close(cache.key, key, rtol=0, atol=0)
+            torch.testing.assert_close(cache.value, value, rtol=0, atol=0)
+            assert cache.next_index.tolist() == [2]
+    stepper.release(state)

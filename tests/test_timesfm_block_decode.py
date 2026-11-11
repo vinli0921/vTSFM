@@ -103,10 +103,10 @@ def _merge_caches(parts):
     return result
 
 
-def _heterogeneous_prefills(model, capacities=(12, 14, 10)):
+def _heterogeneous_prefills(model, capacities=(12, 14, 10), positions=(3, 7, 1)):
     generator = torch.Generator().manual_seed(4949)
     states = []
-    for (position, masked), capacity in zip(((3, 1), (7, 2), (1, 0)), capacities, strict=True):
+    for position, masked, capacity in zip(positions, (1, 2, 0), capacities, strict=True):
         caches = _new_caches(model, 1, capacity)
         inputs = torch.randn(1, position, model.p, generator=generator)
         masks = torch.zeros_like(inputs, dtype=torch.bool)
@@ -128,115 +128,133 @@ def _serial_forward(model, inputs, masks, states):
 
 
 @torch.inference_mode()
-def test_mixed_positions_match_independent_native_rows_and_expose_old_bug(model):
+def test_grouped_positions_match_independent_native_rows_and_expose_old_bug(model):
     validate_block_decode_source(model)
-    states, inputs, masks = _heterogeneous_prefills(model)
-    expected, serial_caches = _serial_forward(model, inputs, masks, states)
-    caches = _merge_caches(states)
-    original = _clone_caches(caches)
-    pointers = [(cache.key.data_ptr(), cache.value.data_ptr()) for cache in caches]
-    actual, returned = block_decode_forward(model, inputs, masks, caches)
-
+    groups, inputs, masks = _heterogeneous_prefills(model)
+    before = [_clone_caches(caches) for caches in groups]
+    expected, serial_caches = _serial_forward(model, inputs, masks, groups)
+    pointers = [[(cache.key.data_ptr(), cache.value.data_ptr()) for cache in caches]
+                for caches in groups]
+    actual, returned = block_decode_forward(model, inputs, masks, groups, [3, 7, 1])
+    assert returned is groups
     for value, reference in zip(actual, expected, strict=True):
         torch.testing.assert_close(value, reference, rtol=1e-5, atol=1e-6)
-    for layer, cache in enumerate(returned):
-        assert cache is caches[layer]
-        assert (cache.key.data_ptr(), cache.value.data_ptr()) == pointers[layer]
-        assert cache.next_index.dtype == torch.int32
-        assert cache.num_masked.dtype == serial_caches[0][layer].num_masked.dtype == torch.int64
-        torch.testing.assert_close(cache.next_index, torch.tensor([7, 11, 5], dtype=torch.int32))
-        torch.testing.assert_close(cache.num_masked, torch.tensor([1, 2, 0], dtype=torch.int64))
-        for row, state in enumerate(states):
-            position = int(state[layer].next_index[0])
+    for row, (caches, position) in enumerate(zip(returned, [3, 7, 1], strict=True)):
+        for layer, cache in enumerate(caches):
+            assert cache is groups[row][layer]
+            assert (cache.key.data_ptr(), cache.value.data_ptr()) == pointers[row][layer]
+            assert cache.next_index.dtype == torch.int32
+            assert cache.num_masked.dtype == torch.int64
+            torch.testing.assert_close(cache.next_index, torch.tensor([position + 4], dtype=torch.int32))
+            torch.testing.assert_close(cache.num_masked, serial_caches[row][layer].num_masked)
             for name in ('key', 'value'):
                 tensor = getattr(cache, name)
-                before = getattr(original[layer], name)
+                original = getattr(before[row][layer], name)
                 reference = getattr(serial_caches[row][layer], name)
-                torch.testing.assert_close(tensor[row, :position], before[row, :position], rtol=0, atol=0)
-                torch.testing.assert_close(tensor[row, position:position + model.m], reference[0, position:position + model.m], rtol=1e-5, atol=1e-6)
-                torch.testing.assert_close(tensor[row, position + model.m:], before[row, position + model.m:], rtol=0, atol=0)
-            # Packed scratch never aliases an independently owned request cache.
-            assert cache.key.untyped_storage().data_ptr() != state[layer].key.untyped_storage().data_ptr()
+                torch.testing.assert_close(tensor[:, :position], original[:, :position], rtol=0, atol=0)
+                torch.testing.assert_close(tensor[:, position:position + 4], reference[:, position:position + 4], rtol=1e-5, atol=1e-6)
+                torch.testing.assert_close(tensor[:, position + 4:], original[:, position + 4:], rtol=0, atol=0)
 
-    wrong, wrong_caches = model(inputs, masks, _merge_caches(states))
-    # A real regression fixture: upstream writes row1 at row0's index3, leaving
-    # row1's actual extension7:11 empty and changing its forecast projection.
+    # Packing is used only to reproduce the broken upstream negative control.
+    wrong, wrong_caches = model(inputs, masks, _merge_caches(before))
     assert torch.count_nonzero(wrong_caches[0].key[1, 7:11]) == 0
-    assert torch.count_nonzero(returned[0].key[1, 7:11]) > 0
+    assert torch.count_nonzero(returned[1][0].key[0, 7:11]) > 0
     assert (wrong[2][1] - expected[2][1]).abs().max().item() > 1e-4
 
 
 @torch.inference_mode()
-def test_prefill_and_uniform_positions_keep_native_results(model):
-    generator = torch.Generator().manual_seed(123)
-    inputs = torch.randn(2, 3, model.p, generator=generator)
-    masks = torch.zeros_like(inputs, dtype=torch.bool)
-    masks[0, 0] = True
-    for caches in (None, _new_caches(model, 2, 12)):
-        native, native_cache = model(inputs, masks, _clone_caches(caches) if caches else None)
-        actual, actual_cache = block_decode_forward(model, inputs, masks, _clone_caches(caches) if caches else None)
-        for value, reference in zip(actual, native, strict=True):
-            torch.testing.assert_close(value, reference, rtol=0, atol=0)
-        if caches:
-            for a, b in zip(actual_cache, native_cache, strict=True):
-                for name in ('key', 'value', 'next_index', 'num_masked'):
-                    torch.testing.assert_close(getattr(a, name), getattr(b, name), rtol=0, atol=0)
-        else:
-            assert actual_cache == native_cache == [None] * model.x
+def test_uniform_group_positions_match_independent_native_requests(model):
+    groups, inputs, masks = _heterogeneous_prefills(model, positions=(3, 3, 3))
+    expected, _ = _serial_forward(model, inputs, masks, groups)
+    actual, _ = block_decode_forward(model, inputs, masks, groups, [3, 3, 3])
+    for value, reference in zip(actual, expected, strict=True):
+        torch.testing.assert_close(value, reference, rtol=1e-5, atol=1e-6)
 
 
 @torch.inference_mode()
-def test_reordered_rows_and_repeated_advances_preserve_positions_and_masks(model):
-    states, inputs, masks = _heterogeneous_prefills(model, (18, 22, 18))
-    # Exercise the native cumulative masked-count update as well as zero AR masks.
-    masks[1, 0] = True
-    expected, serial_caches = _serial_forward(model, inputs, masks, states)
-    packed = _merge_caches(states)
+def test_reordered_groups_and_repeated_advances_preserve_positions_and_masks(model):
+    groups, inputs, masks = _heterogeneous_prefills(model, (18, 22, 18))
+    masks[1, 0] = True  # Preserve native cumulative masked-count promotion.
+    expected, serial_caches = _serial_forward(model, inputs, masks, groups)
     order = torch.tensor([2, 0, 1])
-    reordered = [DecodeCache(*(tensor[order].clone() for tensor in
-                               (cache.next_index, cache.num_masked, cache.key, cache.value)))
-                 for cache in packed]
-    actual, actual_caches = block_decode_forward(model, inputs[order], masks[order], reordered)
+    reordered = [groups[i] for i in (2, 0, 1)]
+    actual, actual_caches = block_decode_forward(model, inputs[order], masks[order], reordered, [1, 3, 7])
     inverse = torch.argsort(order)
     for value, reference in zip(actual, expected, strict=True):
         torch.testing.assert_close(value[inverse], reference, rtol=1e-5, atol=1e-6)
-    for layer, cache in enumerate(actual_caches):
-        expected_counts = torch.cat([state[layer].num_masked for state in serial_caches])
-        torch.testing.assert_close(cache.num_masked[inverse], expected_counts)
-    second_inputs = -inputs
-    second_masks = torch.zeros_like(masks)
+    second_inputs, second_masks = -inputs, torch.zeros_like(masks)
     expected_second, serial_second = _serial_forward(model, second_inputs, second_masks, serial_caches)
     actual_second, second_caches = block_decode_forward(
-        model, second_inputs[order], second_masks[order], actual_caches,
+        model, second_inputs[order], second_masks[order], actual_caches, [5, 7, 11],
     )
     for value, reference in zip(actual_second, expected_second, strict=True):
         torch.testing.assert_close(value[inverse], reference, rtol=1e-5, atol=1e-6)
-    for layer, cache in enumerate(second_caches):
-        torch.testing.assert_close(cache.next_index[inverse], torch.tensor([11, 15, 9], dtype=torch.int32))
-        torch.testing.assert_close(cache.num_masked[inverse], torch.cat([state[layer].num_masked for state in serial_second]))
+    for row, position in enumerate([11, 15, 9]):
+        for layer, cache in enumerate(groups[row]):
+            torch.testing.assert_close(cache.next_index, torch.tensor([position], dtype=torch.int32))
+            torch.testing.assert_close(cache.num_masked, serial_second[row][layer].num_masked)
+    assert second_caches is reordered
 
 
 @torch.inference_mode()
-def test_native_attention_function_receives_full_capacity_and_row_masks(model):
-    states, inputs, masks = _heterogeneous_prefills(model)
-    calls = []
-    for layer in model.stacked_xf:
+def test_neural_layers_batch_once_and_attention_uses_original_owned_caches(model):
+    groups, inputs, masks = _heterogeneous_prefills(model)
+    calls, projection_calls, hooks = [], {}, []
+    projections = [('tokenizer', model.tokenizer), ('point', model.output_projection_point),
+                   ('spread', model.output_projection_quantiles)]
+    for index, layer in enumerate(model.stacked_xf):
+        names = ('qkv_proj',) if layer.attn.fuse_qkv else ('query', 'key', 'value')
+        projections.extend((f'{index}.{name}', getattr(layer.attn, name)) for name in names)
+        projections.extend((f'{index}.{name}', getattr(layer, name)) for name in ('ff0', 'ff1'))
+        projections.append((f'{index}.out', layer.attn.out))
         original = layer.attn.attention_fn
 
-        def record(query, key, value, mask=None, original=original):
-            calls.append((key.shape, mask.clone()))
+        def record(query, key, value, mask=None, original=original, index=index):
+            calls.append((index, query.shape, key.data_ptr(), value.data_ptr(), key.shape, mask.clone()))
             return original(query, key, value, mask=mask)
 
         layer.attn.attention_fn = record
-    block_decode_forward(model, inputs, masks, _merge_caches(states))
-    assert len(calls) == model.x
-    expected = torch.zeros(3, 1, model.m, 14, dtype=torch.bool)
-    for row, (position, num_masked) in enumerate(((3, 1), (7, 2), (1, 0))):
-        for query in range(model.m):
-            expected[row, 0, query, num_masked:position + query + 1] = True
-    for shape, mask in calls:
-        assert shape == (3, 14, model.h, model.hd)
-        torch.testing.assert_close(mask, expected)
+    for name, module in projections:
+        projection_calls[name] = []
+
+        def record_projection(module, args, output, name=name):
+            projection_calls[name].append(args[0].shape[0])
+
+        hooks.append(module.register_forward_hook(record_projection))
+    try:
+        block_decode_forward(model, inputs, masks, groups, [3, 7, 1])
+    finally:
+        for hook in hooks:
+            hook.remove()
+    assert all(rows == [3] for rows in projection_calls.values())
+    assert len(calls) == model.x * len(groups)
+    for index, query_shape, key_ptr, value_ptr, key_shape, mask in calls:
+        row = next(row for row, caches in enumerate(groups) if caches[index].key.data_ptr() == key_ptr)
+        cache = groups[row][index]
+        assert value_ptr == cache.value.data_ptr()
+        assert key_shape == cache.key.shape
+        assert query_shape == (1, 4, model.h, model.hd)
+        position, masked = [(3, 1), (7, 2), (1, 0)][row]
+        expected_mask = torch.zeros(1, 1, 4, cache.key.shape[1], dtype=torch.bool)
+        for query in range(4):
+            expected_mask[:, :, query, masked:position + query + 1] = True
+        torch.testing.assert_close(mask, expected_mask)
+    assert [call[4][1] for call in calls[:3]] == [12, 14, 10]
+
+
+@torch.inference_mode()
+def test_grouped_helper_never_extracts_tensor_counter_to_host(model):
+    from torch.utils._python_dispatch import TorchDispatchMode
+
+    class NoHostScalar(TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            if func is torch.ops.aten._local_scalar_dense.default:
+                raise AssertionError('decode read a Tensor scalar back to the host')
+            return func(*args, **(kwargs or {}))
+
+    groups, inputs, masks = _heterogeneous_prefills(model)
+    with NoHostScalar():
+        block_decode_forward(model, inputs, masks, groups, [3, 7, 1])
 
 
 @torch.inference_mode()
@@ -248,8 +266,8 @@ def test_native_model_parameters_methods_and_whole_decode_unchanged(model):
     inputs = torch.linspace(-1, 1, 64).reshape(1, -1)
     masks = torch.zeros_like(inputs, dtype=torch.bool)
     before = model.decode(129, inputs, masks)
-    states, patched, patch_masks = _heterogeneous_prefills(model)
-    block_decode_forward(model, patched, patch_masks, _merge_caches(states))
+    groups, patched, patch_masks = _heterogeneous_prefills(model)
+    block_decode_forward(model, patched, patch_masks, groups, [3, 7, 1])
     after = model.decode(129, inputs, masks)
     for value, reference in zip(after, before, strict=True):
         torch.testing.assert_close(value, reference, rtol=0, atol=0)
@@ -262,8 +280,9 @@ def test_native_model_parameters_methods_and_whole_decode_unchanged(model):
 
 @torch.inference_mode()
 def test_source_guard_reads_class_forward_and_preserves_instance_wrappers(model):
-    states, inputs, masks = _heterogeneous_prefills(model)
-    expected, _ = _serial_forward(model, inputs, masks, states)
+    groups, inputs, masks = _heterogeneous_prefills(model)
+    expected, _ = _serial_forward(model, inputs, masks, groups)
+
     def wrapped(*args, **kwargs):
         raise AssertionError('instance forward wrapper should not be inspected or replaced')
 
@@ -271,7 +290,7 @@ def test_source_guard_reads_class_forward_and_preserves_instance_wrappers(model)
     model.stacked_xf[0].forward = wrapped
     model.stacked_xf[0].attn.forward = wrapped
     validate_block_decode_source(model)
-    actual, _ = block_decode_forward(model, inputs, masks, _merge_caches(states))
+    actual, _ = block_decode_forward(model, inputs, masks, groups, [3, 7, 1])
     for value, reference in zip(actual, expected, strict=True):
         torch.testing.assert_close(value, reference, rtol=1e-5, atol=1e-6)
     assert model.forward is wrapped
@@ -286,3 +305,26 @@ def test_source_guard_rejects_changed_class_forward(model):
 
     with pytest.raises(ValueError, match='pinned TimesFM model.forward'):
         validate_block_decode_source(ChangedForward())
+
+
+@pytest.mark.parametrize('invalid', ['capacity', 'rows', 'count', 'position'])
+@torch.inference_mode()
+def test_invalid_group_geometry_fails_before_mutating_any_cache(model, invalid):
+    groups, inputs, masks = _heterogeneous_prefills(model)
+    before = [_clone_caches(caches) for caches in groups]
+    positions = [3, 7, 1]
+    if invalid == 'capacity':
+        positions[-1] = 7
+    elif invalid == 'rows':
+        inputs, masks = inputs[:2], masks[:2]
+    elif invalid == 'count':
+        positions.pop()
+    else:
+        positions[0] = torch.tensor(3, dtype=torch.int32)
+    with pytest.raises(ValueError, match='cache|Cache'):
+        block_decode_forward(model, inputs, masks, groups, positions)
+    for row, caches in enumerate(groups):
+        original = before[row]
+        for cache, saved in zip(caches, original, strict=True):
+            for name in ('key', 'value', 'next_index', 'num_masked'):
+                torch.testing.assert_close(getattr(cache, name), getattr(saved, name), rtol=0, atol=0)
