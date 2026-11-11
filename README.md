@@ -120,6 +120,10 @@ histories and forecasts on the model device and calls the pinned upstream
 `Moirai2Forecast.forward`, including its recursive quantile forecast. Shorter
 histories in a request are masked as padding, so each forecasts as it would alone.
 
+An explicit [native Moirai multivariate attention experiment](docs/moirai-multivariate-attention.md)
+preserves the learned variate bias with FlexAttention. It does not enable public
+multivariate requests or change the serving defaults.
+
 The shared IO also supports sequential offline `LLM.encode({'data': payload},
 pooling_task='plugin')` calls. See [request lifecycle](docs/request-lifecycle.md)
 for supported inputs, concurrent serving, cancellation, and the manual TimesFM
