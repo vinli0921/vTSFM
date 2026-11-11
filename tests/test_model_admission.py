@@ -365,13 +365,16 @@ def test_real_model_default_envelope_repeated_maximum_memory(adapter, gpu, tmp_p
                ROOT / f'src/vtsfm/adapters/{adapter}/admission.py',
                ROOT / f'src/vtsfm/adapters/{adapter}/runtime.py', Path(__file__)]
     package = {'toto2': 'toto-2', 'moirai2': 'uni2ts'}[adapter]
+    packages = ['torch', 'vllm', package]
+    if adapter == 'moirai2':
+        packages.append('lightning')
     record = {
         **source_metadata(), 'kind': 'synthetic real-model HTTP memory envelope',
         'adapter': adapter, 'limits': asdict(defaults), 'maximum_cost': asdict(maximum_cost),
         'fused_rows_per_request': fused_rows,
         'model_id': selected.model_id, 'model_revision': selected.model_revision,
         'gpu': gpu.metadata(),
-        'packages': {name: importlib.metadata.version(name) for name in ('torch', 'vllm', package)},
+        'packages': {name: importlib.metadata.version(name) for name in packages},
         'source_sha256': {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
                           for path in sources},
         'precision': 'eager FP32; TF32 disabled; pinned upstream attention',
