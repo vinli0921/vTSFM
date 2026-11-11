@@ -36,21 +36,24 @@ output buffer and KV caches. Feedback stays separate between flip streams.
 Quantiles, crossing correction and de-normalization preserve pinned semantics.
 
 Prefill calls can share a padded context width. AR calls can also combine
-requests at different physical cache positions. The pinned upstream rotary
-positions and attention masks already use per-row counters, but its K/V write
-uses only the first row's index. Mixed-position calls use a private adapter
-forward with per-row writes and the same native projections, normalization,
-attention function, full cache width and forecast heads. Matching-position calls
-retain the upstream model forward. Class-source guards require revalidation
-before changing the pinned implementation; model methods and weights are not
-replaced.
+requests at different physical cache positions. The pinned upstream attention
+writes every cache row through the first row's index, so simply combining those
+requests would corrupt state. Shared calls instead batch the native tokenizer,
+projections, RoPE, normalization, MLP and forecast heads, then run the native
+attention function separately on each request's own caches and masks. Each
+request writes its four new patches at its CPU-known position, without reading
+a CUDA counter back to the host. Attention keeps that owner's original cache
+width. Singleton calls retain the upstream model forward. Class-source guards
+require revalidation before changing the pinned implementation; model methods
+and weights are not replaced.
 
 Each request retains its own persistent cache allocations. Singleton calls
-advance those buffers directly. Shared calls still pack cache rows for native
-attention, then copy back only the four newly appended patches and counters.
-They keep each owner's original allocation and prefix, including when requests
-have different capacities or are reordered. Initial shared prefill splits its
-cache once, so retiring a request cannot retain a peer's backing allocation.
+advance those buffers directly. Shared AR calls also update those exact buffers
+in place, combining only the small attention outputs and position counters.
+No full KV packing or copyback occurs during decode. Allocations and existing
+prefixes persist when requests have different capacities or are reordered.
+Initial shared prefill splits its cache once, so retiring a request cannot
+retain a peer's backing allocation.
 Completion packs the final response and releases state.
 Cancellation also releases state, including zero-compute housekeeping steps.
 Cleanup is idempotent. Input/queue/response-formatting errors affect their own
@@ -91,8 +94,9 @@ their existing whole-forecast paths.
 Both flip-pass caches now persist between iterations. All active requests
 together must fit the configured execution-row/work limits: by default **16
 rows and 2,580,992 work units**, not four independent 16-row caches. New prefills
-wait for capacity. Mixed-horizon calls charge the largest padded cache capacity
-for every row and split within the model-call budget.
+wait for capacity. Mixed-horizon calls conservatively charge the largest cache
+capacity for every row and split within the model-call budget, even though each
+request's attention uses its own width.
 
 For the pinned 20-layer, 16-head, width-80 FP32 model:
 
@@ -103,7 +107,7 @@ persistent_KV_bytes = sum(rows * cache_capacity * 409600)
 
 The factor includes K/V and both flip streams. The default full corner is
 **1,861,222,400 bytes (1.73 GiB)** of persistent KV. Weights, prefill heads,
-cache packing/scattering and allocator reservation need additional memory.
+initial shared-prefill splitting and allocator reservation need additional memory.
 The old 32 MiB accounting ceiling covers shared numerical/result staging only.
 
 If the oldest waiter cannot fit, later admissions wait for that iteration while
@@ -120,6 +124,9 @@ CUDA_VISIBLE_DEVICES=0 VTSFM_RUN_TIMESFM_STEPPING=1 PYTHONPATH=src:tests:. \
   .venv-timesfm25/bin/python -m pytest tests/test_timesfm_stepping.py -q -s
 CUDA_VISIBLE_DEVICES=0 VTSFM_RUN_TIMESFM_CONTINUOUS=1 PYTHONPATH=src:tests:. \
   .venv-timesfm25/bin/python -m pytest tests/test_timesfm_continuous.py -q -s
+CUDA_VISIBLE_DEVICES=0 VTSFM_TEST_ADAPTER=timesfm25 \
+  VTSFM_TEST_OUTPUT=results/timesfm-block-integration-NEW PYTHONPATH=src:tests:. \
+  .venv-timesfm25/bin/python -m pytest tests/test_timesfm_block_integration.py -q -s
 ```
 
 The parity tolerance is `rtol=atol=1e-4`. Tests cover patch/block boundaries,
@@ -140,9 +147,11 @@ device memory**. These finite synthetic probes establish measured capacity on
 the pinned idle A100; they are not exact memory guarantees on other stacks or
 under external GPU contention.
 
-On 2026-11-11, the changed stepper passed all 21 pinned-checkpoint checks and
-all three real HTTP checks above on the A100, including a shared decode call
-at cache positions `[12, 12, 4]`. Cancellation, postprocessing failure, independent
+On 2026-11-11, the changed stepper passed all 21 pinned-checkpoint checks,
+all three real HTTP checks, and six independent native CUDA versus block-mode
+HTTP integration cases on the A100. The latter include pinned AssetOpsBench
+sensor histories and matched native outputs exactly. A traced shared decode
+call used cache positions `[12, 12, 4]`. Cancellation, postprocessing failure, independent
 completion and maximum-capacity deferral returned all request state to zero.
 The capacity probes retained the 1.73 GiB persistent KV bound, with a maximum
 of 3.67 GiB Torch allocated and 4.02 GiB reserved across the two probes. This
@@ -162,11 +171,11 @@ CUDA_VISIBLE_DEVICES='' PYTHONPATH=src:tests:. \
 
 They explicitly initialize nonzero RMS scales so the mixed-position negative
 control reaches meaningful attention. The original scalar-write native batch
-must fail that control while independent native rows pass. These tests and
-structural reductions in copying do not establish a throughput improvement.
+must fail that control while independent native rows pass. These checks establish
+numerical behavior, original-cache ownership and the absence of full KV packing.
 Issue #49's acceptance still needs the manual matched whole-versus-continuous
-comparison below. Compilation of the private mixed-position forward has not
-been qualified; matching-position calls retain their existing entry point.
+comparison below. Whole-forecast compilation does not cover the private shared
+block decoder; block-mode measurements here use eager execution.
 
 ## Offered-load comparison
 
@@ -194,9 +203,9 @@ Reports save requests/s, series/s, p50/p95, offered-arrival sojourn/dispatch lag
 queue diagnostics, rejections, failures, Torch allocator counters, 20 ms NVML
 samples, exact commands, source hashes, and partial results. Use at least 100
 requests per point, then paired repeats/reversed mode orders before interpreting
-small differences. Cache concatenation/scattering and repeated runner iterations
-add costs; block scheduling alone is neither a guaranteed speedup nor a novel
-research claim. Evaluate its measured tradeoffs against tuned whole batching.
+small differences. Repeated runner iterations and per-request attention calls
+add overhead. Evaluate the measured tradeoffs against tuned whole batching;
+block scheduling alone establishes no speedup.
 
 The [November 7 measured baseline](baselines/2026-11-07-continuous/README.md)
 records the first complete 900-request comparison. Continuous mode is slower
