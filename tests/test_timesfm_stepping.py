@@ -259,3 +259,75 @@ def test_staggered_physical_positions_share_decode_and_keep_owned_cache_storage(
     # Whole forecasting still calls the unchanged upstream forward after use.
     values, horizon = cases['late']
     torch.testing.assert_close(runtime.forecast(values, horizon), expected['late'], rtol=0, atol=0)
+
+
+def test_maximum_capacity_layouts_match_independent_official_native(runtime, tmp_path, monkeypatch):
+    """Full-corner native parity, including the 32-row internal AR batch."""
+    import json
+    import torch
+    from model_integration_support import NativeForecaster
+    from vtsfm.adapters.timesfm25 import block_decode
+    from vtsfm.adapters.timesfm25.stepping import TimesFMStepper
+
+    lengths = tuple(8192 - 17 * (row % 4) for row in range(16))
+    context = _context(lengths, offset=-0.5)
+    cpu_context = context.cpu()
+    payload = {'inputs': [
+        {'item_id': f'full-corner-{row}', 'target': values[torch.isfinite(values)].tolist()}
+        for row, values in enumerate(cpu_context)],
+        'parameters': {'prediction_length': 1024, 'quantile_levels': [i / 10 for i in range(1, 10)]}}
+    assert torch.get_float32_matmul_precision() == 'highest'
+    assert not torch.backends.cuda.matmul.allow_tf32 and not torch.backends.cudnn.allow_tf32
+    native = NativeForecaster('timesfm25')  # Separate official model, torch_compile=False.
+    expected = torch.from_numpy(native.predict_array(payload)).clone()
+    metadata = native.metadata()
+    assert expected.shape == (16, 9, 1024) and expected.dtype == torch.float32
+    torch.save({'context': cpu_context, 'native': expected}, tmp_path / 'native-golden.pt')
+    del native
+    gc.collect()
+    torch.cuda.empty_cache()
+    assert not torch.backends.cuda.matmul.allow_tf32 and not torch.backends.cudnn.allow_tf32
+    control = runtime.forecast(context, 1024).cpu()
+    torch.save(control, tmp_path / 'runtime-control.pt')
+    evidence = {'native': metadata, 'lengths': lengths, 'rtol': 1e-4, 'atol': 1e-4,
+                'runtime_max_abs': float((control - expected).abs().max()), 'layouts': []}
+    report = tmp_path / 'maximum-native-parity.json'
+    report.write_text(json.dumps(evidence, indent=2) + '\n')
+    torch.testing.assert_close(control, expected, rtol=1e-4, atol=1e-4)
+    ar_rows, original = [], block_decode.block_decode_forward
+
+    def observe(model, inputs, masks, cache_groups, positions):
+        ar_rows.append(inputs.shape[0])
+        return original(model, inputs, masks, cache_groups, positions)
+
+    monkeypatch.setattr(block_decode, 'block_decode_forward', observe)
+    for layout in ((16,), (4, 4, 4, 4)):
+        stepper, states, cursor = TimesFMStepper(runtime), [], 0
+        ar_rows.clear()
+        for rows in layout:
+            states.append(stepper.initialize(context[cursor:cursor + rows], 1024))
+            cursor += rows
+        assert cursor == 16
+        try:
+            stepper.prefill(states)
+            retained = sum(state.cache_bytes for state in states)
+            assert retained == 1_861_222_400
+            while not stepper.complete(states[0]):
+                stepper.advance(states)
+            actual = torch.cat([stepper.finalize(state) for state in states]).cpu()
+            label = '-'.join(map(str, layout))
+            torch.save(actual, tmp_path / f'layout-{label}-actual.pt')
+            difference = (actual - expected).abs()
+            evidence['layouts'].append({'owner_rows': layout, 'persistent_KV_bytes': retained,
+                'AR_neural_rows': list(ar_rows), 'max_abs': float(difference.max()),
+                'max_abs_by_quantile': difference.amax(dim=(0, 2)).tolist()})
+            report.write_text(json.dumps(evidence, indent=2) + '\n')
+            assert ar_rows == [32] * 7
+            assert all(state.cache_bytes == 0 for state in states)
+            torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
+        finally:
+            for state in states:
+                stepper.release(state)
+            assert all(state.tensor_bytes == 0 for state in states)
+    evidence['status'] = 'passed'
+    report.write_text(json.dumps(evidence, indent=2) + '\n')
