@@ -5,10 +5,9 @@
 # See https://github.com/google-research/timesfm and the repository LICENSE.
 """Resumable TimesFM forecasts with adapter-owned, request-local decode caches.
 
-The whole-forecast runtime remains the reference. A shared call requires equal
-physical cache positions because the pinned upstream attention implementation
-writes every row using ``decode_cache.next_index[0]``. Cache rows are copied back
-to individual owners after a call so a retired request retains no peer storage.
+Mixed-position decode calls use row-aware writes with native positions and
+masks. Request caches persist between blocks; shared calls write back only new
+entries, so retired requests retain no peer storage.
 """
 
 from dataclasses import dataclass, field
@@ -62,7 +61,7 @@ class TimesFMForecastState:
     def bucket(self):
         if self.released:
             raise ValueError('Released forecast state cannot be scheduled')
-        return ('prefill', self.padded_context_length) if self.blocks_done == 0 else ('decode', self.cache_position)
+        return ('prefill', self.padded_context_length) if self.blocks_done == 0 else ('decode',)
 
     @property
     def cache_bytes(self):
@@ -95,6 +94,9 @@ class TimesFMStepper:
         self.owner = object()
         if (self.model.p, self.model.o, self.model.os, self.model.q, self.model.aridx) != (32, 128, 1024, 10, 5):
             raise ValueError('Block execution requires the pinned TimesFM 2.5 architecture')
+        from .block_decode import validate_block_decode_source
+
+        validate_block_decode_source(self.model)
 
     @torch.inference_mode()
     def initialize(self, context, horizon):
@@ -143,6 +145,9 @@ class TimesFMStepper:
                 raise ValueError('Completed or released forecast state cannot advance')
         if any(state.bucket[0] != phase or state.bucket != states[0].bucket for state in states):
             raise ValueError('Shared TimesFM block states require matching execution buckets')
+        if phase == 'decode' and any(state.cache_position + self.model.m > state.cache_capacity
+                                     for state in states):
+            raise ValueError('TimesFM block write exceeds the request cache capacity')
         return states
 
     def _new_caches(self, rows, capacity, device):
@@ -159,6 +164,8 @@ class TimesFMStepper:
         return F.pad(values, (0, 0, 0, 0, 0, extra)) if extra else values
 
     def _merge_caches(self, states, stream, capacity):
+        if len(states) == 1:
+            return states[0].passes[stream].caches
         result = []
         for layer in range(self.model.x):
             parts = [state.passes[stream].caches[layer] for state in states]
@@ -170,18 +177,31 @@ class TimesFMStepper:
             ))
         return result
 
-    def _store(self, states, stream, caches, stats, block, spread=None):
+    def _store(self, states, stream, caches, stats, block, spread=None, *, positions=None):
         cursor = 0
-        for state in states:
+        for number, state in enumerate(states):
             section = slice(cursor, cursor + state.rows)
             target = state.passes[stream]
-            # Clone every row owner: a completed request must not pin peer rows.
-            target.caches = [DecodeCache(
-                next_index=cache.next_index[section].clone(),
-                num_masked=cache.num_masked[section].clone(),
-                key=cache.key[section, :state.cache_capacity].clone(),
-                value=cache.value[section, :state.cache_capacity].clone(),
-            ) for cache in caches]
+            if len(states) == 1:
+                # New prefill allocations and singleton updates already belong
+                # exclusively to this request. Keep their storage in place.
+                target.caches = caches
+            elif positions is None:
+                # Split prefill once; no request may retain peer allocations.
+                target.caches = [DecodeCache(
+                    next_index=cache.next_index[section].clone(),
+                    num_masked=cache.num_masked[section].clone(),
+                    key=cache.key[section, :state.cache_capacity].clone(),
+                    value=cache.value[section, :state.cache_capacity].clone(),
+                ) for cache in caches]
+            else:
+                start = positions[number]
+                stop = start + self.model.m
+                for owned, packed in zip(target.caches, caches, strict=True):
+                    owned.next_index.copy_(packed.next_index[section])
+                    owned.num_masked.copy_(packed.num_masked[section])
+                    owned.key[:, start:stop].copy_(packed.key[section, start:stop])
+                    owned.value[:, start:stop].copy_(packed.value[section, start:stop])
             target.last_n, target.last_mu, target.last_sigma = (value[section].clone() for value in stats)
             target.feedback = block[section, :, self.model.aridx].clone()
             target.block = block[section, :, 1:].clone()
@@ -227,9 +247,15 @@ class TimesFMStepper:
         context_mu, context_sigma = torch.stack(means, 1), torch.stack(sigmas, 1)
         caches = self._merge_caches(states, stream, max(state.cache_capacity for state in states))
         inputs = revin(inputs, context_mu, context_sigma, reverse=False)
-        (_, _, point, _), caches = self.model(inputs, masks, caches)
+        positions = [state.cache_position for state in states]
+        if len(set(positions)) == 1:
+            (_, _, point, _), caches = self.model(inputs, masks, caches)
+        else:
+            from .block_decode import block_decode_forward
+
+            (_, _, point, _), caches = block_decode_forward(self.model, inputs, masks, caches)
         point = revin(point, context_mu, context_sigma, reverse=True).reshape(-1, self.model.m, self.model.o, self.model.q)[:, -1]
-        self._store(states, stream, caches, (n, mu, sigma), point)
+        self._store(states, stream, caches, (n, mu, sigma), point, positions=positions)
 
     def _finish_block(self, states):
         for state in states:

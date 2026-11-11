@@ -185,7 +185,7 @@ def test_different_initial_contexts_can_merge_at_the_same_cache_position(runtime
     stepper.advance([b])
     assert (a.blocks_done, b.blocks_done) == (1, 2)
     assert a.cache_position == b.cache_position == 5
-    assert a.bucket == b.bucket == ('decode', 5)
+    assert a.bucket == b.bucket == ('decode',)
     stepper.advance([b, a])
     assert (a.blocks_done, b.blocks_done) == (2, 3)
     # Different progress counters and cache capacities retain their own meaning
@@ -222,3 +222,40 @@ def test_incompatible_or_duplicate_cohorts_fail_before_mutating_progress(runtime
     assert all(getattr(a, field) is None for field in ('normalized', 'padding', 'mean', 'std', 'positive', 'output'))
     with pytest.raises(ValueError, match='released'):
         stepper.advance([a])
+
+
+def test_staggered_physical_positions_share_decode_and_keep_owned_cache_storage(runtime):
+    import torch
+    from test_timesfm_block_state import assert_append_only, snapshot
+    from vtsfm.adapters.timesfm25.stepping import TimesFMStepper
+
+    cases = {'early': (_context((480, 512), -1.5), 1024),
+             'late': (_context((512,), 0.5), 513)}
+    expected = {name: runtime.forecast(values, horizon)
+                for name, (values, horizon) in cases.items()}
+    stepper = TimesFMStepper(runtime)
+    early = stepper.initialize(*cases['early'])
+    stepper.prefill([early])
+    before, position = snapshot(early), early.cache_position
+    stepper.advance([early])
+    assert_append_only(early, before, position)
+    late = stepper.initialize(*cases['late'])
+    stepper.prefill([late])
+    assert (early.cache_position, late.cache_position) == (20, 16)
+    assert early.bucket == late.bucket == ('decode',)
+    before = {id(state): (snapshot(state), state.cache_position) for state in (early, late)}
+    stepper.advance([late, early])
+    for state in (early, late):
+        assert_append_only(state, *before[id(state)])
+    active = [early, late]
+    while active:
+        stepper.advance(list(reversed(active)))
+        for name, state in [('early', early), ('late', late)]:
+            if any(value is state for value in active) and stepper.complete(state):
+                torch.testing.assert_close(stepper.finalize(state), expected[name], rtol=1e-4, atol=1e-4)
+                stepper.release(state)
+                active = [value for value in active if value is not state]
+    assert early.tensor_bytes == late.tensor_bytes == 0
+    # Whole forecasting still calls the unchanged upstream forward after use.
+    values, horizon = cases['late']
+    torch.testing.assert_close(runtime.forecast(values, horizon), expected['late'], rtol=0, atol=0)
