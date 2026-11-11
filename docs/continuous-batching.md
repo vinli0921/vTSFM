@@ -35,16 +35,23 @@ and flipped streams, running statistics, median feedback, quantile spread,
 output buffer and KV caches. Feedback stays separate between flip streams.
 Quantiles, crossing correction and de-normalization preserve pinned semantics.
 
-Prefill calls can share a padded context width. AR calls require the same
-physical cache position: upstream attention writes batched caches using the
-first row's `next_index`. Requests at different positions use separate calls
-within an iteration. A later arrival can enter while an older forecast is
-active, but does not necessarily merge into that older cohort. Different initial
-contexts can reach the same position; parity tests cover that case too.
+Prefill calls can share a padded context width. AR calls can also combine
+requests at different physical cache positions. The pinned upstream rotary
+positions and attention masks already use per-row counters, but its K/V write
+uses only the first row's index. Mixed-position calls use a private adapter
+forward with per-row writes and the same native projections, normalization,
+attention function, full cache width and forecast heads. Matching-position calls
+retain the upstream model forward. Class-source guards require revalidation
+before changing the pinned implementation; model methods and weights are not
+replaced.
 
-Shared calls concatenate cache/state rows and copy them back into independent
-request storage. Retiring a request therefore cannot retain its peers' backing
-cache allocation. Completion packs the final response and releases state.
+Each request retains its own persistent cache allocations. Singleton calls
+advance those buffers directly. Shared calls still pack cache rows for native
+attention, then copy back only the four newly appended patches and counters.
+They keep each owner's original allocation and prefix, including when requests
+have different capacities or are reordered. Initial shared prefill splits its
+cache once, so retiring a request cannot retain a peer's backing allocation.
+Completion packs the final response and releases state.
 Cancellation also releases state, including zero-compute housekeeping steps.
 Cleanup is idempotent. Input/queue/response-formatting errors affect their own
 requests; a device or model-worker failure can still require an engine restart.
@@ -116,19 +123,50 @@ CUDA_VISIBLE_DEVICES=0 VTSFM_RUN_TIMESFM_CONTINUOUS=1 PYTHONPATH=src:tests:. \
 ```
 
 The parity tolerance is `rtol=atol=1e-4`. Tests cover patch/block boundaries,
-ragged histories, cohort changes, reordered rows, different initial contexts at
-matching cache positions, independent completion, errors and cancellation.
+ragged histories, cohort changes, reordered rows, matching and different physical
+cache positions, stable cache allocations, unchanged prefixes, independent
+completion, errors and cancellation. Traces include one `cache_positions` value
+per request; the older scalar `cache_position` is null for mixed-position calls.
 Bounded test-only gates prove that later requests start before older ones finish
 and actual AR calls batch multiple active requests. Serving has no gate files
 or sleeps. The gates are not used for performance measurements.
 
-The maximum-shape A100 probe ran four four-row C8192/H1024 requests together,
-then four 16-row requests that had to execute one at a time under the global
+The original block implementation's maximum-shape A100 probe ran four four-row
+C8192/H1024 requests together, then four 16-row requests that had to execute one
+at a time under the global
 capacity limit. Persistent KV peaked at 1.73 GiB and returned to zero. The latter
 probe peaked at **4.34 GiB allocated, 4.82 GiB reserved and 5.84 GiB sampled
 device memory**. These finite synthetic probes establish measured capacity on
 the pinned idle A100; they are not exact memory guarantees on other stacks or
 under external GPU contention.
+
+On 2026-11-11, the changed stepper passed all 21 pinned-checkpoint checks and
+all three real HTTP checks above on the A100, including a shared decode call
+at cache positions `[12, 12, 4]`. Cancellation, postprocessing failure, independent
+completion and maximum-capacity deferral returned all request state to zero.
+The capacity probes retained the 1.73 GiB persistent KV bound, with a maximum
+of 3.67 GiB Torch allocated and 4.02 GiB reserved across the two probes. This
+was authorized shared-GPU correctness work; whole-device NVML residency included
+an existing unrelated job. All owned servers exited and that job was preserved.
+These observations qualify the tested capacity and lifecycle behavior;
+performance comparisons still require an idle GPU and matching baselines.
+
+Tiny official-model CPU regressions need the existing TimesFM environment and
+no downloaded weights:
+
+```bash
+CUDA_VISIBLE_DEVICES='' PYTHONPATH=src:tests:. \
+  .venv-timesfm25/bin/python -m pytest tests/test_timesfm_block_decode.py \
+  tests/test_timesfm_block_state.py -q
+```
+
+They explicitly initialize nonzero RMS scales so the mixed-position negative
+control reaches meaningful attention. The original scalar-write native batch
+must fail that control while independent native rows pass. These tests and
+structural reductions in copying do not establish a throughput improvement.
+Issue #49's acceptance still needs the manual matched whole-versus-continuous
+comparison below. Compilation of the private mixed-position forward has not
+been qualified; matching-position calls retain their existing entry point.
 
 ## Offered-load comparison
 

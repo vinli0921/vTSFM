@@ -132,7 +132,8 @@ Use the checkout's environments, not global Python packages:
   synchronous scheduler/worker hooks isolated. Prompt markers count forecast
   blocks, never observations. Count all active caches toward global numerical
   capacity; vLLM owns bounded HTTP intake and cancellation. Shared AR calls need
-  matching physical cache positions and independently owned request buffers.
+  per-row cache writes when positions differ and independently owned request
+  buffers. Preserve native rotary positions and attention masks.
   Serving changes need real staggered-arrival, completion, error/cancellation,
   parity and peak-memory checks. Keep timing passes untraced and queue diagnostics
   separately labeled.
