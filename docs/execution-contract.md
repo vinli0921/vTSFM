@@ -104,7 +104,11 @@ starting vLLM; model and IO bindings enforce the same policy for direct/offline
 calls. Costs include padded shapes and model-specific recursion. The shared
 whole-forecast helper splits compatible calls within row/work budgets and keeps
 ragged requests isolated even when their prepared executor supports ragged rows.
-See [numerical admission](numerical-admission.md) for current measurement status.
+See [numerical admission](numerical-admission.md) for the A100 qualification and
+reproduction commands. Moirai supplies Lightning the same constructor frame
+explicitly, avoiding a Python frame cycle that would otherwise keep request
+tensors alive until cyclic garbage collection. The upstream forecast and its
+hyperparameters are unchanged; a GC-disabled lifetime regression guards this path.
 
 ## CPU example
 

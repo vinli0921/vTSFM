@@ -8,8 +8,8 @@ PATCH_SIZE = 16
 OUTPUT_BLOCK_SIZE = PATCH_SIZE * 4
 NATIVE_QUANTILES = 9
 
-# Candidate FP32 envelope. Actual model/scaler/attention scratch needs separate
-# GPU measurement before these ceilings are described as validated capacity.
+# FP32 envelope qualified on the reference A100; see numerical-admission.md.
+# Model/scaler/attention scratch remains separate from shared resident accounting.
 # Eight logical rows keep the seven-sensor accuracy/integration tasks supported;
 # a recursive module call expands these to 72 trajectory rows, not eight.
 DEFAULT_LIMITS = ForecastLimits(

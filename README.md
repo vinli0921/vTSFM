@@ -89,9 +89,10 @@ use the smaller numerical contract described below.
 
 ## TimesFM 2.5, Toto 2, and Moirai 2.0
 
-These adapters run complete upstream forecasts through the same vLLM pooling
-pattern. They do not add scheduling or attention optimizations. Each has its own
-environment, leaving `.venv` and the Chronos baseline unchanged:
+These adapters use the same vLLM pooling interface and preserve upstream forecast
+semantics. Whole-forecast batching and TimesFM block scheduling are described
+below; attention remains upstream-owned. Each has its own environment, leaving
+`.venv` and the Chronos baseline unchanged:
 
 ```bash
 ./scripts/setup.sh --adapter timesfm25
@@ -130,10 +131,11 @@ TimesFM now enforces a measured numerical envelope: at most 16 series per
 request, context 8192, horizon 1024, and four scheduled requests. The worker
 splits compatible work within execution budgets. Use `--forecast-limits FILE`
 to tighten the policy; see [numerical admission](docs/numerical-admission.md) for
-defaults, errors, memory measurements, and the manual GPU suite. Toto/Moirai
-now have model-specific candidate policies and bounded whole-forecast batching;
-their real-model GPU validation remains pending. Candidate request caps are 16
-series for Toto and eight for Moirai, with at most four scheduled requests.
+defaults, errors, memory measurements, and the manual GPU suite. Toto and Moirai
+also have model-specific policies and bounded whole-forecast batching, qualified
+on the reference A100. Request caps are 16 series for Toto and eight for Moirai,
+with at most four scheduled requests. These finite probes establish the tested
+envelope; they do not establish a throughput speedup.
 
 TimesFM also supports experimental forecast-block continuous batching:
 
