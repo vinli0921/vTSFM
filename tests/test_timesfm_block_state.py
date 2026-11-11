@@ -14,11 +14,11 @@ from vtsfm.adapters.timesfm25.runtime import TimesFMRuntime  # noqa: E402
 from vtsfm.adapters.timesfm25.stepping import TimesFMStepper  # noqa: E402
 
 
-@pytest.fixture
-def runtimes():
+@pytest.fixture(params=[True, False], ids=['fused-qkv', 'separate-qkv'])
+def runtimes(request):
     threads = torch.get_num_threads()
     torch.set_num_threads(1)
-    model = tiny_model()
+    model = tiny_model(request.param)
     actual = object.__new__(TimesFMRuntime)
     actual.model = model
     reference = object.__new__(TimesFMRuntime)
@@ -51,6 +51,7 @@ def assert_append_only(state, before, position):
             torch.testing.assert_close(cache.key[:, position + 4:], key[:, position + 4:], rtol=0, atol=0)
             torch.testing.assert_close(cache.value[:, position + 4:], value[:, position + 4:], rtol=0, atol=0)
             assert cache.next_index.tolist() == [position + 4] * state.rows
+            torch.testing.assert_close(cache.num_masked, stream.caches[0].num_masked, rtol=0, atol=0)
 
 
 def test_singleton_adopts_prefill_and_advances_owned_caches_in_place(runtimes, monkeypatch):
@@ -85,7 +86,7 @@ def test_singleton_adopts_prefill_and_advances_owned_caches_in_place(runtimes, m
 
 def test_staggered_positions_reordering_and_retirement_preserve_native_outputs(runtimes):
     runtime, reference = runtimes
-    cases = {'a': (context((160, 160), -1.5), 1024),
+    cases = {'a': (context((97, 160), -1.5), 1024),
              'b': (context((32,), 1), 513),
              'short': (context((33,), 0.3), 257)}
     expected = {name: reference.forecast(values, horizon)

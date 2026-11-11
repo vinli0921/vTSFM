@@ -5,6 +5,8 @@ measurements. Patch/head geometry matches the real forecast-block stepper.
 """
 
 import dataclasses
+import gc
+import weakref
 
 import pytest
 
@@ -112,6 +114,9 @@ def _heterogeneous_prefills(model, capacities=(12, 14, 10), positions=(3, 7, 1))
         masks = torch.zeros_like(inputs, dtype=torch.bool)
         masks[:, :masked] = True
         model(inputs, masks, caches)
+        for cache in caches:
+            torch.testing.assert_close(cache.next_index, caches[0].next_index, rtol=0, atol=0)
+            torch.testing.assert_close(cache.num_masked, caches[0].num_masked, rtol=0, atol=0)
         states.append(caches)
     inputs = torch.randn(3, model.m, model.p, generator=generator)
     return states, inputs, torch.zeros_like(inputs, dtype=torch.bool)
@@ -197,9 +202,19 @@ def test_reordered_groups_and_repeated_advances_preserve_positions_and_masks(mod
 
 
 @torch.inference_mode()
-def test_neural_layers_batch_once_and_attention_uses_original_owned_caches(model):
+def test_neural_layers_batch_once_and_native_masks_are_reused_across_layers(model, monkeypatch):
+    from vtsfm.adapters.timesfm25 import block_decode
+
     groups, inputs, masks = _heterogeneous_prefills(model)
-    calls, projection_calls, hooks = [], {}, []
+    calls, projection_calls, hooks, created_masks = [], {}, [], []
+    original_mask = block_decode.make_attn_mask
+
+    def record_mask(**kwargs):
+        mask = original_mask(**kwargs)
+        created_masks.append(mask)
+        return mask
+
+    monkeypatch.setattr(block_decode, 'make_attn_mask', record_mask)
     projections = [('tokenizer', model.tokenizer), ('point', model.output_projection_point),
                    ('spread', model.output_projection_quantiles)]
     for index, layer in enumerate(model.stacked_xf):
@@ -210,7 +225,8 @@ def test_neural_layers_batch_once_and_attention_uses_original_owned_caches(model
         original = layer.attn.attention_fn
 
         def record(query, key, value, mask=None, original=original, index=index):
-            calls.append((index, query.shape, key.data_ptr(), value.data_ptr(), key.shape, mask.clone()))
+            calls.append((index, query.shape, key.data_ptr(), value.data_ptr(), key.shape,
+                          mask.data_ptr(), mask.clone()))
             return original(query, key, value, mask=mask)
 
         layer.attn.attention_fn = record
@@ -228,10 +244,12 @@ def test_neural_layers_batch_once_and_attention_uses_original_owned_caches(model
             hook.remove()
     assert all(rows == [3] for rows in projection_calls.values())
     assert len(calls) == model.x * len(groups)
-    for index, query_shape, key_ptr, value_ptr, key_shape, mask in calls:
+    assert len(created_masks) == len(groups)  # One native mask per request, not per layer.
+    for index, query_shape, key_ptr, value_ptr, key_shape, mask_ptr, mask in calls:
         row = next(row for row, caches in enumerate(groups) if caches[index].key.data_ptr() == key_ptr)
         cache = groups[row][index]
         assert value_ptr == cache.value.data_ptr()
+        assert mask_ptr == created_masks[row].data_ptr()
         assert key_shape == cache.key.shape
         assert query_shape == (1, 4, model.h, model.hd)
         position, masked = [(3, 1), (7, 2), (1, 0)][row]
@@ -240,6 +258,36 @@ def test_neural_layers_batch_once_and_attention_uses_original_owned_caches(model
             expected_mask[:, :, query, masked:position + query + 1] = True
         torch.testing.assert_close(mask, expected_mask)
     assert [call[4][1] for call in calls[:3]] == [12, 14, 10]
+
+
+@torch.inference_mode()
+def test_hoisted_metadata_is_rebuilt_for_changed_calls_and_not_retained(model, monkeypatch):
+    from vtsfm.adapters.timesfm25 import block_decode
+
+    original = block_decode._decode_metadata
+    refs = []
+
+    def observe(*args):
+        result = original(*args)
+        refs.extend(weakref.ref(tensor) for tensor in (result[0], result[1], *result[2]))
+        return result
+
+    monkeypatch.setattr(block_decode, '_decode_metadata', observe)
+    groups, inputs, masks = _heterogeneous_prefills(model, (18, 22, 18))
+    reference, serial = _serial_forward(model, inputs, masks, groups)
+    actual, _ = block_decode_forward(model, inputs, masks, groups, [3, 7, 1])
+    for value, expected in zip(actual, reference, strict=True):
+        torch.testing.assert_close(value, expected, rtol=1e-5, atol=1e-6)
+    gc.collect()
+    assert len(refs) == 5 and all(ref() is None for ref in refs)
+    changed_inputs, changed_masks = -inputs, masks.clone()
+    changed_masks[1, 0] = True
+    reference, _ = _serial_forward(model, changed_inputs, changed_masks, serial)
+    actual, _ = block_decode_forward(model, changed_inputs, changed_masks, groups, [7, 11, 5])
+    for value, expected in zip(actual, reference, strict=True):
+        torch.testing.assert_close(value, expected, rtol=1e-5, atol=1e-6)
+    gc.collect()
+    assert len(refs) == 10 and all(ref() is None for ref in refs)
 
 
 @torch.inference_mode()
@@ -307,7 +355,7 @@ def test_source_guard_rejects_changed_class_forward(model):
         validate_block_decode_source(ChangedForward())
 
 
-@pytest.mark.parametrize('invalid', ['capacity', 'rows', 'count', 'position'])
+@pytest.mark.parametrize('invalid', ['capacity', 'layer_capacity', 'rows', 'count', 'position'])
 @torch.inference_mode()
 def test_invalid_group_geometry_fails_before_mutating_any_cache(model, invalid):
     groups, inputs, masks = _heterogeneous_prefills(model)
@@ -315,6 +363,10 @@ def test_invalid_group_geometry_fails_before_mutating_any_cache(model, invalid):
     positions = [3, 7, 1]
     if invalid == 'capacity':
         positions[-1] = 7
+    elif invalid == 'layer_capacity':
+        groups[-1][-1].key = groups[-1][-1].key[:, :-1]
+        groups[-1][-1].value = groups[-1][-1].value[:, :-1]
+        before[-1] = _clone_caches(groups[-1])
     elif invalid == 'rows':
         inputs, masks = inputs[:2], masks[:2]
     elif invalid == 'count':
