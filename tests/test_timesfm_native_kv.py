@@ -176,7 +176,7 @@ def test_native_page_lifetime_reorder_completion_cancel_and_reuse(runtimes):
         stepper.advance([second, first])
         stepper.advance([first, second])
         torch.testing.assert_close(stepper.finalize(second), expected_b, rtol=1e-4, atol=1e-4)
-        assert len(stepper.arena.allocated) == 1
+        assert len(stepper.arena.allocated) == 2  # Independent normal/flipped leases.
         stepper.release(second)
         while not stepper.complete(first):
             stepper.advance([first])
@@ -214,4 +214,60 @@ def test_native_decode_batches_different_physical_cache_positions(runtimes):
         for state, values in zip((a, b), expected):
             torch.testing.assert_close(stepper.finalize(state), values, rtol=1e-4, atol=1e-4)
             stepper.release(state)
+        assert not stepper.arena.allocated
+
+
+@pytest.mark.gpu
+@native
+def test_native_continuation_fuses_signs_in_neural_layers_and_attention(runtimes, monkeypatch):
+    import torch
+    from vtsfm.adapters.timesfm25.native_stepping import PagedTimesFMStepper
+
+    reference, candidate = runtimes
+    context = _context((65, 65))
+    expected = reference.forecast(context, 384)
+    with PagedTimesFMStepper(candidate, max_sequences=2, max_tokens=16) as stepper:
+        state = stepper.initialize(context, 384)
+        names = stepper.sequence_ids(state)
+        assert len(names) == len(set(names)) == 4
+        blocks = [set(stepper.arena.block_ids(name)) for name in names]
+        assert all(not left.intersection(right) for i, left in enumerate(blocks)
+                   for right in blocks[i + 1:])
+        stepper.prefill([state])
+        assert state.cache_bytes == 0
+        calls = {'tokenizer': [], 'qkv': [], 'ff0': [], 'point': [], 'spread': [], 'attention': []}
+
+        def hook(name):
+            return lambda module, inputs, output: calls[name].append(tuple(inputs[0].shape))
+
+        handles = [stepper.model.tokenizer.register_forward_hook(hook('tokenizer')),
+                   stepper.model.output_projection_point.register_forward_hook(hook('point')),
+                   stepper.model.output_projection_quantiles.register_forward_hook(hook('spread'))]
+        for layer in stepper.model.stacked_xf:
+            handles.extend((layer.attn.qkv_proj.register_forward_hook(hook('qkv')),
+                            layer.ff0.register_forward_hook(hook('ff0'))))
+        original = stepper.arena.impl.forward
+
+        def attention_forward(layer, query, *args, **kwargs):
+            calls['attention'].append(tuple(query.shape))
+            return original(layer, query, *args, **kwargs)
+
+        monkeypatch.setattr(stepper.arena.impl, 'forward', attention_forward)
+        try:
+            stepper.advance([state])
+        finally:
+            for handle in handles:
+                handle.remove()
+            monkeypatch.setattr(stepper.arena.impl, 'forward', original)
+        for name in ('tokenizer', 'point', 'spread'):
+            assert len(calls[name]) == 1
+            assert calls[name][0][:2] == (4, 4)
+        for name in ('qkv', 'ff0'):
+            assert len(calls[name]) == stepper.model.x
+            assert all(shape[:2] == (4, 4) for shape in calls[name])
+        assert calls['attention'] == [(16, 16, 80)] * stepper.model.x
+        while not stepper.complete(state):
+            stepper.advance([state])
+        torch.testing.assert_close(stepper.finalize(state), expected, rtol=1e-4, atol=1e-4)
+        stepper.release(state)
         assert not stepper.arena.allocated

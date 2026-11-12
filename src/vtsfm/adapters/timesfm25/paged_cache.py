@@ -21,7 +21,7 @@ class _Lease:
 
 
 class PagedCacheArena:
-    """Independent FP32 caches for two flip streams and every decoder layer.
+    """Independent FP32 caches for each configured stream and decoder layer.
 
     ``attend`` accepts packed CUDA tensors [sum(query_lengths), heads, head_size].
     ``starts`` are already-cached patch counts, separately checked for each
@@ -29,7 +29,7 @@ class PagedCacheArena:
     """
 
     def __init__(self, layers, heads, head_size, max_sequences, max_tokens,
-                 block_size=16, device='cuda', dtype=torch.float32):
+                 block_size=16, device='cuda', dtype=torch.float32, streams=2):
         if version('vllm') != '0.33.0' or torch.__version__.split('+')[0] != '2.14.0':
             raise ValueError('Paged TimesFM proof requires vLLM 0.33.0 and Torch 2.14.0')
         if torch.version.cuda != '13.0':
@@ -37,7 +37,7 @@ class PagedCacheArena:
         if os.environ.get('TRITON_F32_DEFAULT') != 'ieee':
             raise ValueError('Launch with TRITON_F32_DEFAULT=ieee before importing Triton')
         if any(type(n) is not int or n < 1
-               for n in (layers, heads, head_size, max_sequences, max_tokens, block_size)):
+               for n in (layers, heads, head_size, max_sequences, max_tokens, block_size, streams)):
             raise ValueError('Arena dimensions must be positive integers')
         if dtype != torch.float32 or torch.device(device).type != 'cuda':
             raise ValueError('Paged TimesFM proof requires CUDA FP32')
@@ -52,6 +52,7 @@ class PagedCacheArena:
                 or not TritonAttentionBackend.supports_block_size(block_size)):
             raise ValueError('Unsupported Triton attention head or block size')
         self.layers, self.heads, self.head_size = layers, heads, head_size
+        self.streams = streams
         self.max_sequences, self.max_tokens = max_sequences, max_tokens
         self.block_size = block_size
         self.device = torch.device('cuda', torch.cuda.current_device()) if str(device) == 'cuda' else torch.device(device)
@@ -60,7 +61,7 @@ class PagedCacheArena:
         self._plan_key = self._plan_metadata = None
         self._closed = False
         self._names = {(layer, stream): f'proof.{stream}.layers.{layer}.attn'
-                       for stream in range(2) for layer in range(layers)}
+                       for stream in range(streams) for layer in range(layers)}
         spec = FullAttentionSpec(block_size=block_size, num_kv_heads=heads,
                                  head_size=head_size, dtype=dtype)
         # Block zero is the manager's null block. Every real sequence can reserve
@@ -109,7 +110,7 @@ class PagedCacheArena:
 
     @property
     def leased_cache_bytes(self):
-        return sum(len(ids) for ids in self.allocated.values()) * self._page_bytes * 2 * self.layers
+        return sum(len(ids) for ids in self.allocated.values()) * self._page_bytes * self.streams * self.layers
 
     def reserve(self, sequence_id, capacity):
         from vllm import PoolingParams

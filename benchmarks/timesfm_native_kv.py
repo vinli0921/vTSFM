@@ -344,13 +344,14 @@ def _orchestrate(args):
                     configuration={key: str(value) if isinstance(value, Path) else value
                                    for key, value in vars(args).items()}, status='running', runs=[])
     _write(args.output / 'manifest.json', manifest)
-    backends = BACKENDS + ('stepper-control',) if args.control_checkout else BACKENDS
+    backends = (('stepper', 'paged') if args.backend == 'ablation' else
+                BACKENDS + ('stepper-control',) if args.control_checkout else BACKENDS)
     try:
         with OwnedProcesses(args.output) as owner:
             for repetition in range(args.repetitions):
                 offset = repetition % len(backends)
                 order = backends[offset:] + backends[:offset]
-                for backend in order if args.backend == 'all' else (args.backend,):
+                for backend in order if args.backend in ('all', 'ablation') else (args.backend,):
                     destination = args.output / f'repetition-{repetition + 1}-{backend}'
                     source = args.control_checkout if backend == 'stepper-control' else ROOT
                     implementation = 'stepper' if backend == 'stepper-control' else backend
@@ -404,7 +405,8 @@ def _orchestrate(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--backend', choices=('all',) + BACKENDS, default='all')
+    parser.add_argument('--backend', choices=('all', 'ablation') + BACKENDS, default='all',
+                        help='ablation rotates only the shared optimized dense and paged executors')
     parser.add_argument('--output', type=Path, required=True, help='New output directory; never overwrite a run')
     parser.add_argument('--contexts', type=_integers, default=(128, 512))
     parser.add_argument('--horizons', type=_integers, default=(384,))
@@ -422,7 +424,7 @@ def main():
     if (args.requests < 1 or args.warmups < 0 or args.repetitions < 1 or args.gpu < 0
             or max(args.contexts) > 8192 or max(args.horizons) > 1024 or max(args.rows) > 16):
         parser.error('Require requests/repetitions >=1, warmups/gpu >=0, contexts <=8192, horizons <=1024, rows <=16')
-    if args.child_repetition is not None and (args.backend == 'all' or args.child_repetition < 1):
+    if args.child_repetition is not None and (args.backend in ('all', 'ablation') or args.child_repetition < 1):
         parser.error('Invalid internal child configuration')
     if os.environ.get('VTSFM_RUN_TIMESFM_NATIVE_KV') != '1':
         parser.error('Set VTSFM_RUN_TIMESFM_NATIVE_KV=1 to opt in to this manual GPU experiment')

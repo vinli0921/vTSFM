@@ -22,8 +22,9 @@ from .stepping import TimesFMStepper
 class PagedTimesFMStepper(TimesFMStepper):
     """Keep original forecast state; replace dense KV payloads with page leases.
 
-    One lease per independent series covers two disjoint sign/layer storage
-    groups. The paired signs have the same lifetime, but never share KV bytes.
+    Each (series, sign) owns a separate lease in one physical layer view. This
+    lets normal/flipped rows share one attention call, just as they share all
+    neural layers in the optimized dense control. Signs never share KV bytes.
     Dummy DecodeCaches contain only position counters and empty K/V tensors.
     ``state.cache_bytes`` therefore excludes the arena; report arena.cache_bytes
     and leased_cache_bytes explicitly. All work is on one CUDA stream.
@@ -31,12 +32,11 @@ class PagedTimesFMStepper(TimesFMStepper):
 
     def __init__(self, runtime, *, max_sequences=2, max_tokens=284):
         if not all(hasattr(TimesFMStepper, method)
-                   for method in ('_prefill_pass', '_advance_pass', '_store', '_merge_caches')):
-            raise ValueError('Native proof requires the recorded original stepper revision; '
-                             'new block executors need separate integration')
+                   for method in ('_prefill_pass', '_advance_passes', '_store', '_block_decode_forward')):
+            raise ValueError('Native proof requires the recorded optimized stepper and attention seam')
         super().__init__(runtime)
         self.arena = PagedCacheArena(self.model.x, self.model.h, self.model.hd,
-                                     max_sequences, max_tokens,
+                                     2 * max_sequences, max_tokens, streams=1,
                                      device=next(self.model.parameters()).device)
         self._routes = {}
         self._active = None
@@ -57,7 +57,7 @@ class PagedTimesFMStepper(TimesFMStepper):
             if self._active is None or decode_cache is None:
                 raise ValueError('Experimental native attention requires an active stepper call')
             rows, patches, _ = inputs_q.shape
-            stream, identities, starts, cuts = self._active
+            identities, starts, cuts = self._active
             if len(identities) != rows:
                 raise ValueError('Native sequence metadata does not match transformer rows')
             if patch_mask is None:
@@ -78,7 +78,7 @@ class PagedTimesFMStepper(TimesFMStepper):
                        for tensor in (query, key, value)] if dense_rows else [
                            torch.cat([tensor[row, cut:] for row, cut in enumerate(cuts)]).contiguous()
                            for tensor in (query, key, value)])
-            output = self.arena.attend(index, stream, *packed, identities, starts, sizes)
+            output = self.arena.attend(index, 0, *packed, identities, starts, sizes)
             if dense_rows:
                 dense = output.reshape_as(query)
             else:
@@ -99,7 +99,7 @@ class PagedTimesFMStepper(TimesFMStepper):
             raise ValueError('Native stepper is closed')
         if (not isinstance(context, torch.Tensor) or context.ndim != 2
                 or context.device != self.arena.device
-                or context.shape[0] + len(self.arena.allocated) > self.arena.max_sequences):
+                or 2 * context.shape[0] + len(self.arena.allocated) > self.arena.max_sequences):
             raise ValueError('Native inputs must fit the arena series slots on its CUDA device')
         state = super().initialize(context, horizon)
         # Drop whole masked PATCH tokens only. Trimming raw histories before
@@ -112,12 +112,14 @@ class PagedTimesFMStepper(TimesFMStepper):
             raise ValueError('Native proof supports finite histories with left padding only')
         masked = [int(start) // self.model.p for start in starts.tolist()]
         self._counter += 1
-        identities = tuple(f'proof-{self._counter}-row-{row}' for row in range(state.rows))
+        identities = tuple(tuple(f'proof-{self._counter}-sign-{stream}-row-{row}'
+                                 for row in range(state.rows)) for stream in range(2))
         reserved = []
         try:
-            for identity, cut in zip(identities, masked):
-                self.arena.reserve(identity, state.cache_capacity - cut)
-                reserved.append(identity)
+            for stream_names in identities:
+                for identity, cut in zip(stream_names, masked):
+                    self.arena.reserve(identity, state.cache_capacity - cut)
+                    reserved.append(identity)
         except BaseException:
             for identity in reserved:
                 self.arena.release(identity)
@@ -128,30 +130,69 @@ class PagedTimesFMStepper(TimesFMStepper):
 
     def sequence_ids(self, state):
         self._owner(state)
-        return self._routes[id(state)][1]
+        return tuple(name for stream in self._routes[id(state)][1] for name in stream)
 
-    def _activate(self, states, stream):
+    def _activate(self, states, streams):
         identities, starts, cuts = [], [], []
-        for state in states:
-            _, names, masked = self._routes[id(state)]
-            identities.extend(names)
-            starts.extend(0 if not state.blocks_done else state.cache_position - cut for cut in masked)
-            cuts.extend(masked if not state.blocks_done else [0] * state.rows)
-        self._active = stream, tuple(identities), tuple(starts), tuple(cuts)
+        for stream in streams:
+            for state in states:
+                _, names, masked = self._routes[id(state)]
+                identities.extend(names[stream])
+                starts.extend(0 if not state.blocks_done else state.cache_position - cut for cut in masked)
+                cuts.extend(masked if not state.blocks_done else [0] * state.rows)
+        self._active = tuple(identities), tuple(starts), tuple(cuts)
 
     def _prefill_pass(self, states, stream):
-        self._activate(states, stream)
+        self._activate(states, (stream,))
         try:
             super()._prefill_pass(states, stream)
         finally:
             self._active = None
 
-    def _advance_pass(self, states, stream):
-        self._activate(states, stream)
+    def _block_decode_forward(self, states, inputs, masks, cache_groups, positions):
+        from .block_decode import block_decode_forward
+
+        # The parent's unchanged _advance_passes fuses flip statistics, neural
+        # calls and output storage. Only cache preparation/attention differ.
+        self._activate(states, (0, 1))
         try:
-            super()._advance_pass(states, stream)
+            return block_decode_forward(self.model, inputs, masks, cache_groups, positions,
+                                        attention_backend=self)
         finally:
             self._active = None
+
+    def prepare(self, model, inputs, masks, cache_groups, positions):
+        """Validate counter-only groups and prepare shared native RoPE metadata."""
+        from .block_decode import _decode_positions
+
+        if (model is not self.model or self._active is None or inputs.ndim != 3
+                or inputs.shape[1:] != (model.m, model.p) or masks.shape != inputs.shape
+                or not cache_groups or len(cache_groups) != len(positions)):
+            raise ValueError('Native block attention requires matching active decode groups')
+        groups, cursor = [], 0
+        for caches, position in zip(cache_groups, positions, strict=True):
+            if type(position) is not int or position < 0 or len(caches) != model.x:
+                raise ValueError('Native decode groups require a physical position and every layer')
+            rows = caches[0].next_index.numel()
+            if rows < 1 or any(cache.next_index.shape != (rows,) or cache.num_masked.shape != (rows,)
+                               or cache.key.shape != (rows, 0, model.h, model.hd)
+                               or cache.value.shape != cache.key.shape for cache in caches):
+                raise ValueError('Native decode requires counters with empty dense K/V')
+            groups.append((slice(cursor, cursor + rows), caches, position))
+            cursor += rows
+        identities, starts, cuts = self._active
+        if cursor != inputs.shape[0] or cursor != len(identities) or any(cuts):
+            raise ValueError('Native decode routes must partition the unmasked neural batch')
+        # Counter arithmetic is the exact same helper used by the dense control.
+        position, num_masked, _ = _decode_positions(inputs, masks, groups)
+        return groups, position, num_masked, (identities, starts, (model.m,) * cursor)
+
+    def attend(self, layer_index, query, key, value, metadata):
+        """One packed attention call per layer, including both independent signs."""
+        identities, starts, sizes = metadata
+        shape = query.shape
+        packed = [tensor.reshape(-1, self.model.h, self.model.hd) for tensor in (query, key, value)]
+        return self.arena.attend(layer_index, 0, *packed, identities, starts, sizes).reshape(shape)
 
     def _new_caches(self, rows, capacity, device):
         # Native KV lives in arena layer views. These are only upstream-compatible
@@ -162,16 +203,6 @@ class PagedTimesFMStepper(TimesFMStepper):
             key=torch.empty(rows, 0, self.model.h, self.model.hd, device=device),
             value=torch.empty(rows, 0, self.model.h, self.model.hd, device=device),
         ) for _ in range(self.model.x)]
-
-    def _merge_caches(self, states, stream, capacity):
-        return [DecodeCache(
-            next_index=torch.cat([state.passes[stream].caches[layer].next_index for state in states]),
-            num_masked=torch.cat([state.passes[stream].caches[layer].num_masked for state in states]),
-            key=states[0].passes[stream].caches[layer].key.new_empty(
-                sum(state.rows for state in states), 0, self.model.h, self.model.hd),
-            value=states[0].passes[stream].caches[layer].value.new_empty(
-                sum(state.rows for state in states), 0, self.model.h, self.model.hd),
-        ) for layer in range(self.model.x)]
 
     def _cohort(self, states, phase):
         states = tuple(states)
@@ -188,8 +219,9 @@ class PagedTimesFMStepper(TimesFMStepper):
     def _free(self, state):
         route = self._routes.pop(id(state), None)
         if route is not None:
-            for identity in route[1]:
-                self.arena.release(identity)
+            for stream in route[1]:
+                for identity in stream:
+                    self.arena.release(identity)
 
     def _finish_block(self, states):
         super()._finish_block(states)
