@@ -43,10 +43,21 @@ requests). Round 0b = batch 64, fixed windows (30 timed requests). Five warm-up 
   Instead, about 40 request-path functions in the API server and EngineCore are wrapped in NVTX ranges by a
   `sitecustomize` hook (`VTSFM_NVTX=1`). No source changes. "Python/framework" is the request time on the
   compute thread minus its CUDA API time.
-- **Tracing overhead.** At batch 1, CUDA tracing adds about 6–8 µs to each launch, which inflates wall time
-  1.5–1.9×. At batch 64 it adds 2–5%. Every config also has an untraced timing run. The host split below scales
-  the traced non-sync host time to the untraced wall time. A light trace (`cuda,nvtx` only) gives the same
-  shares.
+- **Tracing overhead.** CUDA tracing adds about 6–8 µs to each launch. That inflates batch-1 wall time
+  1.5–1.9× (in-process traced/untraced: +46% to +88%). At batch 64 the effect depends on the model
+  (traced vs untraced in-process wall time, from `summary.csv`):
+
+  | Model | native | runtime |
+  | --- | ---: | ---: |
+  | TimesFM | +27.5% | +25.0% |
+  | Toto | +3.0% | +2.8% |
+  | Moirai | +3.2% | +7.2% |
+
+  TimesFM still launches about 11k kernels per forecast at batch 64, so its traced wall time remains strongly
+  perturbed; Toto and Moirai are GPU-bound there and change little. HTTP traced and untraced rows are not
+  directly comparable: traced time is the server handler window, untraced is client end-to-end. Every config
+  has an untraced timing run. The host split below scales the traced non-sync host time to the untraced wall
+  time. A light trace (`cuda,nvtx` only) gives the same shares.
 - **TimesFM's admission policy caps a request at 16 rows** ([`admission.py`](../../../src/vtsfm/adapters/timesfm25/admission.py)). A 64-row HTTP
   request gets HTTP 400, so TimesFM's batched HTTP case uses sequential 16-row requests.
 - Chronos-2 was not profiled. It uses a separate legacy environment, which the Nov 9 update keeps out of this
