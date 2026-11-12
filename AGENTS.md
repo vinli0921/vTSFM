@@ -149,6 +149,12 @@ Use the checkout's environments, not global Python packages:
   worker model exceptions can be engine-fatal; distinguish clean restart from
   recovery within a healthy engine. Offline synchronous `LLM` calls are
   sequential; concurrent clients use the HTTP/async path.
+- The optional [TimesFM native-KV experiment](docs/timesfm-native-kv.md) is a
+  direct backend/block-allocator proof, not native GPUModelRunner or HTTP support.
+  Use the recorded source and `TRITON_F32_DEFAULT=ieee`; Torch TF32 flags alone
+  do not specify Triton arithmetic. Keep fixed-pool, leased-page and actual peak
+  memory distinct. Do not connect the private stepper to production or remove
+  its source-compatibility guard without new engine/lifecycle qualification.
 
 Keep handoffs short: what changed, why, checks run, and remaining limitations.
 These conventions take inspiration from [vLLM's agent guide](https://github.com/vllm-project/vllm/blob/main/AGENTS.md),
