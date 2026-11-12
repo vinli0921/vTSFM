@@ -5,12 +5,20 @@ from uni2ts.model.moirai2 import Moirai2Forecast, Moirai2Module
 
 from vtsfm.execution import ExecutionResult, PreparedBatch
 
-from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, MOIRAI2
+from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, MOIRAI2, resolve_attention_mode
 
 
 class MoiraiRuntime:
     def __init__(self, config):
         self.model = Moirai2Module(**config)
+        # Opt-in (#24): exact fused attention for univariate rows. Every request
+        # this runtime accepts is univariate (target_dim=1; execute() rejects
+        # grouped rows), and the patch raises on multivariate input anyway.
+        self.attention_mode = resolve_attention_mode()
+        if self.attention_mode == 'univariate':
+            from .attention import install_univariate_attention
+
+            install_univariate_attention(self.model)
 
     @torch.inference_mode()
     def forecast(self, context, horizon):

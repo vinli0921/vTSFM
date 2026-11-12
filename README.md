@@ -120,6 +120,13 @@ histories and forecasts on the model device and calls the pinned upstream
 `Moirai2Forecast.forward`, including its recursive quantile forecast. Shorter
 histories in a request are masked as padding, so each forecasts as it would alone.
 
+Moirai has an experimental, opt-in attention path for long contexts:
+`VTSFM_MOIRAI_ATTENTION=univariate ./scripts/serve.sh --adapter moirai2`. It runs
+the pinned encoder's attention through fused 4-D SDPA without the per-layer dense
+variate bias, which is exact for univariate rows (all that this adapter serves) and
+cuts long-context memory and latency. Multivariate input raises an error in this
+mode. The default `upstream` leaves uni2ts unchanged; see #24 for measurements.
+
 The shared IO also supports sequential offline `LLM.encode({'data': payload},
 pooling_task='plugin')` calls. See [request lifecycle](docs/request-lifecycle.md)
 for supported inputs, concurrent serving, cancellation, and the manual TimesFM
