@@ -18,7 +18,9 @@ import textwrap
 import time
 import traceback
 
-from benchmarks.timesfm_native_kv import _integers, _installed_metadata, _source_metadata, _write
+from benchmarks.timesfm_native_kv import (
+    GPU_OWNERSHIP_METHOD, _assert_gpu_owned, _integers, _installed_metadata, _source_metadata, _write,
+)
 
 
 TOLERANCE = {'rtol': 1e-4, 'atol': 1e-4}
@@ -52,7 +54,7 @@ def _summary(samples):
     return result
 
 
-def _point(args, torch, prefix, rows, destination):
+def _point(args, torch, monitor, prefix, rows, destination):
     from timesfm.torch.transformer import _torch_dot_product_attention, make_attn_mask
     from vtsfm.adapters.timesfm25.paged_cache import PagedCacheArena
 
@@ -72,6 +74,7 @@ def _point(args, torch, prefix, rows, destination):
     }
     arena = None
     try:
+        _assert_gpu_owned(monitor, record)
         generator = torch.Generator(device='cpu').manual_seed(140000 + prefix * 100 + rows)
         cpu_query = torch.randn(rows, query_length, heads, head_size, generator=generator) / 3
         cpu_key, cpu_value = [torch.randn(rows, total, heads, head_size, generator=generator) / 3
@@ -137,6 +140,7 @@ def _point(args, torch, prefix, rows, destination):
             for _ in range(args.warmups):
                 operation()
         torch.cuda.synchronize()
+        _assert_gpu_owned(monitor, record)
         graphs, static_outputs = {}, {}
         timed_operations = operations
         if args.cuda_graphs:
@@ -168,6 +172,7 @@ def _point(args, torch, prefix, rows, destination):
                 )
             del output
             timed_operations = {name: graph.replay for name, graph in graphs.items()}
+            _assert_gpu_owned(monitor, record)
         del expected
         for repetition in range(args.repetitions):
             offset = repetition % len(PATHS)
@@ -181,9 +186,13 @@ def _point(args, torch, prefix, rows, destination):
                 try:
                     for _ in range(args.warmups):
                         operation()
+                    torch.cuda.synchronize()
+                    _assert_gpu_owned(monitor, record)
                     for _ in range(args.samples):
+                        _assert_gpu_owned(monitor, record)
                         stream_us, wall_us = _measure(torch, operation, args.iterations)
                         samples.append({'stream_us': stream_us, 'wall_us': wall_us})
+                        _assert_gpu_owned(monitor, record)
                     entry['paths'][name].update(status='ok', summary=_summary(samples))
                 finally:
                     _write(destination, record)
@@ -195,6 +204,11 @@ def _point(args, torch, prefix, rows, destination):
     except BaseException as error:
         record.update(status='cancelled' if isinstance(error, (SystemExit, KeyboardInterrupt)) else 'error',
                       error=f'{type(error).__name__}: {error}', traceback=traceback.format_exc())
+        record.pop('summary', None)
+        for entry in record['rounds']:
+            for path in entry['paths'].values():
+                path.pop('summary', None)
+                path['status'] = 'invalidated'
         raise
     finally:
         try:
@@ -234,6 +248,7 @@ def main():
     args.output = args.output.expanduser().resolve()
     args.output.mkdir(parents=True, exist_ok=False)
     metadata = dict(_source_metadata(), benchmark='timesfm-precomputed-attention-ablation',
+                    gpu_ownership_method=GPU_OWNERSHIP_METHOD,
                     configuration={key: str(value) if isinstance(value, Path) else value
                                    for key, value in vars(args).items()}, status='running', results=[])
     metadata['source_sha256']['benchmarks/timesfm_attention_ablation.py'] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
@@ -265,7 +280,7 @@ def main():
             for prefix in args.prefixes:
                 for rows in args.rows:
                     destination = args.output / f'P{prefix}-R{rows}.json'
-                    record = _point(args, torch, prefix, rows, destination)
+                    record = _point(args, torch, monitor, prefix, rows, destination)
                     metadata['results'].append({'path': destination.name, 'status': record['status'],
                                                 'summary': record['summary']})
                     _write(args.output / 'manifest.json', metadata)

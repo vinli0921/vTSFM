@@ -25,6 +25,47 @@ import traceback
 ROOT = Path(__file__).resolve().parents[1]
 BACKENDS = ('tensor', 'stepper', 'paged')
 TOLERANCE = {'rtol': 1e-4, 'atol': 1e-4}
+GPU_OWNERSHIP_METHOD = (
+    'NVML compute/graphics PID snapshots allow only the current benchmark PID. '
+    'Check before point GPU work, after warmup, and before/after each timed forecast '
+    'or microbenchmark batch, outside timing. Unsupported graphics queries are recorded; '
+    'other query errors fail the point. Snapshots cannot exclude short-lived work '
+    'between checks. Foreign processes are never stopped.'
+)
+
+
+def _assert_gpu_owned(monitor, record):
+    """Fail a point if another process arrives after the initial idle gate."""
+    owner = os.getpid()
+    ownership = record.setdefault('gpu_ownership', {
+        'method': GPU_OWNERSHIP_METHOD, 'owner_pid': owner, 'checks': 0,
+        'foreign_pids': [], 'observations': [],
+    })
+    observation = {'time': time.time()}
+    ownership['checks'] += 1
+    ownership['observations'].append(observation)
+    try:
+        compute = monitor.nvml.nvmlDeviceGetComputeRunningProcesses(monitor.gpu)
+        observation['compute_pids'] = sorted({process.pid for process in compute})
+        try:
+            graphics = monitor.nvml.nvmlDeviceGetGraphicsRunningProcesses(monitor.gpu)
+            observation['graphics_supported'] = True
+        except Exception as error:
+            unsupported = getattr(monitor.nvml, 'NVMLError_NotSupported', ())
+            if not unsupported or not isinstance(error, unsupported):
+                raise
+            graphics = []
+            observation['graphics_supported'] = False
+        observation['graphics_pids'] = sorted({process.pid for process in graphics})
+    except Exception as error:
+        observation['query_error'] = f'{type(error).__name__}: {error}'
+        raise
+    foreign = sorted((set(observation['compute_pids']) | set(observation['graphics_pids'])) - {owner})
+    observation['foreign_pids'] = foreign
+    ownership['foreign_pids'] = sorted(set(ownership['foreign_pids']) | set(foreign))
+    if foreign:
+        raise RuntimeError(f'Benchmark detected foreign GPU processes {foreign}; '
+                           'point is invalid and partial samples are retained')
 
 
 def _integers(value):
@@ -186,6 +227,7 @@ def _point(args, runtime, torch, monitor, data, rows, length, horizon, point_pat
     stepper = None
     sampler = None
     try:
+        _assert_gpu_owned(monitor, record)
         context, record['data_windows'] = _context(torch, data, rows, length, horizon)
         record['input_sha256'] = hashlib.sha256(context.cpu().numpy().tobytes()).hexdigest()
         # The owned model is still untouched here, including at later grid points.
@@ -215,6 +257,7 @@ def _point(args, runtime, torch, monitor, data, rows, length, horizon, point_pat
                 output = _forecast(runtime, stepper, context, horizon)
                 del output
             torch.cuda.synchronize()
+            _assert_gpu_owned(monitor, record)
             gc.collect()
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats()
@@ -223,12 +266,14 @@ def _point(args, runtime, torch, monitor, data, rows, length, horizon, point_pat
             sampler = Sampler(monitor, interval=.02)
             with sampler:
                 for _ in range(args.requests):
+                    _assert_gpu_owned(monitor, record)
                     torch.cuda.synchronize()
                     started = time.perf_counter()
                     output = _forecast(runtime, stepper, context, horizon)
                     torch.cuda.synchronize()
                     record['samples_s'].append(time.perf_counter() - started)
                     del output
+                    _assert_gpu_owned(monitor, record)
             # Capture measured peaks before optional profiler allocations exist.
             record['peak_allocated_bytes'] = torch.cuda.max_memory_allocated()
             record['peak_reserved_bytes'] = torch.cuda.max_memory_reserved()
@@ -240,11 +285,13 @@ def _point(args, runtime, torch, monitor, data, rows, length, horizon, point_pat
             if args.profile:
                 from torch.profiler import ProfilerActivity, profile
 
+                _assert_gpu_owned(monitor, record)
                 torch.cuda.synchronize()
                 with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as diagnostic:
                     output = _forecast(runtime, stepper, context, horizon)
                     torch.cuda.synchronize()
                 del output
+                _assert_gpu_owned(monitor, record)
                 trace_path = point_path.with_suffix('.trace.json')
                 diagnostic.export_chrome_trace(str(trace_path))
                 record['profile'] = _trace_summary(trace_path)
@@ -254,6 +301,10 @@ def _point(args, runtime, torch, monitor, data, rows, length, horizon, point_pat
         status = 'cancelled' if interrupted else 'oom' if isinstance(error, torch.OutOfMemoryError) else 'error'
         record.update(status=status,
                       error=f'{type(error).__name__}: {error}', traceback=traceback.format_exc())
+        # Raw samples remain inspectable, but a failed/incomplete point must not
+        # carry a successful performance summary (including profiler failures).
+        for key in ('n', 'mean_ms', 'p50_ms', 'p95_ms', 'request_per_s', 'series_per_s'):
+            record.pop(key, None)
         if interrupted:
             raise
     finally:
@@ -304,6 +355,7 @@ def _child(args):
         data, provenance = _data(args)
         metadata = dict(_source_metadata(), backend=args.backend, repetition=args.child_repetition,
                         python=sys.version, platform=platform.platform(), gpu=monitor.metadata(),
+                        gpu_ownership_method=GPU_OWNERSHIP_METHOD,
                         packages=_installed_metadata(), model_id=MODEL_ID, model_revision=MODEL_REVISION,
                         torch_cuda_runtime=torch.version.cuda,
                         precision={'dtype': 'float32', 'matmul_precision': torch.get_float32_matmul_precision(),
@@ -341,6 +393,7 @@ def _orchestrate(args):
 
     manifest = dict(_source_metadata(), benchmark='experimental-timesfm-native-kv',
                     scope='Direct in-process tensor/stepper/backend comparison; no GPUModelRunner or HTTP integration.',
+                    gpu_ownership_method=GPU_OWNERSHIP_METHOD,
                     configuration={key: str(value) if isinstance(value, Path) else value
                                    for key, value in vars(args).items()}, status='running', runs=[])
     _write(args.output / 'manifest.json', manifest)
