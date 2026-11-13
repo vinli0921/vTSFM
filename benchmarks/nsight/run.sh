@@ -77,8 +77,11 @@ http() { http_once "$1" "$2" "$3" "$4" "${1}_http-${2}_r${3}" 1; http_once "$1" 
 for a in "${adapters[@]}"; do
   inproc "$a" native 1 50; inproc "$a" runtime 1 50
   inproc "$a" native 0b 30; inproc "$a" runtime 0b 30
+  inproc "$a" native 0b16 30; inproc "$a" runtime 0b16 30
   http "$a" single 1 50
-  if [[ $a == timesfm25 ]]; then http "$a" single 0b16 30; else http "$a" single 0b 30; fi
+  # TimesFM admission caps HTTP requests at 16 rows, so it has no 64-row HTTP round.
+  [[ $a == timesfm25 ]] || http "$a" single 0b 30
+  http "$a" single 0b16 30
   if [[ $a == timesfm25 && -n "${METROPT_DATA:-}" ]]; then
     http "$a" continuous sat 50; http "$a" whole sat 50
   fi
