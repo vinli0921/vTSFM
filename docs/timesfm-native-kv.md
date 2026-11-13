@@ -7,8 +7,8 @@ and forecast-block serving are unchanged.
 
 The [original investigation](baselines/2026-11-12-native-kv/README.md) records the
 first prototype and its immutable source revisions. The
-[combined follow-up](baselines/2026-11-12-native-kv/combined.md) records current
-validation and benchmark status. The current experiment uses
+[combined follow-up](baselines/2026-11-12-native-kv/combined.md) records the matched
+forecast and attention-diagnostic results. The current experiment uses
 PR #61's optimized block executor, with a small attention/cache boundary shared
 by dense and paged execution. Reproduce each report at its recorded revision;
 the original separate-sign prototype is at `be7fd68`.
@@ -146,6 +146,7 @@ Current pooling markers describe whole forecasts/forecast blocks, rather than
 patch tokens and isolated series/sign streams. They cannot be reused as native
 KV attention metadata. A production port needs explicit patch-level scheduling,
 model/runner KV registration, series/sign isolation, numerical-state ownership,
-completion/assembly, cancellation and admission accounting. Integration with the
-optimized block executor and matched HTTP/load/capacity validation are separate
-work. Backend reuse alone establishes neither engine enablement nor a new kernel.
+completion/assembly, cancellation and admission accounting. The optimized block
+executor is shared by both in-process paths; native runner integration and
+matched HTTP/load/capacity validation remain separate work. Backend reuse alone
+establishes neither engine enablement nor a new kernel.
