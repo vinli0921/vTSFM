@@ -11,6 +11,7 @@ Usage: scripts/test-models.sh [--adapter all|timesfm25|toto2|moirai2]
                             [--requests 100] [--warmups 5] [--batches 1,4]
                             [--contexts 128,512] [--clients 1,4] [--horizon 96]
                             [--backend-order native,vtsfm]
+                            [--forecast-precision fp32|tf32|bf16]
                             [--forecast-execution eager|compile]
 
 Run model integration checks sequentially on an idle Linux NVIDIA GPU.
@@ -43,11 +44,12 @@ contexts=128,512
 clients=1,4
 horizon=96
 backend_order=native,vtsfm
+forecast_precision="${VTSFM_TEST_PRECISION:-}"
 forecast_execution="${VTSFM_TEST_EXECUTION:-eager}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
-    --adapter|--profile|--gpu|--port|--output|--data-dir|--cases|--requests|--warmups|--batches|--contexts|--clients|--horizon|--backend-order|--forecast-execution)
+    --adapter|--profile|--gpu|--port|--output|--data-dir|--cases|--requests|--warmups|--batches|--contexts|--clients|--horizon|--backend-order|--forecast-precision|--forecast-execution)
       [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || fail "Missing value for $1"
       case "$1" in
         --adapter) adapter="$2" ;;
@@ -64,6 +66,7 @@ while [[ $# -gt 0 ]]; do
         --clients) clients="$2" ;;
         --horizon) horizon="$2" ;;
         --backend-order) backend_order="$2" ;;
+        --forecast-precision) forecast_precision="$2" ;;
         --forecast-execution) forecast_execution="$2" ;;
       esac
       shift 2 ;;
@@ -85,6 +88,11 @@ case "$forecast_execution" in
   *) fail '--forecast-execution must be eager or compile' ;;
 esac
 [[ -z "$cases" || "$profile" == accuracy ]] || fail '--cases requires --profile accuracy'
+case "$forecast_precision" in
+  ''|fp32|tf32) ;;
+  bf16) [[ "$adapter" != all && "$adapter" != timesfm25 ]] || fail 'Native BF16 requires --adapter toto2 or moirai2' ;;
+  *) fail '--forecast-precision must be fp32, tf32, or bf16' ;;
+esac
 [[ "$requests" =~ ^[0-9]+$ && ${#requests} -le 7 && 10#$requests -ge 1 ]] || fail '--requests must be positive'
 [[ "$warmups" =~ ^[0-9]+$ && ${#warmups} -le 7 ]] || fail '--warmups must be nonnegative'
 [[ "$horizon" =~ ^[0-9]+$ && ${#horizon} -le 4 ]] || fail '--horizon must be in [1,1024]'
@@ -157,6 +165,11 @@ export VTSFM_PERF_REQUESTS="$requests" VTSFM_PERF_WARMUPS="$warmups"
 export VTSFM_PERF_BATCHES="$batches" VTSFM_PERF_CONTEXTS="$contexts"
 export VTSFM_PERF_CLIENTS="$clients" VTSFM_PERF_HORIZON="$horizon" VTSFM_PERF_ORDER="$backend_order"
 export NVIDIA_TF32_OVERRIDE=0 OMP_NUM_THREADS=4 PYTHONUNBUFFERED=1
+unset VTSFM_PRECISION VTSFM_TEST_PRECISION
+if [[ -n "$forecast_precision" ]]; then
+  export VTSFM_TEST_PRECISION="$forecast_precision"
+  if [[ "$forecast_precision" == tf32 ]]; then export NVIDIA_TF32_OVERRIDE=1; fi
+fi
 export PYTHONPATH="$root/src:$root${PYTHONPATH:+:$PYTHONPATH}"
 
 pytest_pid=

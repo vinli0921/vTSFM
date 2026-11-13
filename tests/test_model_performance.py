@@ -65,7 +65,7 @@ def test_matched_http_performance(model_run):
                                      payload_sha256=hashlib.sha256(encoded).hexdigest(), parity=parity)
                         points.append(point)
                         save_json(run['output'] / 'performance.json', {'points': points,
-                            'source_commit': run['metadata']['commit'], 'precision': 'float32',
+                            'source_commit': run['metadata']['commit'], 'precision': run['metadata']['precision'],
                             'forecast_execution': run['metadata']['forecast_execution'],
                             'backend_order': order, 'no_automatic_performance_merge_threshold': True})
                         assert point['status'] == 'passed', f'Measured HTTP requests failed: {point}'

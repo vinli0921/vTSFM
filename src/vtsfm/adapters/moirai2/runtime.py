@@ -4,6 +4,7 @@ import torch
 from uni2ts.model.moirai2 import Moirai2Forecast, Moirai2Module
 
 from vtsfm.execution import ExecutionResult, PreparedBatch
+from vtsfm.precision import configure_precision
 from vtsfm.compilation import compile_core, execution_mode
 
 from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, MOIRAI2
@@ -11,7 +12,16 @@ from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, MOIRAI2
 
 class MoiraiRuntime:
     def __init__(self, config):
+        self.precision = configure_precision('moirai2')
         self.model = Moirai2Module(**config)
+        if self.precision == 'bf16':
+            from .precision import prepare_native_bf16
+
+            self._precision_handles = prepare_native_bf16(self.model)
+        elif self.precision == 'tf32':
+            from .precision import prepare_native_tf32
+
+            prepare_native_tf32(self.model)
         if execution_mode() == 'compile':
             compile_model(self.model)
 
@@ -21,11 +31,20 @@ class MoiraiRuntime:
         context = context.to(device=next(self.model.parameters()).device, dtype=torch.float32)
         observed = torch.isfinite(context)
         # Request parsing rejects non-finite targets, so NaN marks only left padding.
+        if self.precision in ('bf16', 'tf32'):
+            # Match native predict's per-length batches: mixing padded widths
+            # can change reduced-precision CUDA rounding even with equivalent masks. Only
+            # these integer lengths cross to the host; histories stay on device.
+            lengths = observed.sum(-1).tolist()
+            return self._forecast_by_length(context, observed, ~observed, horizon, lengths)
         return self._forecast(context, observed, ~observed, horizon)
 
     @torch.inference_mode()
     def execute(self, batch: PreparedBatch) -> ExecutionResult:
-        """Forecast all prepared rows in one call; returns [rows, requested quantiles, horizon]."""
+        """Forecast prepared rows, grouping BF16/TF32 rows by their known history lengths.
+
+        Returns [rows, requested quantiles, horizon] in the original row order.
+        """
         key = batch.plan.key
         if (key.adapter, key.model_id, key.model_revision) != (MOIRAI2.name, MODEL_ID, MODEL_REVISION):
             raise ValueError('Batch key does not match the Moirai checkpoint')
@@ -54,9 +73,25 @@ class MoiraiRuntime:
         if not (padding | (observed & torch.isfinite(context))).all():
             raise ValueError('Moirai execution requires finite, fully observed histories after left padding')
 
-        quantiles = self._forecast(context, observed, padding, key.prediction_length)
+        if self.precision in ('bf16', 'tf32'):
+            quantiles = self._forecast_by_length(context, observed, padding, key.prediction_length, lengths)
+        else:
+            quantiles = self._forecast(context, observed, padding, key.prediction_length)
         channels = [FORECAST_SETTINGS.quantiles.index(level) for level in key.quantile_levels]
         return ExecutionResult(batch, quantiles[:, channels])
+
+    def _forecast_by_length(self, context, observed, padding, horizon, lengths):
+        """Keep native batch shapes, using CPU lengths and device tensors."""
+        unique_lengths = sorted(set(lengths))
+        if len(unique_lengths) == 1:
+            length = unique_lengths[0]
+            return self._forecast(context[:, -length:], observed[:, -length:], padding[:, -length:], horizon)
+        result = context.new_empty((context.shape[0], len(FORECAST_SETTINGS.quantiles), horizon))
+        for length in unique_lengths:
+            rows = [index for index, value in enumerate(lengths) if value == length]
+            result[rows] = self._forecast(context[rows, -length:], observed[rows, -length:],
+                                          padding[rows, -length:], horizon)
+        return result
 
     def _forecast(self, context, observed, padding, horizon):
         """[rows, width] values, observed mask and padding mask on the model device

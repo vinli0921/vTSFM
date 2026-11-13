@@ -44,6 +44,9 @@ def child_environment(gpu_index):
     environment = os.environ.copy()
     environment.update(CUDA_DEVICE_ORDER='PCI_BUS_ID', CUDA_VISIBLE_DEVICES=str(gpu_index),
                        NVIDIA_TF32_OVERRIDE='0', OMP_NUM_THREADS='4', PYTHONUNBUFFERED='1')
+    environment.pop('VTSFM_PRECISION', None)
+    if environment.get('VTSFM_TEST_PRECISION') == 'tf32':
+        environment['NVIDIA_TF32_OVERRIDE'] = '1'
     environment['PYTHONPATH'] = os.pathsep.join(
         [str(ROOT / 'tests'), str(ROOT / 'src'), str(ROOT), environment.get('PYTHONPATH', '')])
     return environment
@@ -107,10 +110,14 @@ def model_run():
     if (output / 'run.json').exists():
         pytest.fail(f'Refusing to overwrite an earlier run: {output}')
     spec = get_adapter(adapter)
+    from vtsfm.precision import validate_precision
+
+    precision = validate_precision(adapter, os.environ.get('VTSFM_TEST_PRECISION', 'fp32'))
     execution = execution_mode(os.environ.get('VTSFM_TEST_EXECUTION', 'eager'))
     metadata = {**source_metadata(), 'adapter': adapter, 'profile': profile,
                 'model_id': spec.model_id, 'model_revision': spec.model_revision,
-                'precision': 'float32', 'tf32_override': '0', 'status': 'running', 'checks': []}
+                'precision': precision or 'fp32', 'tf32_override': '1' if precision == 'tf32' else '0',
+                'status': 'running', 'checks': []}
     metadata['forecast_execution'] = {'native': 'eager', 'vtsfm': execution}
     monitor = None
     previous_term = signal.getsignal(signal.SIGTERM)
@@ -175,7 +182,8 @@ def model_run():
                     serve_environment['VLLM_PLUGINS'] = ''
                 elif kind == 'vtsfm':
                     command, serve_environment = build_vllm_command(
-                        adapter=adapter, port=port, forecast_execution=execution)
+                        adapter=adapter, port=port, forecast_execution=execution,
+                        forecast_precision=precision)
                     for key in ('CUDA_DEVICE_ORDER', 'CUDA_VISIBLE_DEVICES', 'NVIDIA_TF32_OVERRIDE',
                                 'OMP_NUM_THREADS', 'PYTHONUNBUFFERED', 'PYTHONPATH'):
                         serve_environment[key] = environment[key]
