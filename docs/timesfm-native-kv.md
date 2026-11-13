@@ -6,7 +6,9 @@ native `GPUModelRunner`/EngineCore scheduling or a new HTTP mode. Normal serving
 and forecast-block serving are unchanged.
 
 The [original investigation](baselines/2026-11-12-native-kv/README.md) records the
-first prototype and its immutable source revisions. The current experiment uses
+first prototype and its immutable source revisions. The
+[combined follow-up](baselines/2026-11-12-native-kv/combined.md) records current
+validation and benchmark status. The current experiment uses
 PR #61's optimized block executor, with a small attention/cache boundary shared
 by dense and paged execution. Reproduce each report at its recorded revision;
 the original separate-sign prototype is at `be7fd68`.
@@ -87,6 +89,13 @@ concurrent scheduling throughput. The fixed pool remains in measured memory;
 20 ms NVML samples can miss transients. Raw samples, source/package hashes,
 input checksums and failure/cancellation records are retained. Outputs are
 parity-checked before timing; not every timed forecast is archived/rescored.
+
+Both experimental harnesses check NVML compute/graphics ownership before and
+after each timed forecast or microbatch, outside timing. Foreign activity fails
+the point, preserves raw partial samples and invalidates performance summaries.
+Snapshots cannot exclude very short activity between checks and do not reserve
+the GPU. Arrange an uninterrupted window; exclude interrupted attempts from the
+primary comparison and rerun the full counterbalanced set.
 
 `--backend ablation` alternates the optimized dense and paged implementations.
 Four repetitions balance their order. This isolates the attention/cache

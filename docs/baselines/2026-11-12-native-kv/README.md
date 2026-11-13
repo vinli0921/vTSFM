@@ -1,5 +1,9 @@
 # TimesFM vLLM attention/KV feasibility — November 12, 2026
 
+This is the original, separate-sign experiment at the recorded sources. See the
+[optimized dense/paged follow-up](combined.md) for the implementation that shares
+PR #61's fused execution and the status of its matched measurements.
+
 ## Decision
 
 **Technical feasibility passes; defer the production runner port.** Real vLLM

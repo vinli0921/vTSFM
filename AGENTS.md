@@ -155,6 +155,9 @@ Use the checkout's environments, not global Python packages:
   do not specify Triton arithmetic. Keep fixed-pool, leased-page and actual peak
   memory distinct. Do not connect the private stepper to production or remove
   its source-compatibility guard without new engine/lifecycle qualification.
+  Its forecast/attention harnesses check GPU ownership before/after timed samples
+  outside timing; retain but exclude contended points and rerun counterbalanced
+  comparisons. These snapshots detect activity but do not reserve the shared GPU.
 
 Keep handoffs short: what changed, why, checks run, and remaining limitations.
 These conventions take inspiration from [vLLM's agent guide](https://github.com/vllm-project/vllm/blob/main/AGENTS.md),
