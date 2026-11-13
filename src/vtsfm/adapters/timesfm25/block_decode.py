@@ -63,9 +63,12 @@ def validate_block_decode_source(model):
             raise ValueError(f'Block decoding requires the pinned TimesFM {name}.forward source')
 
 
-def _decode_groups(model, inputs, masks, cache_groups, positions):
+def _decode_groups(model, inputs, masks, cache_groups, positions, *, prefill=False):
     """Validate CPU geometry before any cache can be changed."""
-    if inputs.ndim != 3 or inputs.shape[1:] != (model.m, model.p) or masks.shape != inputs.shape:
+    if (inputs.ndim != 3 or inputs.shape[1] < 1 or inputs.shape[2] != model.p
+            or (not prefill and inputs.shape[1] != model.m) or masks.shape != inputs.shape):
+        if prefill:
+            raise ValueError('Prefill requires [rows,positive patches,32] inputs and matching masks')
         raise ValueError('Block decode requires [rows,4,32] inputs and matching masks')
     if not cache_groups or len(cache_groups) != len(positions):
         raise ValueError('Block decode needs one CPU position per nonempty cache group')
@@ -76,7 +79,7 @@ def _decode_groups(model, inputs, masks, cache_groups, positions):
         # The stepper constructs every layer with identical request geometry;
         # dtype, device and independent ownership do not change between blocks.
         rows, capacity = caches[0].key.shape[:2]
-        if rows < 1 or position + model.m > capacity:
+        if rows < 1 or position + inputs.shape[1] > capacity:
             raise ValueError('Block cache request rows or write capacity are invalid')
         if any(cache.key.shape[:2] != (rows, capacity) for cache in caches[1:]):
             raise ValueError('Block layer caches must share request rows and capacity')
@@ -191,12 +194,16 @@ def _transformer_forward(layer, input_embeddings, groups, layer_index, position,
     return output_embeddings
 
 
-def block_decode_forward(model, inputs, masks, cache_groups, positions, *, attention_backend=None):
+def block_decode_forward(model, inputs, masks, cache_groups, positions, *, attention_backend=None,
+                         prefill=False):
     """Batch neural layers while native attention updates each owned cache.
 
     Return the native ``((input_embeddings, output_embeddings, point, spread),
     cache_groups)`` structure, keeping the supplied request-major cache objects.
-    This function advances four input patches; prefill uses the native model.
+    This function advances four input patches by default. Experimental
+    ``prefill=True`` accepts any positive static patch count, using the same
+    neural expressions and CPU-known cache slices to support graph capture.
+    Normal serving retains the upstream prefill path.
 
     ``attention_backend`` is an experimental cache/attention boundary. Its
     ``prepare(model, inputs, masks, cache_groups, positions)`` validates geometry
@@ -204,12 +211,12 @@ def block_decode_forward(model, inputs, masks, cache_groups, positions, *, atten
     ``(row_slice, layer_caches, physical_position)``; counters retain native
     semantics even when their dense K/V payloads are empty. Preparation runs
     once, before model calls. ``attend(layer, q, k, v, state)`` receives scaled,
-    normalized/rotated Q/K and V, all ``[rows,4,heads,head_dim]``, and returns an
+    normalized/rotated Q/K and V, all ``[rows,patches,heads,head_dim]``, and returns an
     attended tensor of the same shape. It must not mutate the supplied counters;
     this shared helper advances them. Normal serving omits the argument.
     """
     if attention_backend is None:
-        groups = _decode_groups(model, inputs, masks, cache_groups, positions)
+        groups = _decode_groups(model, inputs, masks, cache_groups, positions, prefill=prefill)
         position, num_masked, attn_masks = _decode_metadata(inputs, masks, groups)
         capacity = groups[0][1][0].key.shape[1]
         batched_mask = (torch.cat(attn_masks) if all(

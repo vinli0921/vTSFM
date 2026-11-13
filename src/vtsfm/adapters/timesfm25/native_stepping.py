@@ -30,12 +30,14 @@ class PagedTimesFMStepper(TimesFMStepper):
     and leased_cache_bytes explicitly. All work is on one CUDA stream.
     """
 
+    _arena_type = PagedCacheArena
+
     def __init__(self, runtime, *, max_sequences=2, max_tokens=284):
         if not all(hasattr(TimesFMStepper, method)
                    for method in ('_prefill_pass', '_advance_passes', '_store', '_block_decode_forward')):
             raise ValueError('Native proof requires the recorded optimized stepper and attention seam')
         super().__init__(runtime)
-        self.arena = PagedCacheArena(self.model.x, self.model.h, self.model.hd,
+        self.arena = self._arena_type(self.model.x, self.model.h, self.model.hd,
                                      2 * max_sequences, max_tokens, streams=1,
                                      device=next(self.model.parameters()).device)
         self._routes = {}

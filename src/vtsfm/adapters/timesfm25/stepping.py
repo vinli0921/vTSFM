@@ -204,10 +204,14 @@ class TimesFMStepper:
         caches = self._new_caches(rows, max(state.cache_capacity for state in states), normalized.device)
         inputs = revin(inputs, context_mu, context_sigma, reverse=False)
         inputs = torch.where(masks, 0.0, inputs)
-        (_, _, point, spread), caches = self.model(inputs, masks, caches)
+        (_, _, point, spread), caches = self._prefill_forward(inputs, masks, caches)
         point = revin(point, context_mu, context_sigma, reverse=True).reshape(rows, -1, self.model.o, self.model.q)[:, -1]
         spread = revin(spread, context_mu, context_sigma, reverse=True).reshape(rows, -1, self.model.os, self.model.q)[:, -1]
         self._store(states, stream, caches, (n, mu, sigma), point, spread)
+
+    def _prefill_forward(self, inputs, masks, caches):
+        """Preserve native prefill; fixed-shape graph experiments override it."""
+        return self.model(inputs, masks, caches)
 
     def _advance_passes(self, states):
         # Stream-major order keeps normal and flipped statistics independent.
