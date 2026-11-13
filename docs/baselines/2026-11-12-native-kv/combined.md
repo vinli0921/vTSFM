@@ -42,15 +42,17 @@ The A100-SXM4-40GB, driver 595.91.07 and pinned TimesFM runtime/checkpoint match
 the [original provenance table](README.md#sources-and-method): vLLM 0.33.0,
 Torch 2.14.0+cu130/CUDA 13.0, TimesFM package 3.0.2 at `e51928e`, eager FP32,
 TF32 disabled, `TRITON_F32_DEFAULT=ieee`, four Torch threads. The VM has 12
-logical CPUs and remains shared with an existing CPU-only process. GPU work is
-exclusive to the owned experiment; no drivers/services were changed.
+logical CPUs and remains shared. The previously CPU-only process became
+GPU-active during the first attempt. Measurement requires exclusive GPU access;
+the interrupted attempt lost exclusivity. No drivers/services were changed.
 
 Full forecasts use the same cached observed/causally imputed AssetOpsBench
 MetroPT fixture, B2/C512/H1024, eight forecast blocks and all nine quantiles.
 Both rows' input hash is
 `db459fe68b795882f093e47e2679155b220e12e528e543e7ce4c24f87b65f596`.
-Four rounds alternate dense/paged order. Each path/round has a fresh process,
-five warmups and 100 timed forecasts: 400 samples/path, 800 total.
+The planned four rounds alternate dense/paged order. Each path/round uses a fresh
+process, five warmups and 100 timed forecasts: a target of 400 samples/path,
+800 total. These totals have not yet been completed without contention.
 
 Timing includes initialize, all blocks, finalize/release and CUDA synchronization.
 Startup, input preparation, parity, pool creation/destruction and profiling are
