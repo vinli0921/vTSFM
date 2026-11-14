@@ -185,6 +185,48 @@ This is a documented subset for regression checks, not a full fev-bench or
 GIFT-Eval score. Keep fev preparation in the CPU environment so it does not
 change the three model environments' dependency baselines.
 
+### AssetOps signals
+
+`benchmarks/assetops_sources.json` pins every AssetOpsBench sensor file used
+here (commit and SHA256) and names the signals built from them. The default
+signals are Chiller 6 supply temperature and condenser water flow, MetroPT oil
+temperature and motor current, and hydraulic `PS1` pressure. `prepare_data`
+downloads any pinned file missing from `data/source/` and verifies the rest, so
+it only needs to run once. `--assetops-checkout PATH` copies from a local
+AssetOpsBench checkout instead. To evaluate another `iot/*.json` signal, pin
+its file and add a signal entry; nothing downloads unpinned files.
+
+```bash
+.venv/bin/python -m benchmarks.prepare_data --output data
+.venv/bin/python -m benchmarks.model_evaluation prepare --data-dir data \
+  --assetops-signals --output data/accuracy-signals.json
+./scripts/test-models.sh --profile accuracy --cases data/accuracy-signals.json --gpu 0
+```
+
+Each signal becomes one case: five forecast origins, by default C512/H96,
+whose whole horizon was recorded. Readings are placed on the signal's time
+grid (15 minutes for Chiller 6, hourly for MetroPT) or one slot per hydraulic
+cycle. Missing history slots are causally forward-filled and recorded; missing
+future slots are never scored. Seasonality is 96, 24 and 1 respectively.
+Hydraulic cycles have no calendar meaning, so its seasonal naive is last-value
+naive and its MASE scale is the one-cycle change; compare models with each
+other and with naive there, not with 1.
+
+Every accuracy run ends by writing `accuracy_table.md` and `accuracy_table.csv`:
+native MAE, MASE and SQL per model and signal, seasonal-naive scores, counts of
+scaled and zero-scale series, and the largest served-minus-native SQL
+difference. Combine runs at different precisions into one model × signal ×
+dtype table, with model spread and reduced-precision deltas:
+
+```bash
+python3 -m benchmarks.accuracy_table results/model-accuracy/FP32_RUN \
+  results/model-accuracy/BF16_RUN --output results/accuracy-signals
+```
+
+SQL is the harness's quantile approximation of a scaled CRPS. Windows come from
+one asset per signal and are correlated; treat the table as evidence about
+these signals, not a model ranking.
+
 ## Performance profile
 
 ```bash

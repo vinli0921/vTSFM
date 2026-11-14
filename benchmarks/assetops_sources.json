@@ -1,0 +1,66 @@
+{
+  "repository": "IBM/AssetOpsBench",
+  "commit": "e844f6468c6c68b328022e7ca8e31da140842cc7",
+  "directory": "src/couchdb/scenarios_data/shared/iot",
+  "license": "Apache-2.0",
+  "files": {
+    "metro_pump_1.json": {
+      "sha256": "363d6daf873c614fcb4a798d4e86aa648d60ae2b6c735ce5d8388b0d4b3c2fdf",
+      "description": "Hourly MetroPT-3 compressor sensors (asset mp_1); 560 wholly empty rows"
+    },
+    "chiller_6.json": {
+      "sha256": "8073af23ea71fc401aee97fd40b47678a80ad0549eb4153b1eb0ab8dc9b246e2",
+      "description": "15-minute Chiller 6 building-management sensors, June 2020"
+    },
+    "hydraulic_pump_1.json": {
+      "sha256": "622bcd1a668a939a2590b1aaf560ecce641731b04d802271b39ef454835918b5",
+      "description": "Per-cycle hydraulic rig sensor aggregates (asset hyd_1); timestamps are synthetic daily labels"
+    },
+    "motor_01.json": {
+      "sha256": "e7cd8093ce7842a8be4ec6935084a9ab921b02d7d2d95725a2856e32ba4961f5",
+      "description": "One second of raw motor vibration samples; pinned for completeness, no forecasting signal defined"
+    }
+  },
+  "signals": {
+    "chiller_6/supply_temperature": {
+      "file": "chiller_6.json",
+      "column": "Chiller 6 Supply Temperature",
+      "asset_id": "Chiller 6",
+      "axis": {"field": "timestamp", "step_seconds": 900},
+      "seasonality": 96,
+      "notes": "The single smooth signal behind earlier accuracy conclusions; kept as the reference row"
+    },
+    "chiller_6/condenser_water_flow": {
+      "file": "chiller_6.json",
+      "column": "Chiller 6 Condenser Water Flow",
+      "asset_id": "Chiller 6",
+      "axis": {"field": "timestamp", "step_seconds": 900},
+      "seasonality": 96,
+      "notes": "On/off behaviour: about half the readings are exactly zero, so some windows may have a zero seasonal scale"
+    },
+    "metro_pump_1/oil_temperature": {
+      "file": "metro_pump_1.json",
+      "column": "Oil_Temperature_C",
+      "asset_id": "mp_1",
+      "axis": {"field": "timestamp", "step_seconds": 3600},
+      "seasonality": 24,
+      "notes": "Hourly; empty source rows are causally forward-filled in history and never scored"
+    },
+    "metro_pump_1/motor_current": {
+      "file": "metro_pump_1.json",
+      "column": "Motor_Current_A",
+      "asset_id": "mp_1",
+      "axis": {"field": "timestamp", "step_seconds": 3600},
+      "seasonality": 24,
+      "notes": "Hourly; empty source rows are causally forward-filled in history and never scored"
+    },
+    "hydraulic_pump_1/ps1_pressure": {
+      "file": "hydraulic_pump_1.json",
+      "column": "PS1_Pressure_bar_100Hz",
+      "asset_id": "hyd_1",
+      "axis": {"field": "cycle", "step": 1},
+      "seasonality": 1,
+      "notes": "One value per machine cycle with no calendar meaning; seasonal naive is last-value naive"
+    }
+  }
+}

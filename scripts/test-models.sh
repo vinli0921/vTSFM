@@ -17,7 +17,8 @@ Defaults: all three adapters, GPU 0, port 18001, and a new UTC/commit directory
 under results/model-integration/. No CPU .venv is required. Set up each selected
 model environment with scripts/setup.sh --adapter NAME before running.
 Integration includes a small pinned AssetOpsBench fixture, downloaded once.
-Accuracy scores observed labels; --cases selects an optional prepared fev slice.
+Accuracy scores observed labels; --cases selects a prepared manifest (fev slice
+or AssetOps signals). Accuracy runs end by writing accuracy_table.md/.csv.
 Performance compares native HTTP and vLLM with matching request boundaries.
 EOF
 }
@@ -244,5 +245,14 @@ for name in "${adapters[@]}"; do
     failed=1
   fi
 done
+if [[ "$profile" == accuracy ]]; then
+  # Standard-library summary over every adapter in this run; any adapter interpreter works.
+  if "$root/.venv-${adapters[0]}/bin/python" -m benchmarks.accuracy_table "$output" --output "$output"; then
+    printf 'Accuracy table: %s\n' "$output/accuracy_table.md"
+  else
+    printf 'Accuracy table generation failed\n' >&2
+    failed=1
+  fi
+fi
 printf 'Summary: %s\n' "$summary"
 exit "$failed"

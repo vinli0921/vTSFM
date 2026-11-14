@@ -101,7 +101,15 @@ def test_profiles_select_their_tests_and_forward_frozen_settings(checkout, profi
                       '--backend-order', 'vtsfm,native']
     result = run(root, env, *arguments)
     assert result.returncode == 0, result.stderr
-    record, = calls(env)
+    record, *summary = calls(env)
+    if profile == 'accuracy':
+        # Accuracy runs end with one table over the whole run directory.
+        output = record['env']['VTSFM_TEST_OUTPUT'].rsplit('/', 1)[0]
+        assert [entry['args'] for entry in summary] == [
+            ['-m', 'benchmarks.accuracy_table', output, '--output', output]]
+        assert summary[0]['cwd'] == str(root)
+    else:
+        assert summary == []
     assert record['profile'] == profile
     assert f'tests/test_model_{profile}.py' in record['args']
     assert record['data_dir'] == str(root / 'input cache')

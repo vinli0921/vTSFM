@@ -215,6 +215,54 @@ def assetops_cases(data_dir, *, count=2, context=128, horizon=32, batch_size=2):
     return cases
 
 
+def signal_cases(data_dir, names=None, *, context=512, horizon=96, windows=5):
+    """Build one accuracy case per pinned signal from ``assetops_sources.json``.
+
+    Each case holds ``windows`` independent rows of shape [context] from one
+    signal, at evenly spaced origins whose next ``horizon`` slots were all
+    actually recorded. Histories may contain slots causally forward-filled
+    from the signal's own earlier readings; those positions are recorded and
+    are never scored. Item IDs are ``<signal>/origin-<slot>``. Reads files
+    already placed by ``python -m benchmarks.prepare_data``; never downloads.
+    """
+    for value, label in [(context, "context"), (horizon, "horizon"), (windows, "windows")]:
+        _positive_integer(value, label)
+    if horizon > 1024:
+        raise ValueError("prediction_length must be <= 1024")
+    names = list(prepare_data.SOURCES["signals"]) if names is None else list(names)
+    cases = []
+    for name in names:
+        signal = prepare_data.load_signal(data_dir, name)
+        values, observed = signal["values"], signal["observed"]
+        first = observed.index(True)
+        filled, last = [], None
+        for value in values:
+            last = value if value is not None else last
+            filled.append(last)
+        origins = [origin for origin in range(first + context, len(values) - horizon + 1)
+                   if all(observed[origin:origin + horizon])]
+        if len(origins) < windows:
+            raise ValueError(f"{name}: need {windows} origins with {horizon} recorded future values "
+                             f"after context {context}; found {len(origins)}")
+        chosen = [origins[(index * (len(origins) - 1)) // max(1, windows - 1)] for index in range(windows)]
+        cases.append(validate_case({
+            "name": f"signal-{name.replace('/', '-')}-c{context}-h{horizon}",
+            "data": {"inputs": [{"target": filled[origin - context:origin], "item_id": f"{name}/origin-{origin}"}
+                                for origin in chosen],
+                     "parameters": {"prediction_length": horizon, "quantile_levels": list(QUANTILES)}},
+            "evaluation": {"targets": [values[origin:origin + horizon] for origin in chosen],
+                           "observed": [[True] * horizon for _ in chosen], "seasonality": signal["seasonality"]},
+            "provenance": {**signal["provenance"], "origins": chosen,
+                           "forecast_starts": [signal["axis"][origin] for origin in chosen],
+                           "past_imputed_positions": [[index for index in range(origin - context, origin)
+                                                       if not observed[index]] for origin in chosen],
+                           "history_policy": "Recorded readings; missing slots causally forward-filled from earlier readings only",
+                           "truth_policy": "Only windows whose whole horizon was recorded; no filled value is scored",
+                           "sampling_unit": "Windows from one asset's signal; correlated, not independent assets"},
+        }))
+    return cases
+
+
 def seasonal_naive_forecasts(case):
     """Return [series, nine quantiles, horizon] repeating the last season."""
     import numpy as np
@@ -407,16 +455,34 @@ def main():
     prepare.add_argument("--output", type=Path, required=True, help="New JSON manifest (existing files are rejected)")
     prepare.add_argument("--fev", action="store_true", help="Also download and prepare the three pinned fev smoke tasks")
     prepare.add_argument("--cache-dir", type=Path, help="fev download/cache directory (default: beside output)")
+    signals = prepare.add_argument_group(
+        "AssetOps signals", "Cases from the named signals in benchmarks/assetops_sources.json. "
+        "These replace the default MetroPT fixture windows; --fev still adds its tasks.")
+    signals.add_argument("--assetops-signals", action="store_true", help="Use every pinned signal")
+    signals.add_argument("--signal", action="append", metavar="NAME",
+                         choices=sorted(prepare_data.SOURCES["signals"]), help="Use this signal (repeatable)")
+    signals.add_argument("--signal-context", type=int, default=512)
+    signals.add_argument("--signal-horizon", type=int, default=96)
+    signals.add_argument("--signal-windows", type=int, default=5, help="Rows (forecast origins) per signal")
     args = parser.parse_args()
     if args.output.exists():
         parser.error(f"Output already exists: {args.output}")
-    cases = assetops_cases(args.data_dir, count=5, batch_size=7)
+    names = args.signal or (list(prepare_data.SOURCES["signals"]) if args.assetops_signals else None)
+    if names is None:
+        cases = assetops_cases(args.data_dir, count=5, batch_size=7)
+    else:
+        cases = signal_cases(args.data_dir, names, context=args.signal_context,
+                             horizon=args.signal_horizon, windows=args.signal_windows)
     if args.fev:
         cases.extend(fev_cases(args.cache_dir or args.output.parent / "fev-cache"))
     manifest = {"cases": cases, "provenance": {
         "purpose": "Small real-data adapter quality checks, not a full benchmark or model ranking",
-        "quantile_levels": list(QUANTILES), "assetops_windows": 5, "fev_custom_smoke": args.fev,
+        "quantile_levels": list(QUANTILES), "fev_custom_smoke": args.fev,
         "metrics": "Median MAE/MASE; SQL averages twice pinball loss across nine quantiles; past-only seasonal scale",
+        **({"assetops_windows": 5} if names is None else {
+            "assetops_signals": names, "signal_context": args.signal_context,
+            "signal_horizon": args.signal_horizon, "signal_windows": args.signal_windows,
+            "sources_commit": prepare_data.COMMIT}),
     }}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x") as stream:
