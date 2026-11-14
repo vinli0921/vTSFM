@@ -69,3 +69,14 @@ def test_cli_writes_markdown_and_csv_and_rejects_empty_runs(tmp_path, capsys):
     (tmp_path / "empty").mkdir()
     with pytest.raises(ValueError, match="No <adapter>/accuracy.json"):
         collect([tmp_path / "empty"])
+
+
+def test_parity_failures_are_flagged_in_the_table(tmp_path):
+    _write_run(tmp_path / "run", "toto2", "float32", [_series("s/x/origin-1", 1.0)])
+    path = tmp_path / "run/toto2/accuracy.json"
+    report = json.loads(path.read_text())
+    report["cases"][0]["parity"] = "failed"
+    path.write_text(json.dumps(report))
+    row, = collect([tmp_path / "run"])
+    assert row["parity_failed_cases"] == 1
+    assert "(parity failed)" in markdown([row])

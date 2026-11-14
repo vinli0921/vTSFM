@@ -7,7 +7,9 @@ seasonal-naive scores; ``run.json`` supplies the dtype. Rows group series by
 signal: the ``<signal>/origin-<slot>`` item-ID prefix, or the case name.
 
 Reported scores are the official native model's. vTSFM must match native
-within the parity gate, so the last column only confirms that. Means are equal
+within the parity gate, so the last column only confirms that; signals whose
+cases failed the gate are marked there (``parity_failed_cases`` in the CSV).
+Means are equal
 weight over series with a defined value; undefined scaled scores (zero or
 too-short seasonal scale) stay out of the mean and are counted instead.
 SQL is the scaled quantile loss over all nine quantiles, the harness's
@@ -30,7 +32,8 @@ MODELS = ("timesfm25", "toto2", "moirai2")
 DTYPE_NAMES = {"float32": "fp32", "fp32": "fp32", "tf32": "tf32", "bf16": "bf16", "bfloat16": "bf16"}
 DTYPE_ORDER = {"fp32": 0, "tf32": 1, "bf16": 2}
 COLUMNS = ["model", "dtype", "signal", "series", "scaled_series", "zero_scale_series",
-           "MAE", "MASE", "SQL", "naive_MASE", "naive_SQL", "max_abs_vtsfm_minus_native_SQL"]
+           "MAE", "MASE", "SQL", "naive_MASE", "naive_SQL", "max_abs_vtsfm_minus_native_SQL",
+           "parity_failed_cases"]
 
 
 def _signal(case_name: str, item_id: str) -> str:
@@ -61,7 +64,9 @@ def collect(run_dirs) -> list[dict]:
                     if not native["item_id"] == served["item_id"] == naive["item_id"]:
                         raise ValueError(f"{folder}: per-series rows are not aligned in {case['case']}")
                     key = (folder.name, dtype, _signal(case["case"], native["item_id"]))
-                    group = groups.setdefault(key, {"native": [], "vtsfm": [], "naive": []})
+                    group = groups.setdefault(key, {"native": [], "vtsfm": [], "naive": [], "failed": set()})
+                    if case.get("parity", "passed") != "passed":
+                        group["failed"].add(case["case"])
                     group["native"].append(native)
                     group["vtsfm"].append(served)
                     group["naive"].append(naive)
@@ -80,6 +85,7 @@ def collect(run_dirs) -> list[dict]:
             "naive_MASE": _mean(row["MASE"] for row in naive),
             "naive_SQL": _mean(row["SQL"] for row in naive),
             "max_abs_vtsfm_minus_native_SQL": max(differences) if differences else None,
+            "parity_failed_cases": len(group["failed"]),
         })
     order = {model: index for index, model in enumerate(MODELS)}
     return sorted(table, key=lambda row: (row["signal"], order.get(row["model"], len(MODELS)), row["model"],
@@ -140,7 +146,8 @@ def markdown(table) -> str:
             counts += f", {row['zero_scale_series']} zero-scale"
         lines.append(f"| {row['signal']} | {row['model']} | {row['dtype']} | {counts} | {_number(row['MAE'])} | "
                      f"{_number(row['MASE'])} | {_number(row['SQL'])} | {_number(row['naive_MASE'])} | "
-                     f"{_number(row['naive_SQL'])} | {_number(row['max_abs_vtsfm_minus_native_SQL'], 6)} |")
+                     f"{_number(row['naive_SQL'])} | {_number(row['max_abs_vtsfm_minus_native_SQL'], 6)}"
+                     f"{' (parity failed)' if row['parity_failed_cases'] else ''} |")
     spread = model_spread(table)
     if spread:
         lines += ["", "**Model spread** (worst ÷ best across models; near 1.00 means the models tie)", "",
