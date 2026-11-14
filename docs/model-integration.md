@@ -227,6 +227,13 @@ SQL is the harness's quantile approximation of a scaled CRPS. Windows come from
 one asset per signal and are correlated; treat the table as evidence about
 these signals, not a model ranking.
 
+An accuracy run scores every case before failing, and the table marks signals
+whose cases failed parity. On the reference A100, Toto and Moirai fail the
+unchanged `1e-4` gate only on condenser water flow: forecasts near zero in a
+series reaching about 10,000 differ from native by a few FP32 rounding steps,
+the same margin that passes on smaller signals. See the
+[November 14 baseline](baselines/2026-11-14-assetops-signal-accuracy/README.md).
+
 ## Performance profile
 
 ```bash
