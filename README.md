@@ -52,7 +52,8 @@ Use a Linux machine with an NVIDIA GPU and a compatible NVIDIA driver. The
 reference machine has an A100-SXM4-40GB and driver 595.91.07. TimesFM, Toto, and
 Moirai use CUDA 13.0 Torch binaries; the Chronos baseline uses CUDA 12.8. Setup
 does not install or change drivers. Model downloads need network access and disk
-space; keep weights outside Git.
+space; keep weights outside Git. On Columbia's Insomnia cluster, whose drivers
+predate CUDA 13, follow [the Insomnia setup guide](docs/insomnia.md).
 
 ```bash
 ./scripts/setup.sh
