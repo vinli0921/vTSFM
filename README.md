@@ -127,7 +127,9 @@ Moirai has an experimental, opt-in attention path for long contexts:
 the pinned encoder's attention through fused 4-D SDPA without the per-layer dense
 variate bias, which is exact for univariate rows (all that this adapter serves) and
 cuts long-context memory and latency. Multivariate input raises an error in this
-mode. The default `upstream` leaves uni2ts unchanged; see #24 for measurements.
+mode. The default `upstream` uses pinned uni2ts attention. Univariate attention
+requires eager FP32. See #24 for measurements and [compiled execution](docs/compiled-execution.md#moirai-attention-and-precision)
+for the startup settings.
 
 The shared IO also supports sequential offline `LLM.encode({'data': payload},
 pooling_task='plugin')` calls. See [request lifecycle](docs/request-lifecycle.md)
@@ -196,6 +198,11 @@ compares matching native/vLLM HTTP workloads. See the [model integration guide](
 for environment setup, idle-GPU requirements, per-model selection, and saved
 pre-merge evidence.
 
+`--forecast-execution compile` opts TimesFM, Toto and Moirai into experimental
+neural compilation. Eager execution stays the default. See
+[compiled execution](docs/compiled-execution.md) for the native numerical
+boundaries, manual validation commands and remaining qualification work.
+
 ## Run a comparison
 
 Benchmarks require exclusive access to the selected GPU and a free port. The
@@ -248,6 +255,10 @@ fixture. See [data and measurement details](docs/architecture.md#benchmark-contr
 
 ## Reproducible runtime pins
 
+Experimental worker precision controls are documented in
+[forecast precision](docs/precision.md). FP32 remains the default; native BF16
+for Toto/Moirai and optional TF32 require explicit selection and GPU validation.
+
 | Adapter | vLLM | Torch | Torch CUDA runtime | Transformers |
 | --- | --- | --- | --- | --- |
 | TimesFM 2.5, Toto 2, Moirai 2.0 | 0.33.0 (V1 runner) | 2.14.0 | 13.0 | 5.20.2 |
@@ -298,7 +309,7 @@ before changing plugin discovery or the serving contract.
 See [numerical transport](docs/numerical-transport.md) for the pinned vLLM worker
 boundary and the manual checkpoint-free multi-request probe.
 TimesFM, Toto, and Moirai expose scheduled concurrency through
-`serve --max-num-seqs 3`; the default is one. For experimental whole-forecast
+`serve --max-num-seqs 3`; the default is one. For experimental
 whole-forecast batching, combine `--max-num-seqs 4` with
 `--forecast-batch-rows 8`. See the [batching boundaries](docs/numerical-transport.md#current-execution-boundary).
 

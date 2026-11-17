@@ -1,13 +1,16 @@
 """Tensor forecasting around the official Moirai 2.0 recursive quantile decoder."""
 
+import os
 import sys
 
 import torch
 from uni2ts.model.moirai2 import Moirai2Forecast, Moirai2Module
 
+from vtsfm.compilation import compile_core, execution_mode
 from vtsfm.execution import ExecutionResult, PreparedBatch
+from vtsfm.precision import PRECISION_ENV, configure_precision
 
-from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, MOIRAI2, resolve_attention_mode
+from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, MOIRAI2, resolve_attention_config
 
 
 class _InferenceMoiraiForecast(Moirai2Forecast):
@@ -23,15 +26,27 @@ class _InferenceMoiraiForecast(Moirai2Forecast):
 
 class MoiraiRuntime:
     def __init__(self, config):
+        mode = execution_mode()
+        self.attention_mode, precision = resolve_attention_config(mode, os.environ.get(PRECISION_ENV))
+        self.precision = configure_precision(MOIRAI2.name, precision)
         self.model = Moirai2Module(**config)
+        if self.precision == 'bf16':
+            from .precision import prepare_native_bf16
+
+            self._precision_handles = prepare_native_bf16(self.model)
+        elif self.precision == 'tf32':
+            from .precision import prepare_native_tf32
+
+            prepare_native_tf32(self.model)
         # Opt-in (#24): exact fused attention for univariate rows. Every request
         # this runtime accepts is univariate (target_dim=1; execute() rejects
         # grouped rows), and the patch raises on multivariate input anyway.
-        self.attention_mode = resolve_attention_mode()
         if self.attention_mode == 'univariate':
             from .attention import install_univariate_attention
 
             install_univariate_attention(self.model)
+        if mode == 'compile':
+            compile_model(self.model)
 
     @torch.inference_mode()
     def forecast(self, context, horizon):
@@ -39,11 +54,20 @@ class MoiraiRuntime:
         context = context.to(device=next(self.model.parameters()).device, dtype=torch.float32)
         observed = torch.isfinite(context)
         # Request parsing rejects non-finite targets, so NaN marks only left padding.
+        if self.precision in ('bf16', 'tf32'):
+            # Match native predict's per-length batches: mixing padded widths
+            # can change reduced-precision CUDA rounding even with equivalent masks. Only
+            # these integer lengths cross to the host; histories stay on device.
+            lengths = observed.sum(-1).tolist()
+            return self._forecast_by_length(context, observed, ~observed, horizon, lengths)
         return self._forecast(context, observed, ~observed, horizon)
 
     @torch.inference_mode()
     def execute(self, batch: PreparedBatch) -> ExecutionResult:
-        """Forecast all prepared rows in one call; returns [rows, requested quantiles, horizon]."""
+        """Forecast prepared rows, grouping BF16/TF32 rows by their known history lengths.
+
+        Returns [rows, requested quantiles, horizon] in the original row order.
+        """
         key = batch.plan.key
         if (key.adapter, key.model_id, key.model_revision) != (MOIRAI2.name, MODEL_ID, MODEL_REVISION):
             raise ValueError('Batch key does not match the Moirai checkpoint')
@@ -72,9 +96,25 @@ class MoiraiRuntime:
         if not (padding | (observed & torch.isfinite(context))).all():
             raise ValueError('Moirai execution requires finite, fully observed histories after left padding')
 
-        quantiles = self._forecast(context, observed, padding, key.prediction_length)
+        if self.precision in ('bf16', 'tf32'):
+            quantiles = self._forecast_by_length(context, observed, padding, key.prediction_length, lengths)
+        else:
+            quantiles = self._forecast(context, observed, padding, key.prediction_length)
         channels = [FORECAST_SETTINGS.quantiles.index(level) for level in key.quantile_levels]
         return ExecutionResult(batch, quantiles[:, channels])
+
+    def _forecast_by_length(self, context, observed, padding, horizon, lengths):
+        """Keep native batch shapes, using CPU lengths and device tensors."""
+        unique_lengths = sorted(set(lengths))
+        if len(unique_lengths) == 1:
+            length = unique_lengths[0]
+            return self._forecast(context[:, -length:], observed[:, -length:], padding[:, -length:], horizon)
+        result = context.new_empty((context.shape[0], len(FORECAST_SETTINGS.quantiles), horizon))
+        for length in unique_lengths:
+            rows = [index for index, value in enumerate(lengths) if value == length]
+            result[rows] = self._forecast(context[rows, -length:], observed[rows, -length:],
+                                          padding[rows, -length:], horizon)
+        return result
 
     def _forecast(self, context, observed, padding, horizon):
         """[rows, width] values, observed mask and padding mask on the model device
@@ -102,3 +142,22 @@ class MoiraiRuntime:
         # quantile grid; longer crops may retain patch-rounded predictions.
         # Own exactly the public bytes used by shared resident accounting.
         return quantiles.clone(memory_format=torch.contiguous_format)
+
+
+def compile_model(model):
+    """Compile the encoder; keep scaling and recursive quantiles upstream/eager."""
+    from uni2ts.module.attention import GroupedQueryAttention
+    from uni2ts.module.ffn import FeedForward
+    from uni2ts.module.norm import RMSNorm
+    from uni2ts.module.position.attn_projection import QueryKeyProjection
+
+    native_calls = []
+    for module in model.encoder.modules():
+        if isinstance(module, QueryKeyProjection):
+            # Static Python shape metadata: avoid cached-property locks in tracing.
+            _ = module.proj_width, module.split_sizes
+        if isinstance(module, (RMSNorm, GroupedQueryAttention)):
+            native_calls.append((module, 'forward'))
+        if isinstance(module, FeedForward):
+            native_calls.append((module, 'activation'))
+    compile_core(model.encoder, native_calls)

@@ -148,6 +148,23 @@ def test_each_model_admits_only_its_own_resolved_envelope(adapter, monkeypatch, 
         build_vllm_command(adapter=adapter, max_num_seqs=spec.admission_limits.max_scheduled_requests + 1)
 
 
+@pytest.mark.parametrize('adapter,max_rows', [('toto2', 16), ('moirai2', 8)])
+def test_compile_bf16_keeps_the_adapter_admission_limits(adapter, max_rows, monkeypatch):
+    from vtsfm.admission import FORECAST_LIMITS_ENV
+    from vtsfm.cli import build_vllm_command
+
+    monkeypatch.delenv('VTSFM_MOIRAI_ATTENTION', raising=False)
+    options = dict(adapter=adapter, forecast_execution='compile', forecast_precision='bf16',
+                   forecast_batch_rows=4, forecast_queue_limit=8)
+    command, env = build_vllm_command(**options, max_num_seqs=4)
+    policy = json.loads(env[FORECAST_LIMITS_ENV])
+    assert (policy['max_request_rows'], policy['max_scheduled_requests']) == (max_rows, 4)
+    assert (env['VTSFM_FORECAST_EXECUTION'], env['VTSFM_PRECISION']) == ('compile', 'bf16')
+    assert command[command.index('--max-num-queued-reqs') + 1] == '8'
+    with pytest.raises(ValueError, match='scheduled requests'):
+        build_vllm_command(**options, max_num_seqs=5)
+
+
 @pytest.mark.parametrize('adapter', ['timesfm25', 'toto2', 'moirai2'])
 def test_model_limits_dry_run_imports_no_runtime_packages(adapter):
     process = subprocess.run([sys.executable, '-c',
@@ -241,6 +258,8 @@ def test_forecast_mode_rejects_unknown_execution_modes(mode):
     ({'forecast_batch_rows': 2}, '--forecast-batch-rows'),
     ({'max_num_seqs': 2}, 'exactly one scheduled request'),
     ({'max_num_seqs': True}, 'exactly one scheduled request'),
+    ({'forecast_execution': 'compile'}, 'eager FP32'),
+    ({'forecast_precision': 'tf32'}, 'eager FP32'),
 ])
 def test_forecast_mode_rejects_incompatible_serving_paths(settings, reason):
     from vtsfm.cli import build_vllm_command
@@ -249,16 +268,33 @@ def test_forecast_mode_rejects_incompatible_serving_paths(settings, reason):
         build_vllm_command(**({'adapter': 'timesfm25', 'timesfm_forecast_mode': 'dense-graph'} | settings))
 
 
-def test_forecast_mode_dry_run_is_cpu_safe_and_shows_experimental_settings():
+@pytest.mark.parametrize('name,value', [
+    ('VTSFM_FORECAST_EXECUTION', 'compile'),
+    ('VTSFM_PRECISION', 'tf32'),
+])
+def test_forecast_mode_rejects_inherited_compile_or_tf32(monkeypatch, name, value):
+    from vtsfm.cli import build_vllm_command
+
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match='eager FP32'):
+        build_vllm_command(adapter='timesfm25', timesfm_forecast_mode='paged-eager')
+
+
+def test_forecast_mode_dry_run_is_cpu_safe_and_shows_experimental_settings(monkeypatch):
+    monkeypatch.setenv('VTSFM_FORECAST_EXECUTION', 'compile')
+    monkeypatch.setenv('VTSFM_PRECISION', 'tf32')
     script = '''
 import sys
 from vtsfm.cli import main
-main(['serve', '--adapter', 'timesfm25', '--timesfm-forecast-mode', 'paged-graph', '--dry-run'])
+main(['serve', '--adapter', 'timesfm25', '--timesfm-forecast-mode', 'paged-graph',
+      '--forecast-execution', 'eager', '--forecast-precision', 'fp32', '--dry-run'])
 assert not any(name.split('.')[0] in ('torch', 'vllm', 'timesfm', 'triton') for name in sys.modules)
 '''
     process = subprocess.run([sys.executable, '-c', script], check=True, capture_output=True, text=True)
     environment = json.loads(process.stdout)['environment']
     assert environment['VTSFM_TIMESFM_FORECAST_MODE'] == 'paged-graph'
+    assert environment['VTSFM_FORECAST_EXECUTION'] == 'eager'
+    assert environment['VTSFM_PRECISION'] == 'fp32'
     assert environment['NVIDIA_TF32_OVERRIDE'] == '0'
     assert environment['TRITON_F32_DEFAULT'] == 'ieee'
 

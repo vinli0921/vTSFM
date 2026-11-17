@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -145,3 +146,27 @@ def test_response_comparison_reports_numeric_parity_failure():
     response['data']['predictions'][1]['0.8'][2] += 0.1
     with pytest.raises(AssertionError, match='series 1.*quantile 0.8.*step 2.*expected.*tolerance'):
         compare_response(response, case, expected)
+
+
+@pytest.mark.parametrize('timeout', [180, 900])
+def test_http_parity_uses_the_backend_cold_shape_timeout(tmp_path, timeout):
+    from test_model_integration import test_http_forecast_matches_native
+
+    case, expected, body = _forecast_fixture()
+    body['request_id'] = 'cold-shape'
+
+    def post(url, *, json, timeout):
+        assert url == 'http://localhost/pooling'
+        assert json['data'] == case['data']
+        # Model a cold compile that exceeds the ordinary eager request bound.
+        assert timeout == selected_timeout
+        return SimpleNamespace(text='recorded response', raise_for_status=lambda: None,
+                               json=lambda: body)
+
+    selected_timeout = timeout
+    run = {'cases': [{'case': case, 'expected': expected}],
+           'spec': SimpleNamespace(model_id='test-model'), 'output': tmp_path,
+           'session': SimpleNamespace(post=post), 'url': 'http://localhost',
+           'parity_timeout_s': timeout, 'request_ids': set(), 'metadata': {'checks': []}}
+    test_http_forecast_matches_native(run, 0)
+    assert run['metadata']['checks'][0]['status'] == 'passed'

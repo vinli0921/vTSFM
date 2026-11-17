@@ -35,7 +35,9 @@ normal lifecycle. If the worker has already started that forecast, it can finish
 the numerical work before serving the next request.
 
 The experiment uses FP32, disables TF32, and sets Triton's IEEE precision for
-paged modes. Use fixed weights throughout the worker lifetime. GPU resource
+paged modes. If the environment selects compilation or TF32, select
+`--forecast-execution eager --forecast-precision fp32` for this experiment.
+Use fixed weights throughout the worker lifetime. GPU resource
 usage includes any retained graph pools and the paged KV pool, including while
 handling eager fallback requests.
 

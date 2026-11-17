@@ -169,9 +169,12 @@ class NativeForecaster:
         import torch
         from huggingface_hub import snapshot_download
         from vtsfm.adapters import get_adapter
+        from vtsfm.precision import configure_precision
 
         if not torch.cuda.is_available():
             raise RuntimeError('Native integration reference requires a working CUDA GPU')
+        precision = os.environ.get('VTSFM_TEST_PRECISION', 'fp32')
+        configure_precision(adapter, precision)
         torch.manual_seed(0)
         np.random.seed(0)
         torch.set_num_threads(4)
@@ -196,6 +199,18 @@ class NativeForecaster:
             from uni2ts.model.moirai2 import Moirai2Forecast, Moirai2Module
             self.reference = Moirai2Module.from_pretrained(directory).to(device=device, dtype=torch.float32).eval()
             self.forecast_class = Moirai2Forecast
+        if precision == 'bf16':
+            if adapter == 'toto2':
+                from dd_unit_scaling import RMSNorm
+                from toto2.model import RotaryProjection, SelfAttention
+                from vtsfm.adapters.toto2.precision import prepare_native_bf16
+
+                self._precision_handles = prepare_native_bf16(
+                    self.reference, RMSNorm, RotaryProjection, attention_type=SelfAttention)
+            else:
+                from vtsfm.adapters.moirai2.precision import prepare_native_bf16
+
+                self._precision_handles = prepare_native_bf16(self.reference)
         torch.cuda.synchronize(device)
         properties = torch.cuda.get_device_properties(device)
         package = {'timesfm25': 'timesfm', 'toto2': 'toto-2', 'moirai2': 'uni2ts'}[adapter]
@@ -204,7 +219,8 @@ class NativeForecaster:
             'adapter': adapter, 'model_id': spec.model_id, 'model_revision': spec.model_revision,
             'model_path': str(directory), 'runtime': {
                 'gpu': torch.cuda.get_device_name(device), 'uuid': str(uuid) if uuid is not None else None,
-                'device': str(device), 'dtype': 'float32', 'torch': torch.__version__,
+                'device': str(device), 'dtype': 'bfloat16' if precision == 'bf16' else 'float32',
+                'precision': precision or 'fp32', 'output_dtype': 'float32', 'torch': torch.__version__,
                 'cuda': torch.version.cuda, 'python': platform.python_version(),
                 'platform': platform.platform(), 'seed': 0,
                 'torch_num_threads': torch.get_num_threads(),
@@ -216,6 +232,10 @@ class NativeForecaster:
                 'cudnn_allow_tf32': torch.backends.cudnn.allow_tf32,
             },
         }
+
+        if adapter == 'toto2' and precision == 'bf16':
+            self._metadata['runtime']['oversized_variate_sdpa'] = (
+                'efficient_or_math_for_cuda_bf16_singleton_batch_gt_65535')
 
     def predict_array(self, data):
         """Run official inference without materializing an intermediate JSON list."""
@@ -257,10 +277,12 @@ class NativeForecaster:
                 values = np.empty((len(histories), len(self.settings.quantiles), horizon), dtype=np.float32)
                 for length in sorted(set(map(len, histories))):
                     rows = [index for index, history in enumerate(histories) if len(history) == length]
+                    # The wrapper owns the shared reference as a submodule.
+                    # Move devices without undoing its selected compute dtype.
                     runner = self.forecast_class(
                         module=reference, prediction_length=horizon, context_length=length,
                         target_dim=1, feat_dynamic_real_dim=0, past_feat_dynamic_real_dim=0,
-                    ).to(device=device, dtype=torch.float32).eval()
+                    ).to(device=device).eval()
                     values[rows] = runner.predict([histories[index] for index in rows])
         values = np.asarray(values)
         shape = (len(inputs), len(self.settings.quantiles), horizon)
