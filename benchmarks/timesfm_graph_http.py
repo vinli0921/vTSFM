@@ -244,7 +244,8 @@ def _reference(args, owner, monitor, cases, environment):
     finally:
         owner.stop(child)
         _write(args.output / 'native-reference-run.json', record)
-        monitor.wait_idle()
+        if not record['gpu_ownership']['foreign_pids']:
+            monitor.wait_idle()
 
 
 def _point(args, owner, monitor, mode, repetition, native, environment):
@@ -267,7 +268,7 @@ def _point(args, owner, monitor, mode, repetition, native, environment):
               'timing_boundary': 'Pre-encoded HTTP POST through response JSON decode and light identity/schema checks, one persistent session and one outstanding request. Startup/cold request/native parity/fallback/warmups/worker RPC are outside steady timing.',
               'memory_method': 'Worker Torch allocated/reserved/peaks differ from NVML whole-device residency sampled every20ms. Retained graph/private and paged pools remain included. Lower Torch allocated alone is not a VRAM saving.',
               'throughput_scope': 'Successful HTTP completions divided by steady elapsed wall time. Sequential keep-alive client, not offered-load or concurrent cross-request batching.'}
-    server = None
+    server = guarded = None
     stopped = False
     request_count = 0
     request_ids = set()
@@ -278,8 +279,6 @@ def _point(args, owner, monitor, mode, repetition, native, environment):
             owner.stop(server)
             stopped = True
 
-    monitor.assert_idle()
-    ensure_port_free('127.0.0.1', args.port)
     command, server_environment = build_vllm_command(
         adapter='timesfm25', port=args.port, benchmark=True,
         max_num_seqs=1, timesfm_forecast_mode=mode)
@@ -292,6 +291,8 @@ def _point(args, owner, monitor, mode, repetition, native, environment):
     record['command'] = command
     url = f'http://127.0.0.1:{args.port}'
     try:
+        monitor.assert_idle()
+        ensure_port_free('127.0.0.1', args.port)
         with requests.Session() as control, requests.Session() as client:
             control.trust_env = client.trust_env = False
             started = time.perf_counter()
@@ -393,11 +394,20 @@ def _point(args, owner, monitor, mode, repetition, native, environment):
     finally:
         try:
             stop_server()
-            monitor.wait_idle()
-            record['gpu_idle_after_cleanup'] = True
-        except BaseException as error:
+            record['owned_server_stopped'] = stopped or server is None
+            if guarded is not None and record['gpu_ownership']['foreign_pids']:
+                # The conflicting job can legitimately continue after all our
+                # children exit. Preserve the original contention failure.
+                record['gpu_idle_after_cleanup'] = False
+            elif server is not None:
+                monitor.wait_idle()
+                record['gpu_idle_after_cleanup'] = True
+        except Exception as error:
             record.update(status='error', cleanup_error=f'{type(error).__name__}: {error}')
-            raise
+            if 'measurement' in record:
+                record['measurement']['status'] = 'failed'
+                for key in ('mean_ms', 'p50_ms', 'p95_ms', 'request_per_s', 'series_per_s'):
+                    record['measurement'][key] = None
         finally:
             _write(directory / 'point.json', record)
     return record
@@ -470,7 +480,12 @@ def main():
                     entry = {'mode': mode, 'repetition': repetition + 1, 'status': 'running'}
                     manifest['runs'].append(entry)
                     _write(args.output / 'manifest.json', manifest)
-                    point = _point(args, owner, monitor, mode, repetition + 1, native, environment)
+                    try:
+                        point = _point(args, owner, monitor, mode, repetition + 1, native, environment)
+                    except BaseException as error:
+                        entry.update(status='cancelled' if isinstance(error, (SystemExit, KeyboardInterrupt)) else 'error',
+                                     output=f'repetition-{repetition + 1}-{mode}/point.json')
+                        raise
                     entry.update(status=point['status'], output=f'repetition-{repetition + 1}-{mode}/point.json')
                     if point['status'] == 'ok':
                         entry.update(mean_ms=point['measurement']['mean_ms'], p95_ms=point['measurement']['p95_ms'],
