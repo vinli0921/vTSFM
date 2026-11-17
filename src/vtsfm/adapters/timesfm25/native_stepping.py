@@ -32,7 +32,7 @@ class PagedTimesFMStepper(TimesFMStepper):
 
     def __init__(self, runtime, *, max_sequences=2, max_tokens=284):
         if not all(hasattr(TimesFMStepper, method)
-                   for method in ('_prefill_pass', '_advance_passes', '_store', '_block_decode_forward')):
+                   for method in ('_prefill_passes', '_advance_passes', '_store', '_block_decode_forward')):
             raise ValueError('Native proof requires the recorded optimized stepper and attention seam')
         super().__init__(runtime)
         self.arena = PagedCacheArena(self.model.x, self.model.h, self.model.hd,
@@ -142,10 +142,10 @@ class PagedTimesFMStepper(TimesFMStepper):
                 cuts.extend(masked if not state.blocks_done else [0] * state.rows)
         self._active = tuple(identities), tuple(starts), tuple(cuts)
 
-    def _prefill_pass(self, states, stream):
-        self._activate(states, (stream,))
+    def _prefill_passes(self, states):
+        self._activate(states, (0, 1))
         try:
-            super()._prefill_pass(states, stream)
+            super()._prefill_passes(states)
         finally:
             self._active = None
 

@@ -13,6 +13,11 @@ PR #61's optimized block executor, with a small attention/cache boundary shared
 by dense and paged execution. Reproduce each report at its recorded revision;
 the original separate-sign prototype is at `be7fd68`.
 
+The current stepper uses #68's stream-major batch for both prefill and
+continuation, with a separate page lease for every (series, sign). The published
+forecast timings used separate sign prefills. Repeat the matched runs below to
+measure the current executor.
+
 ## Execution and ownership
 
 `native_stepping.py` changes attention only on a dedicated runtime instance and

@@ -23,12 +23,14 @@ not native GPUModelRunner/EngineCore or HTTP enablement.
 Measured source: `62f61f1f09aa460bd4f0bdbbfe73779e4aa099c1`, clean checkout.
 Model/executor source is unchanged from the validated implementation and
 interrupted attempt at `04f8eb60eabffb62c9a1a6e4b420f1a3124d09e1`.
-The branch reuses PR #61's TimesFM executor/tests at
+The measured implementation used PR #61's TimesFM executor/tests at
 `58a3c843984c932f0eaf837a79fa496872260120`, adding an optional attention boundary.
-PR #61 must land first; its copied source overlap should be resolved before
-merging this experiment. No other changes from that PR are assumed by this study.
+The current implementation also includes PR #68's batched sign prefill. The
+numbers below are the historical control with separate sign prefills; rerun
+both arms before attributing any result to the current implementation.
 
-Both forecast paths share `_advance_passes` and `block_decode_forward`, including
+Both measured forecast paths share `_advance_passes` and
+`block_decode_forward`, including
 normal/flipped fusion, running statistics, tokenizer, QKV, RoPE, Q/K RMS, learned
 query scaling, projections, FFNs, both heads and forecast assembly. Both keep two
 separate sign calls during prefill. The optional boundary supplies metadata,
