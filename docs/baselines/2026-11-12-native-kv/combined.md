@@ -1,5 +1,9 @@
 # Optimized TimesFM dense/paged ablation — November 12, 2026
 
+The [complete-forecast graph follow-up](../2026-11-13-full-forecast-graphs/README.md)
+now measures both full numerical forecasts under matched eager/graph execution.
+The results below remain the earlier eager and isolated-attention study.
+
 ## Question and scope
 
 **Decision: retain optimized dense execution for the current eager workload.**
