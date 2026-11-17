@@ -42,9 +42,13 @@ def checkout(tmp_path):
 def install_environments(root, failures=None):
     failures = failures or {}
     for adapter in ADAPTERS:
-        python = root / f'.venv-{adapter}/bin/python'
-        python.parent.mkdir(parents=True)
-        body = f'''import json, os, pathlib, sys
+        install_stub_python(root / f'.venv-{adapter}/bin/python', adapter, failures.get(adapter, 0))
+
+
+def install_stub_python(python, adapter, exit_code=0):
+    """A fake interpreter that logs its label, arguments and environment."""
+    python.parent.mkdir(parents=True)
+    body = f'''import json, os, pathlib, sys
 record = {{'adapter': {adapter!r}, 'args': sys.argv[1:], 'cwd': os.getcwd(),
           'profile': os.environ.get('VTSFM_TEST_PROFILE'),
           'data_dir': os.environ.get('VTSFM_TEST_DATA'), 'cases': os.environ.get('VTSFM_TEST_CASES'),
@@ -60,11 +64,11 @@ if '--junitxml' in sys.argv:
     target = pathlib.Path(sys.argv[sys.argv.index('--junitxml') + 1])
     target.write_text('<testsuite/>')
 print('fake pytest for {adapter}')
-raise SystemExit({failures.get(adapter, 0)})
+raise SystemExit({exit_code})
 '''
-        python.write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable)
-                          + ' -c ' + shlex.quote(body) + ' "$@"\n')
-        python.chmod(0o755)
+    python.write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable)
+                      + ' -c ' + shlex.quote(body) + ' "$@"\n')
+    python.chmod(0o755)
 
 
 def run(root, env, *args, cwd=None):
@@ -101,7 +105,16 @@ def test_profiles_select_their_tests_and_forward_frozen_settings(checkout, profi
                       '--backend-order', 'vtsfm,native']
     result = run(root, env, *arguments)
     assert result.returncode == 0, result.stderr
-    record, = calls(env)
+    record, *summary = calls(env)
+    if profile == 'accuracy':
+        # Accuracy runs end with one table over the whole run directory. Without
+        # a CPU .venv, the selected adapter's interpreter builds it.
+        output = record['env']['VTSFM_TEST_OUTPUT'].rsplit('/', 1)[0]
+        assert [entry['args'] for entry in summary] == [
+            ['-m', 'benchmarks.accuracy_table', output, '--output', output]]
+        assert summary[0]['cwd'] == str(root) and summary[0]['adapter'] == 'timesfm25'
+    else:
+        assert summary == []
     assert record['profile'] == profile
     assert f'tests/test_model_{profile}.py' in record['args']
     assert record['data_dir'] == str(root / 'input cache')
@@ -309,3 +322,15 @@ time.sleep(60)
         runner.wait(timeout=3)
         foreign.terminate()
         foreign.wait(timeout=3)
+
+
+def test_accuracy_table_prefers_the_cpu_environment(checkout):
+    root, env = checkout
+    install_environments(root)
+    install_stub_python(root / '.venv/bin/python', 'cpu')
+    manifest = root / 'cases.json'
+    manifest.write_text('{"cases":[]}')
+    result = run(root, env, '--profile', 'accuracy', '--adapter', 'toto2', '--cases', str(manifest))
+    assert result.returncode == 0, result.stderr
+    assert [(entry['adapter'], entry['args'][:2]) for entry in calls(env)] == [
+        ('toto2', ['-m', 'pytest']), ('cpu', ['-m', 'benchmarks.accuracy_table'])]

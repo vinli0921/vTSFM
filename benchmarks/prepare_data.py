@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """Prepare pinned AssetOpsBench numeric fixtures without generating observations.
 
-Standard library only. Writes a NumPy-compatible data.npz containing
-``series`` with shape [7, 5116], dtype float32, and a provenance manifest.
-The source has 560 wholly empty hourly rows. They are causally forward-filled
-from the last available observation, with all imputed indices documented.
-The channels share one asset and time axis; overlapping windows are correlated.
+Standard library only. ``assetops_sources.json`` pins every AssetOpsBench sensor
+file this repository uses, plus the named signals built from them. The CLI
+prepares the MetroPT fixture used by the integration, performance and default
+accuracy checks. ``--assetops-signals`` also fetches files used by the named
+signals. Each source is cached in ``<output>/source/`` and verified by SHA256.
+
+The fixture is a NumPy-compatible data.npz containing ``series`` with shape
+[7, 5116], dtype float32, and a provenance manifest. The source has 560 wholly
+empty hourly rows. They are causally forward-filled from the last available
+observation, with all imputed indices documented. The channels share one asset
+and time axis; overlapping windows are correlated.
 """
 
 from __future__ import annotations
@@ -13,7 +19,7 @@ from __future__ import annotations
 import argparse
 from array import array
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
@@ -25,10 +31,34 @@ import urllib.request
 import zipfile
 
 
-COMMIT = "e844f6468c6c68b328022e7ca8e31da140842cc7"
-SOURCE_PATH = "src/couchdb/scenarios_data/shared/iot/metro_pump_1.json"
-SOURCE_URL = f"https://raw.githubusercontent.com/IBM/AssetOpsBench/{COMMIT}/{SOURCE_PATH}"
-SOURCE_SHA256 = "363d6daf873c614fcb4a798d4e86aa648d60ae2b6c735ce5d8388b0d4b3c2fdf"
+SOURCES_FILE = Path(__file__).with_name("assetops_sources.json")
+
+
+def load_sources(path: Path = SOURCES_FILE) -> dict:
+    """Read and check the pinned AssetOpsBench file and signal list."""
+    sources = json.loads(Path(path).read_text())
+    commit, files, signals = sources.get("commit"), sources.get("files"), sources.get("signals")
+    if not isinstance(commit, str) or len(commit) != 40 or not isinstance(sources.get("directory"), str):
+        raise ValueError("AssetOps sources need a full commit SHA and a source directory")
+    if not isinstance(files, dict) or not files:
+        raise ValueError("AssetOps sources need a nonempty files mapping")
+    for name, entry in files.items():
+        if "/" in name or not name.endswith(".json") or len(str(entry.get("sha256", ""))) != 64:
+            raise ValueError(f"Pinned AssetOps file {name!r} needs a plain JSON name and SHA256")
+    for name, signal in (signals or {}).items():
+        axis = signal.get("axis", {})
+        if (signal.get("file") not in files or not isinstance(signal.get("column"), str)
+                or not isinstance(axis.get("field"), str) or ("step_seconds" in axis) == ("step" in axis)
+                or type(signal.get("seasonality")) is not int or signal["seasonality"] < 1):
+            raise ValueError(f"Signal {name!r} needs a pinned file, column, axis rule and seasonality")
+    return sources
+
+
+SOURCES = load_sources()
+COMMIT = SOURCES["commit"]
+SOURCE_PATH = f"{SOURCES['directory']}/metro_pump_1.json"
+SOURCE_URL = f"https://raw.githubusercontent.com/{SOURCES['repository']}/{COMMIT}/{SOURCE_PATH}"
+SOURCE_SHA256 = SOURCES["files"]["metro_pump_1.json"]["sha256"]
 COLUMNS = (
     ("Compressor_Pressure_bar", "bar", "TP2"),
     ("Pneumatic_Panel_Pressure_bar", "bar", "TP3"),
@@ -52,21 +82,169 @@ def atomic_write(path: Path, content: bytes) -> None:
     temporary.replace(path)
 
 
-def fetch_source(source_file: Path | None, cache_path: Path) -> bytes:
+def fetch_source(source_file: Path | None, cache_path: Path, url: str | None = None,
+                 expected_sha256: str | None = None) -> bytes:
+    """Read a local copy, the cache, or the pinned URL; always verify SHA256.
+
+    The URL and checksum default to the MetroPT fixture source.
+    """
+    url = SOURCE_URL if url is None else url
+    expected_sha256 = SOURCE_SHA256 if expected_sha256 is None else expected_sha256
     if source_file is not None:
         content = source_file.read_bytes()
     elif cache_path.exists():
         content = cache_path.read_bytes()
     else:
         request = urllib.request.Request(
-            SOURCE_URL, headers={"User-Agent": "AssetOpsBench-numeric-benchmark/1.0"}
+            url, headers={"User-Agent": "AssetOpsBench-numeric-benchmark/1.0"}
         )
         with urllib.request.urlopen(request, timeout=60) as response:
             content = response.read()
     actual = sha256(content)
-    if actual != SOURCE_SHA256:
-        raise ValueError(f"Source checksum mismatch: expected {SOURCE_SHA256}, got {actual}")
+    if actual != expected_sha256:
+        raise ValueError(f"Source checksum mismatch: expected {expected_sha256}, got {actual}")
     return content
+
+
+def source_url(name: str, sources: dict | None = None) -> str:
+    sources = SOURCES if sources is None else sources
+    return (f"https://raw.githubusercontent.com/{sources['repository']}/{sources['commit']}/"
+            f"{sources['directory']}/{name}")
+
+
+def fetch_sources(output_dir: Path, names=None, *, checkout: Path | None = None,
+                  sources: dict | None = None) -> dict[str, str]:
+    """Place every pinned file (or ``names``) in ``output_dir/source/``.
+
+    Files already present are verified and kept, so repeated runs download
+    nothing. ``checkout`` copies from a local AssetOpsBench checkout instead of
+    downloading; its files must still match the pins. A present file with the
+    wrong checksum is an error rather than being silently replaced.
+    """
+    sources = SOURCES if sources is None else sources
+    names = list(sources["files"]) if names is None else list(names)
+    unknown = sorted(set(names) - set(sources["files"]))
+    if unknown:
+        raise ValueError(f"Unpinned AssetOps files: {', '.join(unknown)}")
+    cache_dir = Path(output_dir) / "source"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    status = {}
+    for name in names:
+        expected = sources["files"][name]["sha256"]
+        cache_path = cache_dir / name
+        if cache_path.exists():
+            if sha256(cache_path.read_bytes()) != expected:
+                raise ValueError(f"{cache_path} does not match its pinned SHA256; delete it to fetch again")
+            status[name] = "present"
+            continue
+        local = None if checkout is None else Path(checkout) / sources["directory"] / name
+        content = fetch_source(local, cache_path, source_url(name, sources), expected)
+        atomic_write(cache_path, content)
+        status[name] = "copied" if local is not None else "downloaded"
+    return status
+
+
+def _numeric(value, name, index):
+    """Return a finite reading, or None for an absent/empty one."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError(f"Non-numeric or nonfinite {name} at source row {index}")
+    return float(value)
+
+
+def load_signal(data_dir: Path, name: str, *, sources: dict | None = None) -> dict:
+    """Load one pinned signal as a regular series with an observed mask.
+
+    Run this module's CLI with ``--assetops-signals`` to prepare the local
+    sources. Each timestamp goes to the nearest slot on a ``step_seconds`` grid
+    and must lie within a quarter step of it. Counter axes
+    (e.g. hydraulic ``cycle``) use one slot per integer step. Slots without a
+    reading are ``None`` with ``observed`` false; two readings in one slot are
+    an error. Returns ``values``, ``observed``, ``axis`` labels, ``seasonality``
+    and ``provenance``.
+    """
+    sources = SOURCES if sources is None else sources
+    if name not in sources.get("signals", {}):
+        raise ValueError(f"Unknown AssetOps signal {name!r}")
+    signal = sources["signals"][name]
+    file_name, column, axis = signal["file"], signal["column"], signal["axis"]
+    path = Path(data_dir) / "source" / file_name
+    if not path.is_file():
+        raise ValueError(f"Missing {path}. Run python -m benchmarks.prepare_data --assetops-signals "
+                         "with --output set to your data directory.")
+    content = path.read_bytes()
+    if sha256(content) != sources["files"][file_name]["sha256"]:
+        raise ValueError(f"{path} does not match its pinned SHA256")
+    rows = json.loads(content)
+    if not isinstance(rows, list):
+        raise ValueError(f"{file_name} must contain a list of rows")
+
+    readings, absent = [], 0
+    for index, row in enumerate(rows):
+        if "asset_id" in signal and row.get("asset_id") != signal["asset_id"]:
+            raise ValueError(f"Unexpected asset {row.get('asset_id')!r} at {file_name} row {index}")
+        value = _numeric(row.get(column), column, index)
+        if value is None:
+            absent += 1
+            continue
+        key = row.get(axis["field"])
+        if "step_seconds" in axis:
+            try:
+                key = datetime.fromisoformat(key)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"Invalid {axis['field']} at {file_name} row {index}: {key!r}") from error
+        elif type(key) is not int:
+            raise ValueError(f"Non-integer {axis['field']} at {file_name} row {index}")
+        readings.append((key, index, value))
+    if not readings:
+        raise ValueError(f"{name} has no readings")
+    readings.sort(key=lambda reading: (reading[0], reading[1]))
+
+    first = readings[0][0]
+    slots, max_offset = {}, 0.
+    if "step_seconds" in axis:
+        # Align slots to clock multiples of the step, so a jittered first
+        # reading does not shift every later slot.
+        step = axis["step_seconds"]
+        epoch = datetime(1970, 1, 1, tzinfo=first.tzinfo)
+        base = round((first - epoch).total_seconds() / step)
+    for key, index, value in readings:
+        if "step_seconds" in axis:
+            elapsed = (key - epoch).total_seconds()
+            slot = round(elapsed / step)
+            offset = abs(elapsed - slot * step)
+            if offset > step / 4:
+                raise ValueError(f"{file_name} row {index} is {offset:.0f}s from the {step}s grid")
+            max_offset = max(max_offset, offset)
+            slot -= base
+        else:
+            delta = key - first
+            if delta % axis["step"]:
+                raise ValueError(f"{file_name} row {index} is off the {axis['field']} step")
+            slot = delta // axis["step"]
+        if slot in slots:
+            raise ValueError(f"Two {column} readings share slot {slot} in {file_name}")
+        slots[slot] = value
+    count = max(slots) + 1
+    values = [slots.get(slot) for slot in range(count)]
+    observed = [value is not None for value in values]
+    if "step_seconds" in axis:
+        labels = [(epoch + timedelta(seconds=(base + slot) * step)).isoformat() for slot in range(count)]
+    else:
+        labels = [str(first + slot * axis["step"]) for slot in range(count)]
+    missing = [slot for slot, flag in enumerate(observed) if not flag]
+    provenance = {
+        "signal": name, "repository": sources["repository"], "commit": sources["commit"],
+        "path": f"{sources['directory']}/{file_name}", "sha256": sources["files"][file_name]["sha256"],
+        "column": column, "asset_id": signal.get("asset_id"), "axis": axis,
+        "source_rows": len(rows), "rows_without_value": absent, "readings": len(readings),
+        "slots": count, "missing_slots": len(missing), "missing_slot_indices": missing,
+        "max_grid_offset_seconds": max_offset if "step_seconds" in axis else None,
+        "first": labels[0], "last": labels[-1], "notes": signal.get("notes"),
+    }
+    return {"values": values, "observed": observed, "axis": labels,
+            "seasonality": signal["seasonality"], "provenance": provenance}
 
 
 def numpy_array_bytes(shape: tuple[int, int], values: list[list[float]]) -> bytes:
@@ -243,14 +421,27 @@ def prepare(output_dir: Path, source_file: Path | None = None) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--output", "--output-dir", dest="output_dir", type=Path, default=Path("data"))
-    parser.add_argument("--source-file", type=Path, help="Use an offline fixture copy; the pinned SHA256 is still verified")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--source-file", type=Path, help="Prepare only MetroPT from a verified local copy")
+    selection.add_argument("--assetops-signals", action="store_true", help="Also fetch files used by the pinned signals")
+    parser.add_argument("--assetops-checkout", type=Path,
+                        help="Copy requested files from a local AssetOpsBench checkout instead of downloading")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     output = args.output_dir if args.output_dir.is_absolute() else root / args.output_dir
-    manifest = prepare(output, args.source_file)
-    print(json.dumps({"output_dir": str(output.resolve()), "array": manifest["array"], "benchmark": manifest["benchmark"]}, indent=2))
+    if args.source_file is not None:
+        manifest = prepare(output, args.source_file)
+        fetched = {"metro_pump_1.json": "copied"}
+    else:
+        names = {"metro_pump_1.json"}
+        if args.assetops_signals:
+            names.update(signal["file"] for signal in SOURCES["signals"].values())
+        fetched = fetch_sources(output, sorted(names), checkout=args.assetops_checkout)
+        manifest = prepare(output)
+    print(json.dumps({"output_dir": str(output.resolve()), "sources": fetched,
+                      "array": manifest["array"], "benchmark": manifest["benchmark"]}, indent=2))
 
 
 if __name__ == "__main__":

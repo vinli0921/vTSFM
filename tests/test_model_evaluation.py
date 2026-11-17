@@ -14,6 +14,7 @@ import zipfile
 import numpy as np
 import pytest
 
+from benchmarks import prepare_data
 from benchmarks.model_evaluation import (
     QUANTILES,
     _causal_fill,
@@ -55,6 +56,40 @@ def case_for_scores(pasts=None, targets=None, observed=None, seasonality=1):
         "parameters": {"prediction_length": len(targets[0]), "quantile_levels": list(QUANTILES)}},
         "evaluation": {"targets": targets, "observed": observed, "seasonality": seasonality},
         "provenance": {"fixture": "artificial unit-test values, not benchmark data"}}
+
+
+@pytest.mark.parametrize("mode,expected", [
+    ("default", {"metro_pump_1.json"}),
+    ("offline", set()),
+    ("signals", {"metro_pump_1.json", "chiller_6.json", "hydraulic_pump_1.json"}),
+])
+def test_prepare_data_cli_fetches_only_requested_sources(prepared_data, tmp_path, monkeypatch, mode, expected):
+    source_file = prepared_data / "unit-test-source.json"
+    payloads = {"metro_pump_1.json": source_file.read_bytes(), "chiller_6.json": b"[]",
+                "hydraulic_pump_1.json": b"[{}]"}
+    for name, payload in payloads.items():
+        monkeypatch.setitem(prepare_data.SOURCES["files"][name], "sha256", hashlib.sha256(payload).hexdigest())
+
+    downloaded = []
+
+    def read_pinned_file(request, **kwargs):
+        name = request.full_url.rsplit("/", 1)[-1]
+        assert name in expected, f"Unexpected download: {name}"
+        downloaded.append(name)
+        return io.BytesIO(payloads[name])
+
+    args = ["prepare_data", "--output", str(tmp_path)]
+    if mode == "offline":
+        args += ["--source-file", str(source_file)]
+    if mode == "signals":
+        args.append("--assetops-signals")
+    monkeypatch.setattr(sys, "argv", args)
+    with patch("urllib.request.urlopen", side_effect=read_pinned_file):
+        prepare_data.main()
+
+    assert set(downloaded) == expected and len(downloaded) == len(expected)
+    assert {path.name for path in (tmp_path / "source").iterdir()} == expected | {"metro_pump_1.json"}
+    assert (tmp_path / "data_manifest.json").is_file()
 
 
 def test_assetops_origins_are_observed_chronological_and_reproducible(prepared_data):
@@ -271,3 +306,50 @@ def test_help_and_import_are_cpu_safe():
     subprocess.run([sys.executable, "-c", code], check=True, capture_output=True, text=True)
     result = subprocess.run([sys.executable, "-m", "benchmarks.model_evaluation", "prepare", "--help"], check=True, capture_output=True, text=True)
     assert "--fev" in result.stdout
+
+
+def _filled_case():
+    """Seasonality 2; history slot 3 is a forward-filled copy of slot 2."""
+    case = case_for_scores(pasts=[[0., 1., 3., 3., 3., 1., 7., 4.]], targets=[[5., 6.]], seasonality=2)
+    case["provenance"] = {"origins": [108], "past_imputed_positions": [[103]]}
+    return case
+
+
+def test_observed_scale_ignores_pairs_that_touch_filled_history():
+    case = _filled_case()
+    forecast = np.repeat(np.array([[[4., 4.]]]), 9, axis=1)
+    every = score_forecasts(case, forecast)
+    recorded = score_forecasts(case, forecast, scale="observed")
+    # All six lag-2 pairs: 3, 2, 0, 2, 4, 3 -> 14/6. Without slot 3's pairs: 3, 0, 4, 3 -> 10/4.
+    assert every["per_series"][0]["seasonal_scale"] == pytest.approx(14 / 6)
+    assert recorded["per_series"][0]["seasonal_scale"] == pytest.approx(2.5)
+    assert recorded["per_series"][0]["scale_pairs"] == 4 and every["per_series"][0]["scale_pairs"] == 6
+    assert every["per_series"][0]["filled_history"] == recorded["per_series"][0]["filled_history"] == 1
+    assert recorded["MAE"] == every["MAE"] == 1.5
+    assert recorded["MASE"] == pytest.approx(0.6) and recorded["scale"] == "observed"
+    assert recorded["SQL"] == pytest.approx(every["SQL"] * (14 / 6) / 2.5)
+
+
+def test_observed_scale_needs_recorded_imputation_and_valid_mode():
+    with pytest.raises(ValueError, match="recorded history imputation"):
+        score_forecasts(case_for_scores(), np.zeros((2, 9, 2)), scale="observed")
+    with pytest.raises(ValueError, match="scale must be one of"):
+        score_forecasts(case_for_scores(), np.zeros((2, 9, 2)), scale="median")
+    case = _filled_case()
+    case["data"]["inputs"][0]["target"] = [0., 0., 0., 0., 0., 0., 5., 5.]
+    case["provenance"]["past_imputed_positions"] = [[101, 102, 103, 104, 105, 106]]
+    scores = score_forecasts(case, np.zeros((1, 9, 2)), scale="observed")
+    assert scores["MASE"] is None and scores["counts"]["insufficient_history_series"] == 1
+
+
+def test_history_masks_read_signal_fixture_and_fev_provenance(prepared_data):
+    from benchmarks.model_evaluation import history_observed
+
+    assert history_observed(_filled_case()) == [[True, True, True, False, True, True, True, True]]
+    fixture = assetops_cases(prepared_data, context=512, horizon=96, count=1)[0]
+    masks = history_observed(fixture)
+    assert len(masks) == len(fixture["data"]["inputs"]) and masks[0] == [False] * 512  # origin 570, all filled
+    fev = case_for_scores(pasts=[[1., 1., 3.]], targets=[[4.]])
+    fev["provenance"] = {"series": [{"past_imputed_offsets": [1]}]}
+    assert history_observed(fev) == [[True, False, True]]
+    assert history_observed(case_for_scores()) is None
