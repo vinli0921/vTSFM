@@ -40,6 +40,4 @@ Notes:
   CUDA API time on the compute thread.
 - CUDA tracing adds roughly 6–8 µs per kernel launch. Compare traced splits against the untraced
   timing runs, not against absolute traced wall times.
-- `run.sh` runs the batched round at 16 rows (`0b16`) for every model, matching TimesFM's 16-row
-  HTTP admission cap. The 64-row `0b` round remains available in `driver.py`/`http_client.py` to
-  reproduce the 2026-11-10 baseline.
+- TimesFM admission caps a request at 16 rows, so its batched HTTP round is `0b16`.
