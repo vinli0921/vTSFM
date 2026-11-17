@@ -64,14 +64,21 @@ def test_singleton_adopts_prefill_and_advances_owned_caches_in_place(runtimes, m
 
     def allocate(*args):
         caches = new_caches(*args)
-        allocated.append([(cache.key.data_ptr(), cache.value.data_ptr()) for cache in caches])
+        allocated.append(caches)
         return caches
 
     monkeypatch.setattr(stepper, '_new_caches', allocate)
     state = stepper.initialize(values, 513)
     stepper.prefill([state])
-    assert [[(cache.key.data_ptr(), cache.value.data_ptr()) for cache in stream.caches]
-            for stream in state.passes] == allocated
+    # One stacked [x; -x] prefill allocation; each flip stream adopts its own
+    # row half in place rather than copying it.
+    assert len(allocated) == 1 and allocated[0][0].key.shape[0] == 2 * state.rows
+    for stream, passes in enumerate(state.passes):
+        for cache, owner in zip(passes.caches, allocated[0], strict=True):
+            for actual, full in ((cache.key, owner.key), (cache.value, owner.value)):
+                assert actual.untyped_storage().data_ptr() == full.untyped_storage().data_ptr()
+                assert actual.data_ptr() == full[stream * state.rows].data_ptr()
+                assert actual.shape[0] == state.rows
     while not stepper.complete(state):
         before, position = snapshot(state), state.cache_position
         stepper.advance([state])
@@ -225,7 +232,7 @@ def test_ar_batches_both_flip_passes_once_with_independent_statistics(runtimes, 
 
     monkeypatch.setattr(runtime.model, 'forward', prefill_forward)
     stepper.prefill(states)
-    assert prefill_calls == [rows, rows]  # Prefill remains one call per flip.
+    assert prefill_calls == [2 * rows]  # Prefill batches both flips in one call.
     if cohort:
         stepper.advance([states[0]])
         assert [state.cache_position for state in states] == [6, 2]
