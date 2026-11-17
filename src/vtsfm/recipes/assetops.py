@@ -9,6 +9,8 @@ import subprocess
 
 PATCH_NAME = 'assetops-conformal-factory.patch'
 COMPOSITION = Path('src/servers/tsfm/engine/composition.py')
+# The composition.py blob at AssetOpsBench e844f6468c6c68b328022e7ca8e31da140842cc7.
+COMPOSITION_BLOB = '207f9551406d48c73f09be01966f4154b3487a59'
 
 
 def _git(root, *arguments, patch=None):
@@ -37,6 +39,12 @@ def patch_assetops(checkout, *, apply=False):
     patch = resources.files('vtsfm.recipes').joinpath(PATCH_NAME).read_text(encoding='utf-8')
     forward = _git(root, 'apply', '--check', '-', patch=patch)
     if forward.returncode == 0:
+        blob = _git(root, 'rev-parse', '--verify', f'HEAD:{COMPOSITION}')
+        if blob.returncode:
+            # A staged snapshot can hold the same upstream source without history.
+            blob = _git(root, 'rev-parse', '--verify', f':{COMPOSITION}')
+        if blob.returncode or blob.stdout.strip() != COMPOSITION_BLOB:
+            raise ValueError('Expected the pinned AssetOpsBench composition source; no files changed')
         if not apply:
             return 'Patch can be applied; no files changed'
         result = _git(root, 'apply', '-', patch=patch)

@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+from vtsfm.recipes import assetops
 from vtsfm.recipes.assetops import COMPOSITION, PATCH_NAME, patch_assetops
 
 
@@ -16,7 +17,7 @@ def git(root, *arguments):
 
 
 @pytest.fixture
-def checkout(tmp_path):
+def checkout(tmp_path, monkeypatch):
     root = tmp_path / 'AssetOpsBench'
     root.mkdir()
     git(root, 'init', '-q')
@@ -40,6 +41,7 @@ def checkout(tmp_path):
     unrelated = root / 'unrelated.txt'
     unrelated.write_text('original\n')
     git(root, 'add', '.')
+    monkeypatch.setattr(assetops, 'COMPOSITION_BLOB', git(root, 'rev-parse', f':{COMPOSITION}').strip())
     unrelated.write_text('staged teammate change\n')
     git(root, 'add', 'unrelated.txt')
     unrelated.write_text('unstaged teammate change\n')
@@ -49,6 +51,16 @@ def checkout(tmp_path):
 def test_patch_resource_remains_byte_identical():
     patch = resources.files('vtsfm.recipes').joinpath(PATCH_NAME).read_bytes()
     assert hashlib.sha256(patch).hexdigest() == 'd8b660e25dbcae436087fd1d4a0e919924fad94153d3a5e93d3d3b325863fc76'
+
+
+@pytest.mark.parametrize('apply', [False, True])
+def test_patch_rejects_unverified_source_with_matching_context(checkout, monkeypatch, apply):
+    monkeypatch.setattr(assetops, 'COMPOSITION_BLOB', '0' * 40)
+    target = checkout / COMPOSITION
+    before = target.read_bytes()
+    with pytest.raises(ValueError, match='pinned AssetOpsBench composition'):
+        patch_assetops(checkout, apply=apply)
+    assert target.read_bytes() == before
 
 
 def test_check_apply_and_idempotency_preserve_unrelated_work_and_index(checkout):
@@ -129,7 +141,8 @@ def test_git_environment_cannot_redirect_selected_checkout(checkout, tmp_path, m
 def test_cli_defaults_to_check_and_requires_explicit_apply(checkout):
     target = checkout / COMPOSITION
     before = target.read_bytes()
-    command = [sys.executable, '-m', 'vtsfm.recipes.assetops', str(checkout)]
+    command = [sys.executable, '-c', 'from vtsfm.recipes import assetops; '
+               f'assetops.COMPOSITION_BLOB = {assetops.COMPOSITION_BLOB!r}; assetops.main()', str(checkout)]
     checked = subprocess.run(command, capture_output=True, text=True)
     assert checked.returncode == 0, checked.stdout + checked.stderr
     assert target.read_bytes() == before

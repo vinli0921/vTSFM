@@ -104,7 +104,30 @@ def test_cached_model_loading_retains_the_native_seed_order(model, monkeypatch):
     torch.manual_seed(777)
     TotoCalibrationBatcher()(forecasters, targets)
     wanted = torch.rand((), generator=torch.Generator().manual_seed(42)).item()
-    assert draws == [wanted, wanted]
+    assert draws == [wanted]
+
+
+def test_bad_toto_batch_shape_retries_native_origins(model, monkeypatch):
+    sizes = []
+    native_forecast = model.forecast
+
+    def forecast(inputs, **options):
+        rows = inputs['target'].shape[0]
+        sizes.append(rows)
+        outputs = native_forecast(inputs, **options)
+        return outputs[:, :-1] if rows > 1 else outputs
+
+    y = pd.Series(np.sin(np.arange(20) / 3), name='sensor')
+    forecasters = [Toto2Forecaster(device='cpu', seed=42).fit(y.iloc[:origin])
+                   for origin in [10, 11]]
+    targets = [y.iloc[origin:14].index for origin in [10, 11]]
+    expected = [fc.predict(ForecastingHorizon(index, is_relative=False))
+                for fc, index in zip(forecasters, targets)]
+    monkeypatch.setattr(model, 'forecast', forecast)
+    forecasts = TotoCalibrationBatcher()(forecasters, targets)
+    assert sizes == [2, 1, 1]
+    for actual, wanted in zip(forecasts, expected):
+        pd.testing.assert_series_equal(actual, wanted)
 
 
 def test_scoped_batch_retains_native_quantiles_and_shared_model_state(model):

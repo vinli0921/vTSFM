@@ -25,13 +25,24 @@ python -m vtsfm.recipes.assetops /path/to/AssetOpsBench --apply
 The helper works from an installed wheel and needs only Python and Git. Omitting
 both flags performs the same read-only check. Select the Git checkout root;
 subdirectories are rejected to prevent Git from silently skipping the patch.
+Before applying, the helper checks the tracked composition source against the
+file from the pinned commit. Other commits with that same source file are
+accepted.
 Already applied hooks are a no-op, unrelated changes are preserved, and
 unsupported or overlapping source changes fail before writing. No installed
 module is patched, and recipe execution still uses AssetOpsBench's own code.
 
 Install vTSFM's `recipes` extra alongside that project's existing dependencies.
-The Chronos callback uses the existing pinned native Chronos integration
-(`ba47d25a04aedac33af2fb9780609afd54744d5e`). Then call the actual AssetOps runner:
+Keep the models in separate environments because they use different versions of
+Torch. Both tested environments used sktime 1.2.0, NumPy 2.2.6 and pandas 2.3.3
+from the `recipes` extra.
+
+| Callback | Tested model runtime |
+| --- | --- |
+| Chronos | Python 3.11, Torch 2.9.1+cu128, Transformers 4.57.6, chronos-forecasting 2.2.2 from source `ba47d25a04aedac33af2fb9780609afd54744d5e` |
+| Toto | Python 3.12, Torch 2.14.0+cu130, toto-2 2.0.0 and dd-unit-scaling 0.1.0 from source `c079fd7e32424c5d33f9e267c5d32a5630242eb5`, toto-models 1.0.0, skpro 2.14.0 |
+
+Then call the actual AssetOps runner:
 
 ```python
 from functools import partial
@@ -55,13 +66,15 @@ or installed-module monkeypatch.
 `BatchedConformalIntervals` retains the original constructor argument order and
 adds keyword-only `batch_predict=None` and `batch_size=64` (1–256). No callback
 uses the original sktime loop. Covariates, sampled origins and updates also use
-that loop; their existing capabilities remain available. Other interval methods,
+that loop, as does an explicit `n_jobs` setting. Other interval methods,
 initial-window settings, cloning and deferred forecasting horizons remain usable.
 
 The callback receives fitted independent forecaster clones and their original
-future indexes, never holdout values. It returns one finite point-forecast Series
-per origin with the same index and order. Invalid results fail explicitly.
-Per-origin fitted forecasters remain available for native sktime updates.
+future indexes, never holdout values. It returns a point-forecast Series per
+origin with the same index and order. A malformed or non-finite forecast uses
+sktime's native residual calculation for that origin, including any NaNs it
+produces. A wrong result count falls back for the whole chunk. Per-origin fitted
+forecasters remain available for native sktime updates.
 
 Native callbacks expose `supports_forecaster(forecaster)`. Unsupported models or
 models with `seed=None` delegate the **entire** original loop before any origin

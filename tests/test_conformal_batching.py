@@ -64,11 +64,12 @@ def test_residuals_and_intervals_match_original_origin_loop(index, method):
     assert [row['id'] for row in candidate.forecasters_] == [str(i) for i in index[5:]]
 
 
-def test_float_initial_window_and_batch_size_one_keep_all_origins():
+@pytest.mark.parametrize('batch_size', [1, np.int64(1)])
+def test_float_initial_window_and_batch_size_one_keep_all_origins(batch_size):
     y = pd.Series(np.arange(30, dtype=float), name='sensor')
     callback = RecordingBatch()
     candidate = BatchedConformalIntervals(ContextForecaster(), batch_predict=callback,
-                                         batch_size=1, initial_window=0.2)
+                                         batch_size=batch_size, initial_window=0.2)
     original = ConformalIntervals(ContextForecaster(), initial_window=0.2)
     candidate.fit(y, fh=[1, 2])
     original.fit(y, fh=[1, 2])
@@ -76,20 +77,56 @@ def test_float_initial_window_and_batch_size_one_keep_all_origins():
     assert len(callback.calls) == 24
 
 
-@pytest.mark.parametrize('failure', ['count', 'index', 'nan'])
-def test_bad_batch_results_fail_instead_of_changing_calibration(failure):
+@pytest.mark.parametrize('failure', ['count', 'index', 'nan', 'dtype'])
+def test_bad_batch_results_use_native_residuals(failure):
     def callback(forecasters, targets):
         values = list(RecordingBatch()(forecasters, targets))
         if failure == 'count':
             return values[:-1]
         if failure == 'index':
             values[0] = values[0].iloc[::-1]
-        else:
+        elif failure == 'nan':
             values[0].iloc[0] = float('nan')
+        else:
+            values[0] = pd.Series('invalid', index=targets[0])
         return values
-    candidate = BatchedConformalIntervals(ContextForecaster(), batch_predict=callback, batch_size=4)
-    with pytest.raises(ValueError, match='Calibration'):
-        candidate.fit(pd.Series(np.arange(20, dtype=float)), fh=[1])
+    y = pd.Series(np.arange(20, dtype=float))
+    original = ConformalIntervals(ContextForecaster()).fit(y, fh=[1])
+    candidate = BatchedConformalIntervals(ContextForecaster(), batch_predict=callback,
+                                         batch_size=4).fit(y, fh=[1])
+    pd.testing.assert_frame_equal(candidate.residuals_matrix_, original.residuals_matrix_)
+    pd.testing.assert_frame_equal(candidate.predict_interval(), original.predict_interval())
+    assert len(candidate.forecasters_) == len(original.forecasters_)
+
+
+def test_missing_values_keep_native_residuals_and_intervals():
+    class MissingValuesForecaster(ContextForecaster):
+        _tags = {'capability:missing_values': True}
+
+        def _predict(self, fh, X=None):
+            result = super()._predict(fh, X)
+            if len(self.prefix) % 3 == 0:
+                result.iloc[0] = np.nan
+            return result
+
+    y = pd.Series(np.arange(20, dtype=float))
+    y.iloc[8] = np.nan
+    original = ConformalIntervals(MissingValuesForecaster(), initial_window=5).fit(y, fh=[1, 2])
+    candidate = BatchedConformalIntervals(MissingValuesForecaster(), initial_window=5,
+        batch_predict=RecordingBatch(), batch_size=4).fit(y, fh=[1, 2])
+    pd.testing.assert_frame_equal(candidate.residuals_matrix_, original.residuals_matrix_)
+    pd.testing.assert_frame_equal(candidate.predict_interval(), original.predict_interval())
+    assert pd.isna(candidate.residuals_matrix_.loc[6, 6])
+
+
+def test_explicit_n_jobs_uses_native_calibration():
+    y = pd.Series(np.arange(20, dtype=float))
+    original = ConformalIntervals(ContextForecaster(), n_jobs=1).fit(y, fh=[1])
+    callback = RecordingBatch()
+    candidate = BatchedConformalIntervals(ContextForecaster(), n_jobs=1,
+                                         batch_predict=callback).fit(y, fh=[1])
+    assert callback.calls == []
+    pd.testing.assert_frame_equal(candidate.residuals_matrix_, original.residuals_matrix_)
 
 
 @pytest.mark.parametrize('size', [True, 0, -1, 257, 1.5])

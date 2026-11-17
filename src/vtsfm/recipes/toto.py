@@ -39,6 +39,7 @@ class TotoCalibrationBatcher:
             raise ValueError('Forecasters and calibration indexes must align')
         outputs = [None] * len(future_indexes)
         groups = {}
+        models = {}
         for index, (fc, target) in enumerate(zip(forecasters, future_indexes)):
             relative = np.asarray(ForecastingHorizon(target, is_relative=False).to_relative(fc.cutoff))
             if (not self.supports_forecaster(fc)
@@ -46,13 +47,16 @@ class TotoCalibrationBatcher:
                     or not np.array_equal(relative, np.arange(1, len(target) + 1))):
                 outputs[index] = self._serial(fc, target)
                 continue
-            # The native sktime path uses this same cache and alignment helper.
-            from sktime.forecasting.toto2 import _CachedToto2Forecaster
-            import torch
+            key = str((fc.model_path, fc._device))
+            if key not in models:
+                import torch
+                from sktime.forecasting.toto2 import _CachedToto2Forecaster
 
-            torch.manual_seed(fc._seed)
-            model = _CachedToto2Forecaster(key=str((fc.model_path, fc._device)),
-                model_path=fc.model_path, device=fc._device).load_from_checkpoint()
+                # Keep sktime's seed-before-load order for the first lookup.
+                torch.manual_seed(fc._seed)
+                models[key] = _CachedToto2Forecaster(key=key,
+                    model_path=fc.model_path, device=fc._device).load_from_checkpoint()
+            model = models[key]
             patch = model.config.patch_size
             values, mask, missing = fc._align_context(
                 fc._inputs_['target'], fc._inputs_['target_mask'], patch)
@@ -95,8 +99,11 @@ class TotoCalibrationBatcher:
                 has_missing_values=entries[0][2].shape[-1] != first._inputs_['target'].shape[-1])
         array = predictions.detach().cpu().numpy()
         knots = model.output_head.knots
-        if array.ndim != 4 or array.shape[:3] != (len(knots), len(entries), 1) or array.shape[-1] < horizon:
-            raise ValueError('Toto batch output must be [quantiles, origins, 1, horizon]')
+        if (array.ndim != 4 or array.shape[:3] != (len(knots), len(entries), 1)
+                or array.shape[-1] < horizon or 0.5 not in knots):
+            for index, fc, *_ in entries:
+                outputs[index] = self._serial(fc, targets[index])
+            return
         median = knots.index(0.5)
         for row, (index, fc, *_) in enumerate(entries):
             outputs[index] = pd.Series(array[median, row, 0, :len(targets[index])],

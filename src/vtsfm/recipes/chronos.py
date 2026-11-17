@@ -139,12 +139,15 @@ class ChronosCalibrationBatcher:
                 cross_learning=False,
                 limit_prediction_length=first._config['limit_prediction_length'])
         if len(predictions) != len(indices) or 0.5 not in pipeline.quantiles:
-            raise ValueError('Chronos batch outputs must align and include the median')
+            for index in indices:
+                outputs[index] = self._serial(forecasters[index], targets[index])
+            return
         median = pipeline.quantiles.index(0.5)
         for index, prediction in zip(indices, predictions):
             values = np.asarray(prediction)
             if (values.ndim != 3 or values.shape[:2] != (1, len(pipeline.quantiles))
                     or values.shape[-1] < horizon):
-                raise ValueError('Chronos batch output must be [1, quantiles, horizon]')
+                outputs[index] = self._serial(forecasters[index], targets[index])
+                continue
             outputs[index] = pd.Series(values[0, median, :len(targets[index])],
                                        index=targets[index], name=forecasters[index]._get_varnames()[0])

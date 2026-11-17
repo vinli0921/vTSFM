@@ -90,6 +90,28 @@ def test_matching_native_patch_counts_batch_varying_horizons(seeds):
         pd.testing.assert_series_equal(actual, wanted)
 
 
+@pytest.mark.parametrize('malformed', ['count', 'shape'])
+def test_invalid_batched_chronos_output_retries_native_origins(seeds, malformed):
+    class BadBatchPipeline(Pipeline):
+        def predict(self, inputs, **options):
+            outputs = super().predict(inputs, **options)
+            if len(inputs) > 1:
+                if malformed == 'count':
+                    return outputs[:-1]
+                outputs[0] = outputs[0][..., :-1]
+            return outputs
+
+    pipeline = BadBatchPipeline()
+    forecasters, targets = requests(pipeline)
+    wanted = [fc.predict(ForecastingHorizon(index, is_relative=False))
+              for fc, index in zip(forecasters, targets)]
+    pipeline.calls.clear()
+    actual = ChronosCalibrationBatcher()(forecasters, targets)
+    assert [call[0] for call in pipeline.calls] == ([4, 1, 1, 1, 1] if malformed == 'count' else [4, 1])
+    for prediction, expected in zip(actual, wanted):
+        pd.testing.assert_series_equal(prediction, expected)
+
+
 def test_patch_boundaries_and_long_horizons_preserve_native_schedule(seeds):
     pipeline = Pipeline()
     forecasters, targets = requests(pipeline, horizons=[4, 5, 3, 6, 9])

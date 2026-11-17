@@ -39,6 +39,8 @@ Only the sliding-origin forecast loop changes. sktime retains interval quantiles
 coverage, the final fitted forecast, and its signed-residual convention.
 """
 
+from numbers import Integral
+
 import numpy as np
 import pandas as pd
 from sktime.datatypes import convert_to
@@ -53,9 +55,9 @@ class BatchedConformalIntervals(ConformalIntervals):
     per clone, with exactly the target index. Contexts and horizons can differ;
     the callback owns any model-specific collation or grouping restrictions.
 
-    With no callback, or with covariates, origin sampling or updates, sktime's
-    original implementation runs. Existing constructor arguments retain their
-    original order and defaults.
+    With no callback, or with covariates, origin sampling, explicit ``n_jobs``
+    or updates, sktime's original implementation runs. Existing constructor
+    arguments retain their original order and defaults.
     """
 
     def __init__(self, forecaster, method='empirical', initial_window=None,
@@ -63,7 +65,7 @@ class BatchedConformalIntervals(ConformalIntervals):
                  batch_predict=None, batch_size=64):
         if batch_predict is not None and not callable(batch_predict):
             raise TypeError('batch_predict must be callable')
-        if type(batch_size) is not int or not 1 <= batch_size <= 256:
+        if isinstance(batch_size, bool) or not isinstance(batch_size, Integral) or not 1 <= batch_size <= 256:
             raise ValueError('batch_size must be an integer in [1,256]')
         self.batch_predict = batch_predict
         self.batch_size = batch_size
@@ -75,7 +77,7 @@ class BatchedConformalIntervals(ConformalIntervals):
                                    sample_frac, update=False):
         supports = getattr(self.batch_predict, 'supports_forecaster', None)
         if (self.batch_predict is None or X is not None or update
-                or sample_frac is not None or isinstance(y.index, pd.MultiIndex)
+                or sample_frac is not None or self.n_jobs is not None or isinstance(y.index, pd.MultiIndex)
                 or (supports is not None and not supports(forecaster))):
             return super()._compute_sliding_residuals(
                 y, X, forecaster, initial_window, sample_frac, update)
@@ -94,14 +96,18 @@ class BatchedConformalIntervals(ConformalIntervals):
                 targets.append(target)
             predictions = tuple(self.batch_predict(tuple(clones), tuple(target.index for target in targets)))
             if len(predictions) != len(clones):
-                raise ValueError('Calibration batch must return exactly one forecast per origin')
+                predictions = (None,) * len(clones)
             for origin, fitted, target, prediction in zip(origins, clones, targets, predictions):
-                if (not isinstance(prediction, pd.Series)
-                        or not prediction.index.equals(target.index)
-                        or not np.isfinite(prediction.to_numpy(dtype=float)).all()):
-                    raise ValueError('Calibration forecast must be finite and preserve the target index')
-                residuals.loc[y.index[origin], target.index] = (
-                    target.to_numpy(dtype=float) - prediction.to_numpy(dtype=float))
+                values = None
+                if isinstance(prediction, pd.Series) and prediction.index.equals(target.index):
+                    try:
+                        values = prediction.to_numpy(dtype=float)
+                    except (TypeError, ValueError):
+                        pass
+                if values is None or not np.isfinite(values).all():
+                    residuals.loc[y.index[origin]] = fitted.predict_residuals(target)
+                else:
+                    residuals.loc[y.index[origin], target.index] = target.to_numpy(dtype=float) - values
                 # Native sktime updates reuse these fitted origin forecasters.
                 self.forecasters_.append({'id': str(y.index[origin]), 'forecaster': fitted})
         return residuals
