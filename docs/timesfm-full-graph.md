@@ -1,5 +1,8 @@
 # TimesFM complete-forecast CUDA graph experiment
 
+The [TimesFM HTTP serving experiment](timesfm-graph-serving.md) builds on this
+fixed-owner implementation.
+
 See the [measured four-arm results](baselines/2026-11-13-full-forecast-graphs/README.md)
 for source pins, setup/memory costs, validation and measurement limits.
 
@@ -9,7 +12,7 @@ all continuation blocks and running statistics, both heads, quantile correction,
 denormalization and positivity handling. It uses the optimized stepper and shared
 neural helper; no decoder is replaced by a cached prediction.
 
-This is an opt-in manual experiment, separate from serving. The owner accepts
+This page describes the in-process experiment. The owner accepts
 one fixed batch/context/horizon of finite equal-length CUDA FP32 histories.
 Calls are serialized; concurrent use of one owner is unsupported. Dynamic shape
 caches, ragged masks, per-block joins, admission and request cancellation are not

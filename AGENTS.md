@@ -165,7 +165,11 @@ Use the checkout's environments, not global Python packages:
   leases/metadata remain pinned until synchronization and graph destruction;
   zero leases are expected after close, not between replays. Keep setup/capture
   costs and held graph/private-pool memory distinct from steady-state timing.
-  This does not enable graphs in the HTTP/worker path or dynamic scheduling.
+  The [HTTP graph mode](docs/timesfm-graph-serving.md) reuses the fixed owner on
+  one scheduled TimesFM slot at B2/C512/H1024. The worker warms the owner before
+  readiness and closes it before vLLM teardown. Other geometries use ordinary
+  eager forecasts. Test real HTTP parity, replay counts, aborted requests, and
+  peak fallback memory with the owner resident before widening this envelope.
 
 Keep handoffs short: what changed, why, checks run, and remaining limitations.
 These conventions take inspiration from [vLLM's agent guide](https://github.com/vllm-project/vllm/blob/main/AGENTS.md),
