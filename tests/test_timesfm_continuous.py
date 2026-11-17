@@ -187,11 +187,15 @@ def test_real_timesfm_staggered_join_independent_completion_and_parity(gpu, tmp_
         shared = [event for event in steps if event.get('stage') == 'decode'
                   and {_identity('join-a'), _identity('join-e')} <= set(event['request_ids'])]
         assert shared, 'No actual AR model call batched active requests together'
+        mixed = [event for event in steps if event.get('stage') == 'decode'
+                 and len(set(event.get('cache_positions', []))) > 1]
+        assert mixed, 'Staggered arrivals never shared a decode call across cache positions'
+        assert all(event['cache_position'] is None for event in mixed)
         assert all(event['rows'] <= 8 for event in steps)
         assert server['child'].poll() is None
     evidence = {'continuous_timesfm': 'passed', 'synthetic': True,
                 'starts_ns': starts, 'ends_ns': ends, 'shared_decode_calls': shared,
-                'empty_state_snapshots': snapshots}
+                'mixed_position_decode_calls': mixed, 'empty_state_snapshots': snapshots}
     (tmp_path / 'continuous-evidence.json').write_text(json.dumps(evidence, indent=2) + '\n')
     print(json.dumps({'continuous_timesfm': 'passed', 'shared_decode_calls': len(shared)}))
 

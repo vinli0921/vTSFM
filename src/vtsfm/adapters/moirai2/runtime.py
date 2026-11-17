@@ -1,18 +1,22 @@
 """Tensor forecasting around the official Moirai 2.0 recursive quantile decoder."""
 
+import os
+
 import torch
 from uni2ts.model.moirai2 import Moirai2Forecast, Moirai2Module
 
-from vtsfm.execution import ExecutionResult, PreparedBatch
-from vtsfm.precision import configure_precision
 from vtsfm.compilation import compile_core, execution_mode
+from vtsfm.execution import ExecutionResult, PreparedBatch
+from vtsfm.precision import PRECISION_ENV, configure_precision
 
-from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, MOIRAI2
+from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, MOIRAI2, resolve_attention_config
 
 
 class MoiraiRuntime:
     def __init__(self, config):
-        self.precision = configure_precision('moirai2')
+        mode = execution_mode()
+        self.attention_mode, precision = resolve_attention_config(mode, os.environ.get(PRECISION_ENV))
+        self.precision = configure_precision(MOIRAI2.name, precision)
         self.model = Moirai2Module(**config)
         if self.precision == 'bf16':
             from .precision import prepare_native_bf16
@@ -22,7 +26,14 @@ class MoiraiRuntime:
             from .precision import prepare_native_tf32
 
             prepare_native_tf32(self.model)
-        if execution_mode() == 'compile':
+        # Opt-in (#24): exact fused attention for univariate rows. Every request
+        # this runtime accepts is univariate (target_dim=1; execute() rejects
+        # grouped rows), and the patch raises on multivariate input anyway.
+        if self.attention_mode == 'univariate':
+            from .attention import install_univariate_attention
+
+            install_univariate_attention(self.model)
+        if mode == 'compile':
             compile_model(self.model)
 
     @torch.inference_mode()

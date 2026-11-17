@@ -15,6 +15,7 @@ from vtsfm.config import (
     DEFAULT_PORT, FORECAST_BATCH_ROWS_ENV, MAX_FORECAST_BATCH_ROWS, PYTHON_VERSION, serving_pins,
 )
 from vtsfm.adapters import get_adapter, list_adapters
+from vtsfm.adapters.moirai2.spec import MOIRAI_ATTENTION_ENV, resolve_attention_config
 from vtsfm.admission import FORECAST_LIMITS_ENV, resolve_limits
 from vtsfm.compilation import EXECUTION_ENV, EXECUTION_MODES, execution_mode
 from vtsfm.stepping import CONTINUOUS_ENV
@@ -74,6 +75,9 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
         forecast_queue_limit = 16 if forecast_queue_limit is None else forecast_queue_limit
     environment = _environment(benchmark)
     environment[EXECUTION_ENV] = mode
+    if selected.name == 'moirai2':
+        environment[MOIRAI_ATTENTION_ENV], forecast_precision = resolve_attention_config(
+            mode, forecast_precision, environment)
     if mode == 'compile':
         # Set before the child imports Torch/Triton, preserving native arithmetic.
         environment['TRITON_DEFAULT_FP_FUSION'] = '0'
@@ -253,7 +257,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         keys = ('VTSFM_ADAPTER', 'VLLM_PLUGINS', 'VLLM_USE_V2_MODEL_RUNNER', 'VLLM_SERVER_DEV_MODE',
                 'OMP_NUM_THREADS', 'HF_HUB_DISABLE_TELEMETRY', FORECAST_BATCH_ROWS_ENV, FORECAST_LIMITS_ENV,
-                CONTINUOUS_ENV, PRECISION_ENV, TF32_OVERRIDE_ENV, EXECUTION_ENV, 'TRITON_DEFAULT_FP_FUSION')
+                CONTINUOUS_ENV, PRECISION_ENV, TF32_OVERRIDE_ENV, EXECUTION_ENV, MOIRAI_ATTENTION_ENV,
+                'TRITON_DEFAULT_FP_FUSION')
         print(json.dumps({'command': command, 'environment': {
             key: environment[key] for key in keys if key in environment}}, indent=2))
         return 0

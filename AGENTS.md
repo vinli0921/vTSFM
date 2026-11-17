@@ -132,7 +132,8 @@ Use the checkout's environments, not global Python packages:
   synchronous scheduler/worker hooks isolated. Prompt markers count forecast
   blocks, never observations. Count all active caches toward global numerical
   capacity; vLLM owns bounded HTTP intake and cancellation. Shared AR calls need
-  matching physical cache positions and independently owned request buffers.
+  per-row cache writes when positions differ and independently owned request
+  buffers. Preserve native rotary positions and attention masks.
   Serving changes need real staggered-arrival, completion, error/cancellation,
   parity and peak-memory checks. Keep timing passes untraced and queue diagnostics
   separately labeled.
@@ -149,6 +150,15 @@ Use the checkout's environments, not global Python packages:
   worker model exceptions can be engine-fatal; distinguish clean restart from
   recovery within a healthy engine. Offline synchronous `LLM` calls are
   sequential; concurrent clients use the HTTP/async path.
+- The optional [TimesFM native-KV experiment](docs/timesfm-native-kv.md) is a
+  direct backend/block-allocator proof, not native GPUModelRunner or HTTP support.
+  Use the recorded source and `TRITON_F32_DEFAULT=ieee`; Torch TF32 flags alone
+  do not specify Triton arithmetic. Keep fixed-pool, leased-page and actual peak
+  memory distinct. Do not connect the private stepper to production or remove
+  its source-compatibility guard without new engine/lifecycle qualification.
+  Its forecast/attention harnesses check GPU ownership before/after timed samples
+  outside timing; retain but exclude contended points and rerun counterbalanced
+  comparisons. These snapshots detect activity but do not reserve the shared GPU.
 
 Keep handoffs short: what changed, why, checks run, and remaining limitations.
 These conventions take inspiration from [vLLM's agent guide](https://github.com/vllm-project/vllm/blob/main/AGENTS.md),

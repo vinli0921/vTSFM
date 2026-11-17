@@ -50,6 +50,8 @@ reference's batch geometry. Mixed padded batches can otherwise change CUDA
 BF16/TF32 rounding. Outputs retain their original row order and histories stay on
 the device. The live tensor entrypoint synchronizes only integer length metadata;
 prepared execution reuses the known lengths. FP32 batching is unchanged.
+Moirai BF16 and TF32 require upstream attention. See the
+[Moirai settings matrix](compiled-execution.md#moirai-attention-and-precision).
 
 For Toto BF16, singleton variate attention with more than 65,535 flattened
 CUDA batches excludes FlashAttention locally, allowing efficient attention and
