@@ -111,7 +111,7 @@ Its benefit depends on the existing context window, fixed seed and horizon mix;
 workloads without compatible origins remain serial. The real-checkpoint CUDA
 record below includes the initial residual mismatch and its numerical fix.
 Both follow-up runs also pass the unchanged residual-scale tolerance.
-Latency improvement remains unmeasured.
+See [whole-recipe timing](#whole-recipe-timing) for the matched latency comparison.
 
 ## Toto execution
 
@@ -143,8 +143,8 @@ retained; incompatible origins and individually oversized work run serially.
 The native CPU suite checks growing contexts, varying horizons and decode-block
 sizes `None`, 4 and 8 using a tiny random-weight official Toto model. Compatible
 origins share forecast calls while retaining the original residuals and intervals.
-The real-checkpoint CUDA record below covers the original anomaly recipe;
-latency measurements remain separate work.
+The real-checkpoint CUDA record and timings below cover the original anomaly
+recipe.
 
 ## Numerical execution
 
@@ -158,7 +158,7 @@ backend settings. These boundaries follow the pinned upstream model layouts.
 
 Other operations still run in batches. Fewer forecast API calls do not mean all
 linear kernels have been combined: per-origin projections and Python dispatch
-may limit the benefit. Whole-recipe latency remains a separate manual check.
+may limit the benefit. The whole-recipe timing below measures the resulting cost.
 
 ## Checks
 
@@ -319,6 +319,31 @@ cleanup. The installed wheel supplies the external factory patch and its
 explicit checkout helper; that patch still has not landed upstream.
 
 These checks resolve the recorded residual-scale failures on the original
-fixture. They do not establish universal bitwise FP32 invariance or the issue's
-under-10-second goal. Latency, throughput and comparative memory remain manual
-team work, so issue #18 remains open.
+fixture. The matched timing below uses the same numerical gate.
+
+## Whole-recipe timing
+
+At `6f32c19`, the original Chiller6 recipe ran on an idle A100-SXM4-40GB with
+the checkpoints, fixture, FP32 settings and residual tolerance above. Each
+mode used a fresh process. The wall-time interval started at entry to
+`run_recipe` and ended at CUDA completion, including the first model load.
+Fixture preparation and writing result artifacts were outside that interval.
+Calibration calls were timed without the call-count instrumentation.
+
+| Model | Native | Batched | Speedup | Matching anomaly labels |
+| --- | ---: | ---: | ---: | --- |
+| Chronos-2 | 121.0 s | 81.3 s | 1.49× | All 11 |
+| Toto-2 | 287.0 s | 60.2 s | 4.77× | All 8 |
+
+There was one completed pair per model, in native-then-batched order for
+Chronos and batched-then-native order for Toto. A Chronos attempt interrupted
+by foreign GPU activity was excluded. All retained runs used the same model
+settings within each pair, batch size 64 for the batched mode, and the same
+18% Torch allocator cap. A fresh comparison of the residuals passed
+`rtol=atol=1e-5`, with matching missing-value masks. All interval bounds
+matched exactly.
+
+To reproduce, time the stock recipe and the batched factory on the same
+checkpoint and fixture in separate processes, synchronizing CUDA immediately
+before and after each `run_recipe` call. These timings cover the Chiller6
+recipe only. Chronos is still above issue #18's under-10-second target.
