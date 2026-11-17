@@ -84,9 +84,9 @@ also computes more values than the cropped public output; its scratch memory
 must be measured separately.
 
 `max_execution_rows` counts prepared independent input series, not internal
-flip-pass rows. The block decoder combines both AR passes into one
-neural batch of `2*R` rows, at most 32 for the unchanged 16-series ceiling.
-Prefill retains separate normal and flipped calls. Work already charges
+flip-pass rows. The block decoder combines both passes at prefill and at
+each AR step into one neural batch of `2*R` rows, at most 32 for the
+unchanged 16-series ceiling. Work already charges
 `2*R*cache_capacity^2`, and both owned flip caches were already included in
 persistent KV accounting. This changes temporary execution shapes, not request,
 row, work or persistent-cache ceilings. Standalone eager commit `b9fffd25`
@@ -170,9 +170,11 @@ count user series.
 
 The historical whole-forecast peaks above do not measure the current block
 implementation's temporary attention packs or combined flip-pass batch.
-The current block probes measured up to 3.67 GiB Torch allocated, 4.03 GiB
-reserved and 5.05 GiB sampled device residency, while persistent KV stayed at
-1.73 GiB. These finite synthetic probes are not exact memory guarantees across
+The earlier block probes used separate sign prefills. They measured up to
+3.67 GiB Torch allocated, 4.03 GiB reserved and 5.05 GiB sampled device
+residency, while persistent KV stayed at 1.73 GiB. Recheck the block-capacity
+peak with the batched prefill before using those figures for deployment.
+These finite synthetic probes are not exact memory guarantees across
 all inputs, hardware or package versions. NVML sampling can miss brief peaks.
 Record a new baseline before raising caps or comparing performance; capacity
 checks make no throughput claim.
