@@ -80,3 +80,37 @@ def test_parity_failures_are_flagged_in_the_table(tmp_path):
     row, = collect([tmp_path / "run"])
     assert row["parity_failed_cases"] == 1
     assert "(parity failed)" in markdown([row])
+
+
+def test_observed_scale_rescales_exactly_and_reports_filled_history(tmp_path):
+    from benchmarks.model_evaluation import QUANTILES, score_forecasts
+
+    case = {"name": "signal-s-x", "data": {"inputs": [{"item_id": "s/x/origin-108",
+                                                         "target": [0., 1., 3., 3., 3., 1., 7., 4.]}],
+                                           "parameters": {"prediction_length": 2, "quantile_levels": list(QUANTILES)}},
+            "evaluation": {"targets": [[5., 6.]], "observed": [[True, True]], "seasonality": 2},
+            "provenance": {"origins": [108], "past_imputed_positions": [[103]]}}
+    forecast = [[[4. + q / 10, 4.5] for q in range(9)]]
+    every = score_forecasts(case, forecast)["per_series"]
+    _write_run(tmp_path / "run", "toto2", "float32", every, case="signal-s-x")
+    (tmp_path / "run/toto2/cases.json").write_text(json.dumps({"cases": [case]}))
+
+    default, = collect([tmp_path / "run"])
+    assert default["filled_history_pct"] == pytest.approx(12.5) and default["scale"] == "all"
+    observed, = collect([tmp_path / "run"], "observed")
+    direct = score_forecasts(case, forecast, scale="observed")
+    assert observed["MASE"] == pytest.approx(direct["MASE"]) and observed["SQL"] == pytest.approx(direct["SQL"])
+    assert observed["MAE"] == default["MAE"]
+    assert "recorded history pairs only" in markdown([observed]) and "| 12.5% |" in markdown([observed])
+
+    assert main([str(tmp_path / "run"), "--scale", "observed", "--output", str(tmp_path / "out")]) == 0
+    assert sorted(path.name for path in (tmp_path / "out").iterdir()) == [
+        "accuracy_table_observed_scale.csv", "accuracy_table_observed_scale.md"]
+
+
+def test_observed_scale_requires_the_run_cases(tmp_path):
+    _write_run(tmp_path / "run", "toto2", "float32", [_series("s/x/origin-1", 1.0)])
+    with pytest.raises(ValueError, match="needs .*cases.json"):
+        collect([tmp_path / "run"], "observed")
+    row, = collect([tmp_path / "run"])
+    assert row["filled_history_pct"] is None and "| n/a |" in markdown([row])

@@ -281,18 +281,69 @@ def seasonal_naive_forecasts(case):
     return np.asarray(rows, dtype=float)
 
 
-def score_forecasts(case, values):
+SCALES = ("all", "observed")
+
+
+def history_observed(case):
+    """Per-row history masks: True where a value was recorded, False where filled.
+
+    Read from provenance: signal cases (``origins`` with per-row absolute
+    ``past_imputed_positions``), MetroPT fixture cases (one ``origin`` shared by
+    all rows) and fev cases (``series[i].past_imputed_offsets`` within each
+    history). Returns None for a case that does not record its imputation.
+    """
+    provenance = case.get("provenance") or {}
+    lengths = [len(item["target"]) for item in case["data"]["inputs"]]
+    if "origins" in provenance and "past_imputed_positions" in provenance:
+        rows = [(origin - length, positions) for origin, length, positions
+                in zip(provenance["origins"], lengths, provenance["past_imputed_positions"], strict=True)]
+    elif "origin" in provenance and "past_imputed_positions" in provenance:
+        rows = [(provenance["origin"] - length, provenance["past_imputed_positions"]) for length in lengths]
+    elif isinstance(provenance.get("series"), list) and all("past_imputed_offsets" in row for row in provenance["series"]):
+        rows = [(0, row["past_imputed_offsets"]) for row in provenance["series"]]
+    else:
+        return None
+    masks = []
+    for (start, positions), length in zip(rows, lengths, strict=True):
+        mask = [True] * length
+        for position in positions:
+            if not 0 <= position - start < length:
+                raise ValueError(f"{case['name']}: imputed position {position} is outside its history")
+            mask[position - start] = False
+        masks.append(mask)
+    return masks
+
+
+def seasonal_scale(past, seasonality, observed=None):
+    """Mean absolute lag-``seasonality`` difference in a history, and its pair count.
+
+    With ``observed``, only pairs whose two values were both recorded count, so
+    forward-filled runs cannot shrink the scale. Returns (None, 0) without pairs.
+    """
+    pairs = [abs(past[index] - past[index - seasonality]) for index in range(seasonality, len(past))
+             if observed is None or (observed[index] and observed[index - seasonality])]
+    return (sum(pairs) / len(pairs), len(pairs)) if pairs else (None, 0)
+
+
+def score_forecasts(case, values, *, scale="all"):
     """Score [N, 9, H] forecasts against observed future labels, using past only.
 
     MAE uses the median. MASE divides median MAE by mean absolute seasonal
-    differences in the supplied past (including documented causal fills).
-    SQL averages twice the pinball loss over all nine quantiles, divided by the
-    same scale. Aggregates are equal-weight means over eligible series. Undefined
-    scales are excluded explicitly, never converted to zero or JSON NaN.
+    differences in the supplied past. ``scale="all"`` (default) uses every pair,
+    including documented causal fills; ``scale="observed"`` uses only pairs whose
+    two values were recorded (see ``history_observed``). SQL averages twice the
+    pinball loss over all nine quantiles, divided by the same scale. Aggregates
+    are equal-weight means over eligible series. Undefined scales (zero, or no
+    usable pairs) are excluded explicitly, never converted to zero or JSON NaN.
     """
     import numpy as np
 
+    if scale not in SCALES:
+        raise ValueError(f"scale must be one of {SCALES}")
     validate_case(case)
+    masks = history_observed(case)
+    if scale == "observed" and masks is None:
+        raise ValueError(f"{case['name']}: observed-pair scaling needs recorded history imputation")
     inputs, evaluation = case["data"]["inputs"], case["evaluation"]
     horizon = case["data"]["parameters"]["prediction_length"]
     forecast = np.asarray(values, dtype=float)
@@ -304,22 +355,29 @@ def score_forecasts(case, values):
         truth = np.asarray([value if flag else 0.0 for value, flag in zip(evaluation["targets"][row], observed)], dtype=float)
         past = np.asarray(item["target"], dtype=float)
         seasonality = evaluation["seasonality"]
-        scale = float(np.abs(past[seasonality:] - past[:-seasonality]).mean()) if len(past) > seasonality else None
-        status = "insufficient_history" if scale is None else "zero" if scale == 0 else "valid"
+        differences = np.abs(past[seasonality:] - past[:-seasonality])
+        if scale == "observed":
+            recorded = np.asarray(masks[row], dtype=bool)
+            differences = differences[recorded[seasonality:] & recorded[:-seasonality]]
+        series_scale = float(differences.mean()) if differences.size else None
+        status = "insufficient_history" if series_scale is None else "zero" if series_scale == 0 else "valid"
         mae = mase = sql = None
         if observed.any():
             mae = float(np.abs(forecast[row, 4, observed] - truth[observed]).mean())
             if status == "valid":
                 errors = truth[None, observed] - forecast[row][:, observed]
                 quantiles = np.asarray(QUANTILES)[:, None]
-                mase = mae / scale
-                sql = float((2 * np.maximum(quantiles * errors, (quantiles - 1) * errors)).mean() / scale)
+                mase = mae / series_scale
+                sql = float((2 * np.maximum(quantiles * errors, (quantiles - 1) * errors)).mean() / series_scale)
         per_series.append({"item_id": item["item_id"], "MAE": mae, "MASE": mase, "SQL": sql,
-                           "seasonal_scale": scale, "scale_status": status, "observed_targets": int(observed.sum())})
+                           "seasonal_scale": series_scale, "scale_status": status,
+                           "scale_pairs": int(differences.size),
+                           "filled_history": None if masks is None else masks[row].count(False),
+                           "observed_targets": int(observed.sum())})
     def average(metric):
         eligible = [row[metric] for row in per_series if row[metric] is not None]
         return sum(eligible) / len(eligible) if eligible else None
-    result = {"MAE": average("MAE"), "MASE": average("MASE"), "SQL": average("SQL"),
+    result = {"MAE": average("MAE"), "MASE": average("MASE"), "SQL": average("SQL"), "scale": scale,
             "counts": {"series": len(inputs), "scored_series": sum(row["MAE"] is not None for row in per_series),
                        "observed_targets": sum(row["observed_targets"] for row in per_series),
                        "valid_scaled_series": sum(row["MASE"] is not None for row in per_series),

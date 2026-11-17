@@ -49,6 +49,18 @@ origins. The reported model spreads apply to these windows and their forward-fil
 | 4015 | 89 | 331 |
 | 4534 | 51 | 391 |
 
+Re-scoring with scales over recorded pairs only (`accuracy_table --scale observed`, an exact rescaling of
+this run's scores) raises MetroPT MASE because the scales shrink, but leaves the comparison intact:
+
+| Signal | TimesFM MASE | Toto MASE | Moirai MASE | Naive MASE | Worst ÷ best MASE / SQL |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| MetroPT oil temperature | 0.711 | 0.945 | 0.818 | 0.956 | 1.33 / 1.22 |
+| MetroPT motor current | 1.200 | 1.321 | 1.169 | 1.463 | 1.13 / 1.07 |
+
+Rankings, model spreads and the margins over seasonal naive keep their direction. Toto's oil-temperature margin
+over naive narrows further (0.945 vs 0.956). Chiller histories are 0.2% filled and hydraulic 0%, so their
+scores are effectively unchanged.
+
 ## Answer
 
 - **"Accuracy is a tie" holds only for the chiller signals.** On both chiller signals all three models are
@@ -70,7 +82,7 @@ largest value, the largest mismatch is 5 (Toto) and 12.5 (Moirai) on condenser f
 signals that pass. The relative tolerance contributes little near zero, so those differences can exceed
 the gate's absolute tolerance. The accuracy profile exits nonzero on these failures.
 
-Follow-up work should measure a magnitude-aware absolute floor on the reference GPU using this condenser-flow
+Follow-up work ([#71](https://github.com/vinli0921/vTSFM/issues/71)) should measure a magnitude-aware absolute floor on the reference GPU using this condenser-flow
 case and the passing signals. Include perturbed forecasts to verify that the candidate still rejects material
 deviations. The accuracy profile continues to require `rtol=atol=1e-4`.
 

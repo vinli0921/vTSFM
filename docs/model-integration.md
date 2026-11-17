@@ -219,9 +219,14 @@ An accuracy run writes `accuracy_table.md` and `accuracy_table.csv` after the
 selected adapters finish. The tables summarize all available scores from the
 run, including native MAE, MASE and SQL per model and signal, seasonal-naive
 scores, counts of scaled and zero-scale series, and the largest
-served-minus-native SQL difference. Combining runs at different precisions
-produces a model × signal × dtype table with model spread and reduced-precision
-deltas.
+served-minus-native SQL difference, plus the share of each signal's history
+that was forward-filled. Combining runs at different precisions produces a
+model × signal × dtype table with model spread and reduced-precision deltas.
+`--scale observed` re-expresses MASE and SQL over seasonal pairs whose two
+history values were both recorded, so forward-filled runs cannot shrink the
+scale. It rescales the saved scores exactly from the run's `cases.json`; no
+rerun is needed. `score_forecasts(..., scale="observed")` applies the same rule
+when scoring directly.
 
 ```bash
 python3 -m benchmarks.accuracy_table results/model-accuracy/FP32_RUN \

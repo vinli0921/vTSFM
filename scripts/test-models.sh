@@ -246,8 +246,12 @@ for name in "${adapters[@]}"; do
   fi
 done
 if [[ "$profile" == accuracy ]]; then
-  # Standard-library summary over every adapter in this run; any adapter interpreter works.
-  if "$root/.venv-${adapters[0]}/bin/python" -m benchmarks.accuracy_table "$output" --output "$output"; then
+  # The summary needs only the standard library and reads every adapter's results.
+  # Prefer the checkout's CPU environment; adapter environments are the fallback
+  # because model runs do not require .venv.
+  table_python="$root/.venv/bin/python"
+  [[ -x "$table_python" ]] || table_python="$root/.venv-${adapters[0]}/bin/python"
+  if "$table_python" -m benchmarks.accuracy_table "$output" --output "$output"; then
     printf 'Accuracy table: %s\n' "$output/accuracy_table.md"
   else
     printf 'Accuracy table generation failed\n' >&2

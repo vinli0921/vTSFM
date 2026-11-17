@@ -9,13 +9,19 @@ signal: the ``<signal>/origin-<slot>`` item-ID prefix, or the case name.
 Reported scores are the official native model's. vTSFM must match native
 within the parity gate, so the last column only confirms that; signals whose
 cases failed the gate are marked there (``parity_failed_cases`` in the CSV).
-Means are equal
-weight over series with a defined value; undefined scaled scores (zero or
-too-short seasonal scale) stay out of the mean and are counted instead.
-SQL is the scaled quantile loss over all nine quantiles, the harness's
-quantile approximation of a scaled CRPS.
+Means are equal weight over series with a defined value; undefined scaled
+scores (zero or too-short seasonal scale) stay out of the mean and are counted
+instead. SQL is the scaled quantile loss over all nine quantiles, the
+harness's quantile approximation of a scaled CRPS.
 
-    python -m benchmarks.accuracy_table RUN_DIR [RUN_DIR ...] [--output DIR]
+"Filled history" is the mean share of history slots that were causally
+forward-filled, read from each run's ``cases.json`` provenance. By default the
+seasonal scale uses every history pair, as scored. ``--scale observed``
+re-expresses MASE and SQL over pairs whose two values were both recorded, so
+forward-filled runs cannot shrink the scale. This is exact (both metrics divide
+by the scale) and needs no rerun.
+
+    python -m benchmarks.accuracy_table RUN_DIR [RUN_DIR ...] [--scale observed] [--output DIR]
 """
 
 from __future__ import annotations
@@ -27,13 +33,15 @@ import json
 from pathlib import Path
 import re
 
+from benchmarks.model_evaluation import SCALES, history_observed, seasonal_scale
+
 
 MODELS = ("timesfm25", "toto2", "moirai2")
 DTYPE_NAMES = {"float32": "fp32", "fp32": "fp32", "tf32": "tf32", "bf16": "bf16", "bfloat16": "bf16"}
 DTYPE_ORDER = {"fp32": 0, "tf32": 1, "bf16": 2}
-COLUMNS = ["model", "dtype", "signal", "series", "scaled_series", "zero_scale_series",
-           "MAE", "MASE", "SQL", "naive_MASE", "naive_SQL", "max_abs_vtsfm_minus_native_SQL",
-           "parity_failed_cases"]
+COLUMNS = ["model", "dtype", "signal", "scale", "series", "scaled_series", "zero_scale_series",
+           "filled_history_pct", "MAE", "MASE", "SQL", "naive_MASE", "naive_SQL",
+           "max_abs_vtsfm_minus_native_SQL", "parity_failed_cases"]
 
 
 def _signal(case_name: str, item_id: str) -> str:
@@ -47,8 +55,19 @@ def _mean(values):
     return sum(values) / len(values) if values else None
 
 
-def collect(run_dirs) -> list[dict]:
+def _rescale(row, scale):
+    """Re-express one series' MASE and SQL over another seasonal scale."""
+    old, usable = row.get("seasonal_scale"), scale is not None and scale > 0
+    return {**row, "seasonal_scale": scale,
+            "scale_status": "valid" if usable else "zero" if scale == 0 else "insufficient_history",
+            "MASE": row["MAE"] / scale if usable and row["MAE"] is not None else None,
+            "SQL": row["SQL"] * old / scale if usable and row["SQL"] is not None and old else None}
+
+
+def collect(run_dirs, scale="all") -> list[dict]:
     """Return one row per model, dtype and signal across all given runs."""
+    if scale not in SCALES:
+        raise ValueError(f"scale must be one of {SCALES}")
     groups = {}
     for run_dir in map(Path, run_dirs):
         adapters = [path.parent for path in sorted(run_dir.glob("*/accuracy.json"))]
@@ -57,14 +76,33 @@ def collect(run_dirs) -> list[dict]:
         for folder in adapters:
             run = json.loads((folder / "run.json").read_text()) if (folder / "run.json").exists() else {}
             dtype = DTYPE_NAMES.get(str(run.get("precision", "float32")), str(run.get("precision")))
+            # The exact cases this run scored, with their imputation provenance.
+            cases_file = folder / "cases.json"
+            sources = ({entry["name"]: entry for entry in json.loads(cases_file.read_text())["cases"]}
+                       if cases_file.exists() else {})
+            if scale == "observed" and not sources:
+                raise ValueError(f"--scale observed needs {cases_file}")
             for case in json.loads((folder / "accuracy.json").read_text())["cases"]:
+                source = sources.get(case["case"])
+                masks = history_observed(source) if source else None
+                index = {item["item_id"]: row for row, item in enumerate(source["data"]["inputs"])} if source else {}
                 rows = zip(case["native"]["per_series"], case["vtsfm"]["per_series"],
                            case["seasonal_naive"]["per_series"], strict=True)
                 for native, served, naive in rows:
                     if not native["item_id"] == served["item_id"] == naive["item_id"]:
                         raise ValueError(f"{folder}: per-series rows are not aligned in {case['case']}")
+                    row = index.get(native["item_id"])
+                    mask = masks[row] if masks is not None and row is not None else None
+                    if scale == "observed":
+                        if mask is None:
+                            raise ValueError(f"{folder}: {case['case']} does not record history imputation")
+                        recorded, _ = seasonal_scale(source["data"]["inputs"][row]["target"],
+                                                     source["evaluation"]["seasonality"], mask)
+                        native, served, naive = (_rescale(entry, recorded) for entry in (native, served, naive))
                     key = (folder.name, dtype, _signal(case["case"], native["item_id"]))
-                    group = groups.setdefault(key, {"native": [], "vtsfm": [], "naive": [], "failed": set()})
+                    group = groups.setdefault(key, {"native": [], "vtsfm": [], "naive": [], "failed": set(),
+                                                    "filled": []})
+                    group["filled"].append(None if mask is None else mask.count(False) / len(mask))
                     if case.get("parity", "passed") != "passed":
                         group["failed"].add(case["case"])
                     group["native"].append(native)
@@ -75,10 +113,12 @@ def collect(run_dirs) -> list[dict]:
         native, served, naive = group["native"], group["vtsfm"], group["naive"]
         differences = [abs(a["SQL"] - b["SQL"]) for a, b in zip(served, native)
                        if a["SQL"] is not None and b["SQL"] is not None]
+        filled = _mean(group["filled"])
         table.append({
-            "model": model, "dtype": dtype, "signal": signal, "series": len(native),
+            "model": model, "dtype": dtype, "signal": signal, "scale": scale, "series": len(native),
             "scaled_series": sum(row["MASE"] is not None for row in native),
             "zero_scale_series": sum(row.get("scale_status") == "zero" for row in native),
+            "filled_history_pct": None if filled is None else 100 * filled,
             "MAE": _mean(row["MAE"] for row in native),
             "MASE": _mean(row["MASE"] for row in native),
             "SQL": _mean(row["SQL"] for row in native),
@@ -138,13 +178,17 @@ def model_spread(table) -> list[dict]:
 
 
 def markdown(table) -> str:
-    lines = ["| Signal | Model | dtype | Series (scaled) | MAE | MASE | SQL | Naive MASE | Naive SQL | max \\|vTSFM−native\\| SQL |",
-             "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
+    lines = []
+    if any(row["scale"] == "observed" for row in table):
+        lines += ["MASE and SQL use seasonal scales over recorded history pairs only (`--scale observed`).", ""]
+    lines += ["| Signal | Model | dtype | Series (scaled) | Filled history | MAE | MASE | SQL | Naive MASE | Naive SQL | max \\|vTSFM−native\\| SQL |",
+              "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
     for row in table:
         counts = f"{row['series']} ({row['scaled_series']})"
         if row["zero_scale_series"]:
             counts += f", {row['zero_scale_series']} zero-scale"
-        lines.append(f"| {row['signal']} | {row['model']} | {row['dtype']} | {counts} | {_number(row['MAE'])} | "
+        filled = "n/a" if row["filled_history_pct"] is None else f"{row['filled_history_pct']:.1f}%"
+        lines.append(f"| {row['signal']} | {row['model']} | {row['dtype']} | {counts} | {filled} | {_number(row['MAE'])} | "
                      f"{_number(row['MASE'])} | {_number(row['SQL'])} | {_number(row['naive_MASE'])} | "
                      f"{_number(row['naive_SQL'])} | {_number(row['max_abs_vtsfm_minus_native_SQL'], 6)}"
                      f"{' (parity failed)' if row['parity_failed_cases'] else ''} |")
@@ -173,19 +217,23 @@ def markdown(table) -> str:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("runs", nargs="+", type=Path, help="test-models.sh accuracy output directories")
-    parser.add_argument("--output", type=Path, help="Also write accuracy_table.md and accuracy_table.csv here")
+    parser.add_argument("--scale", choices=SCALES, default="all",
+                        help="Seasonal scale for MASE/SQL: every history pair (default) or recorded pairs only")
+    parser.add_argument("--output", type=Path,
+                        help="Also write accuracy_table.md/.csv here (accuracy_table_observed_scale.* with --scale observed)")
     args = parser.parse_args(argv)
-    table = collect(args.runs)
+    table = collect(args.runs, args.scale)
     text = markdown(table)
     print(text, end="")
     if args.output is not None:
+        stem = "accuracy_table" if args.scale == "all" else "accuracy_table_observed_scale"
         args.output.mkdir(parents=True, exist_ok=True)
-        (args.output / "accuracy_table.md").write_text(text)
+        (args.output / f"{stem}.md").write_text(text)
         buffer = io.StringIO()
         writer = csv.DictWriter(buffer, fieldnames=COLUMNS, lineterminator="\n")
         writer.writeheader()
         writer.writerows(table)
-        (args.output / "accuracy_table.csv").write_text(buffer.getvalue())
+        (args.output / f"{stem}.csv").write_text(buffer.getvalue())
     return 0
 
 
