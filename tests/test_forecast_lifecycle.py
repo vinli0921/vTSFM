@@ -112,7 +112,22 @@ def test_direct_timesfm_launch_checks_limits_before_loading_model(monkeypatch):
         VTSFMTimesFMForForecasting(vllm_config=config)
 
 
+def test_preprocess_left_pads_ragged_fp32_context():
+    import torch
+
+    processor = _processor()
+    data = {'inputs': [{'target': [1, 2.5, 3]}, {'target': [4]}], 'parameters': {'prediction_length': 2}}
+    nan = float('nan')
+    expected = torch.tensor([[1, 2.5, 3], [nan, nan, 4]])
+    # Parsed FP32 arrays and direct callers' raw lists build the same context.
+    for prompt in (processor.parse_data(data), (data['inputs'], 2, [0.5])):
+        context = processor.pre_process(prompt)['multi_modal_data']['timeseries']['context'][0]
+        assert context.dtype == torch.float32
+        torch.testing.assert_close(context, expected, equal_nan=True)
+
+
 def test_over_budget_offline_preprocessing_allocates_no_context(monkeypatch):
+    import numpy as np
     import torch
 
     monkeypatch.setenv('VTSFM_FORECAST_LIMITS', '{"max_request_rows":1}')
@@ -123,6 +138,8 @@ def test_over_budget_offline_preprocessing_allocates_no_context(monkeypatch):
     def forbid_allocation(*args, **kwargs):
         pytest.fail('Rejected request allocated a context tensor')
 
+    # The padded context is built with NumPy, then shared with Torch.
+    monkeypatch.setattr(np, 'full', forbid_allocation)
     monkeypatch.setattr(torch, 'full', forbid_allocation)
     with pytest.raises(ValueError, match='rows'):
         processor.parse_data(data)

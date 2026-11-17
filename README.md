@@ -52,7 +52,8 @@ Use a Linux machine with an NVIDIA GPU and a compatible NVIDIA driver. The
 reference machine has an A100-SXM4-40GB and driver 595.91.07. TimesFM, Toto, and
 Moirai use CUDA 13.0 Torch binaries; the Chronos baseline uses CUDA 12.8. Setup
 does not install or change drivers. Model downloads need network access and disk
-space; keep weights outside Git.
+space; keep weights outside Git. On Columbia's Insomnia cluster, whose drivers
+predate CUDA 13, follow [the Insomnia setup guide](docs/insomnia.md).
 
 ```bash
 ./scripts/setup.sh
@@ -153,6 +154,10 @@ API process (overflow: HTTP 503). Final responses are unchanged. See
 [continuous batching](docs/continuous-batching.md) for adapter-owned caches, the
 pinned V1 scheduler/worker hooks, parity tests, memory measurements and offered-load
 benchmarks. This mode is opt-in.
+
+An isolated [native-attention/KV feasibility experiment](docs/timesfm-native-kv.md)
+reuses vLLM's block allocator and Triton backend for TimesFM. It is a manual
+in-process prototype, separate from the serving paths above.
 
 Toto uses Python 3.12.12 and a pinned upstream revision. Moirai keeps its
 NumPy 1.26 dependencies and explicitly overrides its Torch

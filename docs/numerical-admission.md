@@ -84,9 +84,9 @@ also computes more values than the cropped public output; its scratch memory
 must be measured separately.
 
 `max_execution_rows` counts prepared independent input series, not internal
-flip-pass rows. The block decoder combines both AR passes into one
-neural batch of `2*R` rows, at most 32 for the unchanged 16-series ceiling.
-Prefill retains separate normal and flipped calls. Work already charges
+flip-pass rows. The block decoder combines both passes at prefill and at
+each AR step into one neural batch of `2*R` rows, at most 32 for the
+unchanged 16-series ceiling. Work already charges
 `2*R*cache_capacity^2`, and both owned flip caches were already included in
 persistent KV accounting. This changes temporary execution shapes, not request,
 row, work or persistent-cache ceilings. Standalone eager commit `b9fffd25`
@@ -152,11 +152,29 @@ TimesFM revision `1d952420fba87f3c6dee4f240de0f1a0fbc790e3`:
 | 16 series, C8192, H1024 | 2.42 GiB | 2.72 GiB | 3.74 GiB |
 | Four maximum requests in one forward, four bounded model calls | 2.43 GiB | 2.72 GiB | 3.74 GiB |
 
-These historical whole-forecast peaks do not measure the current block
+Since #52, whole forecasts decode the normal and flipped passes as one
+`[x; -x]` call, so both passes' decode caches and activations are live at once.
+The same suite on an RTX A6000 (November 16, 2026; driver 575.57.08 with the
+CUDA 13.0 compat libraries, otherwise the stack above) reproduced the rows above
+on the previous two-call code (2.43 / 2.72 / 3.64 GiB for the 16-series row).
+With the batched call, two runs each measured:
+
+| HTTP workload | Peak allocated | Peak reserved | Sampled device peak |
+| --- | ---: | ---: | ---: |
+| 1 series, C128, H96 | 0.87 GiB | 0.94 GiB | 1.87 GiB |
+| 16 series, C8192, H1024 | 3.66 GiB | 4.16 GiB | 5.08 GiB |
+| Four maximum requests in one forward, four bounded model calls | 3.67 GiB | 4.16 GiB | 5.08 GiB |
+
+Work units and row limits are unchanged: they already charge both flips and
+count user series.
+
+The historical whole-forecast peaks above do not measure the current block
 implementation's temporary attention packs or combined flip-pass batch.
-The current block probes measured up to 3.67 GiB Torch allocated, 4.03 GiB
-reserved and 5.05 GiB sampled device residency, while persistent KV stayed at
-1.73 GiB. These finite synthetic probes are not exact memory guarantees across
+The earlier block probes used separate sign prefills. They measured up to
+3.67 GiB Torch allocated, 4.03 GiB reserved and 5.05 GiB sampled device
+residency, while persistent KV stayed at 1.73 GiB. Recheck the block-capacity
+peak with the batched prefill before using those figures for deployment.
+These finite synthetic probes are not exact memory guarantees across
 all inputs, hardware or package versions. NVML sampling can miss brief peaks.
 Record a new baseline before raising caps or comparing performance; capacity
 checks make no throughput claim.
