@@ -353,7 +353,7 @@ def _child(args):
         if not torch.cuda.is_available():
             raise RuntimeError('This manual benchmark requires CUDA')
         properties = torch.cuda.get_device_properties(0)
-        ensure_worker_gpu({'gpu': {'uuid': str(getattr(properties, 'uuid', ''))}}, monitor.uuid)
+        ensure_worker_gpu({'gpu': {'uuid': getattr(properties, 'uuid', None)}}, monitor.uuid, require_uuid=True)
         directory = snapshot_download(MODEL_ID, revision=MODEL_REVISION, local_files_only=True,
                                       allow_patterns=['config.json', 'model.safetensors'])
         runtime = TimesFMRuntime({})

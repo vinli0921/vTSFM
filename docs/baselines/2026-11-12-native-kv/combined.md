@@ -248,7 +248,7 @@ Use the [manual guide](../../timesfm-native-kv.md) at the measured source, with
 the unchanged pinned Linux TimesFM environment and cached data/weights:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 NVIDIA_TF32_OVERRIDE=0
+export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 NVIDIA_TF32_OVERRIDE=0
 export OMP_NUM_THREADS=4 TRITON_F32_DEFAULT=ieee
 export VTSFM_RUN_TIMESFM_NATIVE_KV=1 PYTHONPATH=src:tests:.
 export TRITON_CACHE_DIR="$PWD/results/combined-triton-ieee"

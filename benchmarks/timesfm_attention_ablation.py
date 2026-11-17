@@ -251,6 +251,8 @@ def main():
         parser.error('Set TRITON_F32_DEFAULT=ieee before launching the diagnostic')
     if os.environ.get('NVIDIA_TF32_OVERRIDE') != '0' or os.environ.get('CUDA_VISIBLE_DEVICES') != str(args.gpu):
         parser.error('Set NVIDIA_TF32_OVERRIDE=0 and CUDA_VISIBLE_DEVICES to the selected physical GPU index before launch')
+    if os.environ.get('CUDA_DEVICE_ORDER') != 'PCI_BUS_ID':
+        parser.error('Set CUDA_DEVICE_ORDER=PCI_BUS_ID before launching the diagnostic')
     args.output = args.output.expanduser().resolve()
     args.output.mkdir(parents=True, exist_ok=False)
     metadata = dict(_source_metadata(), benchmark='timesfm-precomputed-attention-ablation',
@@ -273,7 +275,7 @@ def main():
         torch.set_float32_matmul_precision('highest')
         torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = False
         properties = torch.cuda.get_device_properties(0)
-        ensure_worker_gpu({'gpu': {'uuid': str(getattr(properties, 'uuid', ''))}}, monitor.uuid)
+        ensure_worker_gpu({'gpu': {'uuid': getattr(properties, 'uuid', None)}}, monitor.uuid, require_uuid=True)
         metadata.update(python=sys.version, gpu=monitor.metadata(), packages=_installed_metadata(),
                         torch_cuda_runtime=torch.version.cuda,
                         precision={'dtype': 'float32', 'TRITON_F32_DEFAULT': os.environ['TRITON_F32_DEFAULT'],
