@@ -39,11 +39,12 @@ def _run(tmp_path, shift):
     cases = [{"case": _case(name, [1., 2., 3., 4.], [5., 6.]), "expected": [_EXPECTED[name]]}
              for name in ("first", "second", "third")]
     return {"cases": cases, "spec": SimpleNamespace(model_id="unit-test"), "session": _Session(shift),
-            "url": "http://unused", "output": tmp_path, "metadata": {"checks": []}}
+            "url": "http://unused", "parity_timeout_s": 60,
+            "output": tmp_path, "metadata": {"checks": []}}
 
 
 def test_parity_failure_is_recorded_and_later_cases_still_run(tmp_path):
-    run = _run(tmp_path, {"second": 3 * 2 ** -12})  # three FP32 steps near 3,000
+    run = _run(tmp_path, {"second": 3 * 2 ** -12})  # Exceeds the existing absolute floor at zero.
     with pytest.raises(pytest.fail.Exception, match="1 of 3 accuracy cases failed:\nsecond: second: series 0"):
         accuracy.test_observed_forecast_quality_preserves_native(run)
     checks = run["metadata"]["checks"]
