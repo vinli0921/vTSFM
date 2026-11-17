@@ -30,6 +30,8 @@ class MemoryMetrics:
         return self.bench_memory_stats()
 
     def bench_memory_stats(self):
+        from torch._dynamo import config, utils
+
         torch.cuda.synchronize(self.device)
         device = self.device
         return {
@@ -38,9 +40,24 @@ class MemoryMetrics:
             "reserved_bytes": torch.cuda.memory_reserved(device),
             "peak_allocated_bytes": torch.cuda.max_memory_allocated(device),
             "peak_reserved_bytes": torch.cuda.max_memory_reserved(device),
+            "dynamo": {"unique_graphs": utils.counters.get("stats", {}).get("unique_graphs", 0),
+                       "calls_captured": utils.counters.get("stats", {}).get("calls_captured", 0),
+                       "frames_total": utils.counters.get("frames", {}).get("total", 0),
+                       "recompile_limit": config.recompile_limit},
         }
 
     def bench_memory_empty_cache(self):
         torch.cuda.synchronize(self.device)
         torch.cuda.empty_cache()
         return self.bench_memory_stats()
+
+
+    def bench_request_state(self):
+        """Live numerical-worker request/slot counts; no allocator reset or tracing."""
+        runner = self.model_runner
+        state = {'worker_requests': len(runner.requests),
+                 'worker_slots': runner.input_batch.num_reqs}
+        executor = getattr(runner.get_model(), 'block_executor', None)
+        if executor is not None:
+            state.update(executor.snapshot())
+        return state
