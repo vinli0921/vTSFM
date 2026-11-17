@@ -4,6 +4,7 @@ import json
 from vtsfm.adapters.base import AdapterSpec, FORECAST_VLLM_ARGS
 from vtsfm.adapters.forecast import ForecastSettings
 from vtsfm.execution import ExecutionCapabilities
+from .admission import DEFAULT_LIMITS
 
 MODEL_ID = 'Datadog/Toto-2.0-313m'
 MODEL_REVISION = 'a7bab288f5e95f8606f8306f86659357e1c001ef'
@@ -25,6 +26,8 @@ TOTO2 = AdapterSpec(
         '--hf-overrides', json.dumps({'architectures': ['VTSFMTotoForForecasting']}),
     ),
     supports_group_attention=True,
+    admission_limits=DEFAULT_LIMITS,
+    admission_cost='vtsfm.adapters.toto2.admission:forecast_cost',
     execution_capabilities=ExecutionCapabilities(
         max_context=FORECAST_SETTINGS.max_context, max_horizon=FORECAST_SETTINGS.max_horizon,
         quantiles=FORECAST_SETTINGS.quantiles, input_patch_size=PATCH_SIZE,

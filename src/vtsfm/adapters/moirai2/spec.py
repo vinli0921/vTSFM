@@ -4,6 +4,7 @@ import json
 from vtsfm.adapters.base import AdapterSpec, FORECAST_VLLM_ARGS
 from vtsfm.adapters.forecast import ForecastSettings
 from vtsfm.execution import ExecutionCapabilities
+from .admission import DEFAULT_LIMITS, OUTPUT_BLOCK_SIZE, PATCH_SIZE
 
 MODEL_ID = 'Salesforce/moirai-2.0-R-small'
 MODEL_REVISION = '30f43ff08c8494f4943ae1521e9d4e94a0fbb389'
@@ -12,9 +13,7 @@ FORECAST_SETTINGS = ForecastSettings(
     quantiles=(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
     default_horizon=96, default_quantiles=(0.1, 0.5, 0.9),
 )
-# From config.json at MODEL_REVISION; GPU tests check the loaded checkpoint.
-PATCH_SIZE = 16
-OUTPUT_BLOCK_SIZE = PATCH_SIZE * 4  # patch_size * num_predict_token per decoder pass
+# Patch/block constants come from the pinned config; GPU tests check the loaded checkpoint.
 MOIRAI2 = AdapterSpec(
     name='moirai2', model_id=MODEL_ID, model_revision=MODEL_REVISION,
     architectures=('VTSFMMoiraiForForecasting',),
@@ -27,6 +26,8 @@ MOIRAI2 = AdapterSpec(
                                      'num_attention_heads': 6}),
     ),
     supports_group_attention=False,
+    admission_limits=DEFAULT_LIMITS,
+    admission_cost='vtsfm.adapters.moirai2.admission:forecast_cost',
     execution_capabilities=ExecutionCapabilities(
         max_context=FORECAST_SETTINGS.max_context, max_horizon=FORECAST_SETTINGS.max_horizon,
         quantiles=FORECAST_SETTINGS.quantiles, supports_point_forecast=False,

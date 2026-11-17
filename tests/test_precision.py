@@ -264,6 +264,32 @@ def test_tiny_official_toto_runs_native_bf16_without_autocast(monkeypatch):
     assert runtime.model.patch_proj.linear1.weight.dtype == torch.bfloat16
 
 
+@pytest.mark.parametrize('dtype', ['float32', 'bfloat16'])
+@pytest.mark.parametrize('rows', [1, 2])
+def test_toto_cropped_output_owns_compact_fp32_storage(dtype, rows):
+    torch = pytest.importorskip('torch')
+    pytest.importorskip('toto2')
+    from vtsfm.adapters.toto2.runtime import TotoRuntime
+
+    horizon = 33
+    if rows == 1:
+        # Contiguous view into a still-larger backing tensor.
+        backing = torch.arange(9 * horizon + 8, dtype=getattr(torch, dtype))
+        native = backing[4:4 + 9 * horizon].reshape(9, rows, 1, horizon)
+    else:
+        backing = torch.arange(9 * rows * 64, dtype=getattr(torch, dtype))
+        native = backing.reshape(9, rows, 1, 64)[..., :horizon]
+    runtime = TotoRuntime.__new__(TotoRuntime)
+    runtime.model = SimpleNamespace(config=SimpleNamespace(patch_size=32),
+                                    forecast=lambda *args, **kwargs: native)
+    context = torch.zeros(rows, 64)
+    actual = runtime._forecast(context, torch.isfinite(context), horizon)
+    torch.testing.assert_close(actual, native[:, :, 0].permute(1, 0, 2).float(), rtol=0, atol=0)
+    assert actual.is_contiguous() and actual.storage_offset() == 0
+    assert actual.untyped_storage().nbytes() == actual.numel() * actual.element_size()
+    assert actual.untyped_storage().data_ptr() != backing.untyped_storage().data_ptr()
+
+
 @pytest.mark.gpu
 @pytest.mark.parametrize('precision', ['bf16', 'tf32'])
 def test_native_precision_rotary_tables_match_cpu_construction_on_cuda(precision, monkeypatch):

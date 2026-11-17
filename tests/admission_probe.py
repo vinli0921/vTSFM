@@ -1,4 +1,4 @@
-"""Explicit test-only worker diagnostics for TimesFM admission checks."""
+"""Explicit test-only worker diagnostics for numerical admission checks."""
 
 import json
 from pathlib import Path
@@ -29,3 +29,17 @@ class AdmissionProbeExtension(MemoryMetrics):
 
         model.forward = forward
         return {'worker_trace': str(trace)}
+
+    def admission_snapshot(self):
+        """Inspect request-owned state, separately from upstream model caches."""
+        runner = self.model_runner
+        return {
+            'worker_requests': len(runner.requests),
+            'worker_slots': runner.input_batch.num_reqs,
+            'worker_encoder_cache': len(runner.encoder_cache),
+            'worker_pooling_params': len(runner.input_batch.pooling_params),
+            'worker_pooling_states': len(runner.input_batch.pooling_states),
+            'worker_execute_state': runner.execute_model_state is not None,
+            'pooler_routes': runner.get_model().pooler.routes is not None,
+            **self.bench_memory_stats(),
+        }

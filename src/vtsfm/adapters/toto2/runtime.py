@@ -75,8 +75,10 @@ class TotoRuntime:
                   'series_ids': torch.zeros((len(target), 1), dtype=torch.long, device=target.device)}
         quantiles = self.model.forecast(inputs, horizon=horizon, decode_block_size=DECODE_BLOCK_SIZE)
         # Upstream returns [9 quantiles, rows, variates, horizon].
-        # Compute weights may be BF16; transport and prepared outputs stay FP32.
-        return quantiles[:, :, 0, :].permute(1, 0, 2).float()
+        # Public transport is FP32 and owns only the requested horizon, even
+        # when the upstream crop is already contiguous or shares padded storage.
+        output = quantiles[:, :, 0, :].permute(1, 0, 2)
+        return output.to(dtype=torch.float32, memory_format=torch.contiguous_format, copy=True)
 
 
 def compile_model(model):

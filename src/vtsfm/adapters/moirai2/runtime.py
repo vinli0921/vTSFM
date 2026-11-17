@@ -1,6 +1,7 @@
 """Tensor forecasting around the official Moirai 2.0 recursive quantile decoder."""
 
 import os
+import sys
 
 import torch
 from uni2ts.model.moirai2 import Moirai2Forecast, Moirai2Module
@@ -10,6 +11,17 @@ from vtsfm.execution import ExecutionResult, PreparedBatch
 from vtsfm.precision import PRECISION_ENV, configure_precision
 
 from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, MOIRAI2, resolve_attention_config
+
+
+class _InferenceMoiraiForecast(Moirai2Forecast):
+    def save_hyperparameters(self, *args, **kwargs):
+        # Lightning 2.6.6 otherwise keeps inspect.currentframe() in that frame's
+        # own locals, forming a cycle that also pins our caller's CUDA tensors.
+        # Supply the same constructor frame directly, preserving upstream
+        # hyperparameter collection without waiting for cyclic GC to free IO.
+        if kwargs.get('frame') is None:
+            kwargs['frame'] = sys._getframe(1)
+        return super().save_hyperparameters(*args, **kwargs)
 
 
 class MoiraiRuntime:
@@ -119,13 +131,17 @@ class MoiraiRuntime:
         # A fresh wrapper per call keeps hyperparameters from leaking between
         # requests. It holds no weights; .to() moves nothing and updates the
         # device that the recursive loop uses for its quantile tensor.
-        runner = Moirai2Forecast(
+        runner = _InferenceMoiraiForecast(
             module=self.model, prediction_length=horizon, context_length=context.shape[-1],
             target_dim=1, feat_dynamic_real_dim=0, past_feat_dynamic_real_dim=0,
         ).to(context.device).eval()
         # Upstream returns [rows, 9 quantiles, horizon] for univariate targets.
-        return runner(past_target=target.unsqueeze(-1), past_observed_target=observed.unsqueeze(-1),
-                      past_is_pad=padding)
+        quantiles = runner(past_target=target.unsqueeze(-1), past_observed_target=observed.unsqueeze(-1),
+                           past_is_pad=padding)
+        # A one-patch result can be a contiguous view into the full-context
+        # quantile grid; longer crops may retain patch-rounded predictions.
+        # Own exactly the public bytes used by shared resident accounting.
+        return quantiles.clone(memory_format=torch.contiguous_format)
 
 
 def compile_model(model):

@@ -35,3 +35,6 @@ class AdapterSpec:
     supports_group_attention: bool = False
     execution_capabilities: ExecutionCapabilities | None = None
     admission_limits: ForecastLimits | None = None
+    # CPU-only module:function; serving can validate numerical budgets before
+    # importing any model runtime or loading checkpoint weights.
+    admission_cost: str | None = None

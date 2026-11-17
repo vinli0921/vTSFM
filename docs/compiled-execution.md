@@ -108,6 +108,12 @@ optional block scheduler uses the model forward for prefill and its own
 incremental decode path. Whole-forecast results cannot qualify that block path.
 Issue #17's streaming latency and historical Chronos acceptance remain open.
 
+The selected adapter's [numerical admission limits](numerical-admission.md)
+also apply to compiled and reduced-precision requests. The published Toto and
+Moirai peak-memory measurements qualify eager FP32 with upstream attention and
+TF32 disabled. Recheck the maximum accepted requests and repeated concurrent
+waves before relying on those measurements with compilation or reduced precision.
+
 ## Matched performance and profiling
 
 On one idle GPU, use the same clean checkout and pinned data for both vTSFM
