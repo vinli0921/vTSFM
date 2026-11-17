@@ -68,7 +68,13 @@ def _point(args, torch, monitor, prefix, rows, destination):
         'execution_mode': 'cuda_graph_replay' if args.cuda_graphs else 'eager',
         'data': 'Synthetic precomputed Q/K/V, CPU generator seed 140000 + prefix*100 + rows; randn/3.',
         'timing_boundary': 'Fixed-cache replay of attention only, or four-slot update plus attention. Metadata, leases, tensor preparation and QKV/MLP/head/normalization excluded. CUDA stream elapsed includes possible CPU launch gaps; it is not summed kernel duration. Wall time includes final event synchronization, amortized over iterations.',
-        'layout_scope': 'Native uses exactly prefix+4 contiguous cache positions and an explicit causal mask; paged uses exactly the same valid positions in newly leased pages. Eager paths include output allocation; graph mode captures allocation outside timing and retains static outputs. No fragmentation or prefix-sharing experiment.',
+        'layout_scope': (
+            'The dense SDPA control uses a compact prefix+4 contiguous cache and an explicit causal mask. '
+            'The optimized full-forecast dense path uses the full padded cache width. Paged attention uses '
+            'the same valid positions in newly leased pages. Eager paths include output allocation. Graph mode '
+            'captures allocation outside timing and retains static outputs. Fragmentation and prefix sharing '
+            'are outside this diagnostic.'
+        ),
         'memory_scope': 'Both paths and inputs coexist; fixed pool bytes describe geometry only, not matched process/peak memory.',
         'rounds': [],
     }

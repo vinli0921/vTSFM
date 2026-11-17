@@ -5,9 +5,10 @@
 **Decision: retain optimized dense execution for the current eager workload.**
 The complete guarded comparison measures 387.5 ms dense versus 427.7 ms paged:
 paged mean latency is 10.38% higher. The narrower diagnostic finds a conditional
-benefit: with fixed-operation graph replay, paged update-plus-attention is 1.89×
-faster at a short prefix, but loses at long prefixes. These results support
-profiling/capture and shape-specific backend work before a production runner port.
+benefit. With fixed-operation graph replay, paged update-plus-attention is 1.89×
+faster than a compact dense SDPA control at a short prefix. The compact dense
+control is faster at long prefixes. These results support profiling/capture and
+shape-specific backend work before a production runner port.
 
 All 800 forecasts and both nine-shape diagnostic grids completed successfully.
 An earlier interrupted attempt is retained but excluded from primary results.
@@ -117,8 +118,12 @@ This separate checkpoint-free synthetic experiment uses identical precomputed
 FP32 Q/K/V with 16 heads, head size 80, scale 1 and four causal queries. Prefixes
 16/64/256 patches correspond to 512/2048/8192 observation positions. Internal
 rows 2/4/16 correspond to 1/2/8 independent series when both signs are included.
-Native TimesFM SDPA and vLLM's conservative 2D Triton backend see the same valid
-prefix, with no extra unused dense cache capacity.
+Native TimesFM SDPA uses a compact `prefix + 4` cache. vLLM's conservative 2D
+Triton backend sees the same valid positions in pages. The optimized dense
+forecast passes the full padded width to SDPA with a causal mask. At C512/H1024,
+the first decode passes 44 cache slots to optimized dense SDPA and the diagnostic
+passes 20 to compact SDPA. The graph speedup and crossover below apply to the
+compact SDPA control.
 
 Each of the nine shapes has four rotated timing paths: native/paged attention
 alone and native/paged four-slot update plus attention. Each path has four rounds,

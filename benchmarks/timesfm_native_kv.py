@@ -183,9 +183,16 @@ def _forecast(runtime, stepper, context, horizon):
         while not stepper.complete(state):
             stepper.advance([state])
         # Keep the returned tensor alive after release clears the state's copy.
-        return stepper.finalize(state)
-    finally:
-        stepper.release(state)
+        forecast = stepper.finalize(state)
+    except BaseException as error:
+        try:
+            stepper.release(state)
+        except BaseException as cleanup_error:
+            if cleanup_error is not error:
+                error.add_note(f'Forecast state release failed: {cleanup_error!r}')
+        raise
+    stepper.release(state)
+    return forecast
 
 
 def _trace_summary(path):

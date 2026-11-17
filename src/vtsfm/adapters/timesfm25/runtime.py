@@ -57,6 +57,8 @@ class TimesFMRuntime:
         return torch.cat(blocks, dim=1)[:, :horizon, 1:], spread[:, :horizon, 1:]
 
     def _forecast(self, context, observed, horizon):
+        if getattr(self.model, '_vtsfm_paged_stepper_active', False):
+            raise ValueError('TimesFM model is owned by a paged stepper. Close it before running a whole forecast.')
         if not 1 <= horizon <= self.model.os:
             raise ValueError(f'TimesFM forecast horizon must be in [1,{self.model.os}]')
         # Follow the pinned Google TimesFM 2.5 forecast closure (Apache-2.0).

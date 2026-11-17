@@ -20,8 +20,10 @@ measure the current executor.
 
 ## Execution and ownership
 
-`native_stepping.py` changes attention only on a dedicated runtime instance and
-restores its forward methods on close. It retains the original tokenizer,
+`native_stepping.py` takes exclusive ownership of the runtime's model until close.
+Close restores the original attention forwards even when lease cleanup raises.
+Run whole forecasts before constructing the paged stepper or after closing it.
+The stepper retains the original tokenizer,
 transformers/FFNs, weights, heads, outer/cumulative normalization, four-patch
 feedback, sign statistics and forecast postprocessing. Attention preserves
 **RoPE → Q/K RMS → learned Q scaling**, with backend scale **1.0**.
@@ -120,9 +122,15 @@ commit; the copied harness is its only intended working-tree difference.
 ## Precomputed attention diagnostic
 
 For a narrower comparison, `benchmarks.timesfm_attention_ablation` uses identical
-synthetic FP32 Q/K/V with 16 heads of size 80, scale 1, four causal queries and
-exactly the same valid cache prefix. It compares native TimesFM SDPA and vLLM
-2D Triton attention, each with and without four-slot cache updates:
+synthetic FP32 Q/K/V with 16 heads of size 80, scale 1 and four causal queries.
+The compact SDPA control uses exactly `prefix + 4` contiguous K/V positions.
+The optimized dense forecast path uses the full padded cache width. At
+C512/H1024, the first decode has 20 valid positions and the dense forecast
+passes all 44 cache slots to SDPA with a mask. The paged graph advantage at short
+prefixes and the crossover apply to the compact control.
+
+The diagnostic times SDPA and vLLM 2D Triton attention, each with and without
+four-slot cache updates.
 
 ```bash
 .venv-timesfm25/bin/python -m benchmarks.timesfm_attention_ablation \
