@@ -58,4 +58,6 @@ class TotoRuntime:
                   'series_ids': torch.zeros((len(target), 1), dtype=torch.long, device=target.device)}
         quantiles = self.model.forecast(inputs, horizon=horizon, decode_block_size=DECODE_BLOCK_SIZE)
         # Upstream returns [9 quantiles, rows, variates, horizon].
-        return quantiles[:, :, 0, :].permute(1, 0, 2)
+        # Cropped native output is a view over a horizon rounded up to 32. Keep
+        # only public result storage while other requests/results are resident.
+        return quantiles[:, :, 0, :].permute(1, 0, 2).contiguous()

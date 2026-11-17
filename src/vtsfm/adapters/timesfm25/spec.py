@@ -25,6 +25,7 @@ TIMESFM25 = AdapterSpec(
     ),
     supports_group_attention=False,
     admission_limits=DEFAULT_LIMITS,
+    admission_cost='vtsfm.adapters.timesfm25.admission:forecast_cost',
     execution_capabilities=ExecutionCapabilities(
         max_context=FORECAST_SETTINGS.max_context, max_horizon=FORECAST_SETTINGS.max_horizon,
         quantiles=FORECAST_SETTINGS.quantiles, input_patch_size=32, output_block_size=128,

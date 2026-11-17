@@ -150,8 +150,7 @@ class ForecastModel(nn.Module, IsAttentionFree, SupportsMultiModal):
             forecasts = (self.runtime.forecast(request.context, request.horizon) for request in requests)
         outputs = []
         for request, forecast in zip(requests, forecasts, strict=True):
-            # Moirai's current wrapper returns CPU tensors via its NumPy API.
-            # Tensor runtimes already return on the execution device.
+            # Keep the shared output boundary explicit for each tensor runtime.
             output = forecast.to(request.context.device)
             validate_forecast(request, output, len(self.settings.quantiles))
             outputs.append(output)
