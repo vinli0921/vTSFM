@@ -89,9 +89,10 @@ use the smaller numerical contract described below.
 
 ## TimesFM 2.5, Toto 2, and Moirai 2.0
 
-These adapters run complete upstream forecasts through the same vLLM pooling
-pattern. They do not add scheduling or attention optimizations. Each has its own
-environment, leaving `.venv` and the Chronos baseline unchanged:
+By default, these adapters run complete upstream forecasts through the same
+vLLM pooling pattern. TimesFM also supports opt-in forecast-block scheduling
+and batched native attention, described below. Each has its own environment,
+leaving `.venv` and the Chronos baseline unchanged:
 
 ```bash
 ./scripts/setup.sh --adapter timesfm25
