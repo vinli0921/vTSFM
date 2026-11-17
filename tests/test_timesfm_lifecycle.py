@@ -89,7 +89,7 @@ def _quiescent(control, url):
 
 
 @contextmanager
-def _server(directory, monitor):
+def _server(directory, monitor, timesfm_forecast_mode=None):
     import requests
     from benchmarks.run import OwnedProcesses, ensure_port_free, wait_ready
     from vtsfm.cli import build_vllm_command
@@ -101,20 +101,22 @@ def _server(directory, monitor):
         port = listener.getsockname()[1]
     ensure_port_free('127.0.0.1', port)
     url = f'http://127.0.0.1:{port}'
-    command, environment = build_vllm_command(
-        adapter='timesfm25', port=port, max_num_seqs=4, forecast_batch_rows=8, benchmark=True)
+    options = ({'timesfm_forecast_mode': timesfm_forecast_mode} if timesfm_forecast_mode
+               else {'max_num_seqs': 4, 'forecast_batch_rows': 8})
+    command, environment = build_vllm_command(adapter='timesfm25', port=port, benchmark=True, **options)
     # Import instrumentation only in this test's API process and worker.
     command = [sys.executable, '-c',
                'import lifecycle_probe; from vllm.entrypoints.cli.main import main; main()',
                *command[1:]]
-    command[command.index('--worker-extension-cls') + 1] = 'lifecycle_probe.LifecycleProbeExtension'
+    extension = 'GraphLifecycleProbeExtension' if timesfm_forecast_mode else 'LifecycleProbeExtension'
+    command[command.index('--worker-extension-cls') + 1] = f'lifecycle_probe.{extension}'
     command += ['--gpu-memory-utilization', '0.35', '--mm-processor-cache-gb', '0',
                 '--enable-log-requests']
     environment.update(_environment(), VLLM_SERVER_DEV_MODE='1')
     with OwnedProcesses(directory) as owner, requests.Session() as control:
         control.trust_env = False
         child = owner.spawn(command, environment, 'timesfm-lifecycle-server')
-        wait_ready(child, url, control, timeout=180)
+        wait_ready(child, url, control, timeout=360 if timesfm_forecast_mode else 180)
         _rpc(control, url, 'lifecycle_install', str(directory / 'gate'))
         yield url, control, directory / 'timesfm-lifecycle-server.log', directory / 'gate', child
     monitor.wait_idle()
@@ -295,6 +297,65 @@ def test_real_timesfm_offline_http_failure_and_cancellation(tmp_path, monkeypatc
                     checkpoint=model, execution='vLLM V1 FP32 eager', synthetic=True)
     (tmp_path / 'lifecycle-evidence.json').write_text(json.dumps(evidence, indent=2))
     print(json.dumps(evidence))
+
+
+@pytest.mark.parametrize('mode', ['dense-graph', 'paged-graph'])
+def test_timesfm_graph_owner_survives_http_disconnect_and_max_shape_fallback(tmp_path, gpu, mode):
+    from vtsfm.adapters import get_adapter
+
+    model = get_adapter('timesfm25').model_id
+    data = _case('graph', (512, 512), -1.5, horizon=1024)
+    with _server(tmp_path / mode, gpu, timesfm_forecast_mode=mode) as (url, control, log, gate, child):
+        initial = _rpc(control, url, 'bench_timesfm_forecast')
+        assert initial['capture_attempts'] == 1 and initial['calls'] == 0
+        baseline = _post(url, model, 'before-graph-disconnect', data)
+        _quiescent(control, url)
+
+        for phase in ('queued', 'inflight'):
+            if phase == 'queued':
+                control.post(url + '/pause', params={'mode': 'keep'}, timeout=10).raise_for_status()
+                cancel_data = data
+            else:
+                cancel_data = _case('__gate__', (512, 512), 3.0, horizon=1024)
+            connection = None
+            try:
+                identity = f'graph-{phase}-disconnect'
+                connection = _disconnectable(url, model, identity, cancel_data)
+                if phase == 'queued':
+                    _wait_log(log, f'Added request pooling-{identity}-')
+                else:
+                    _wait(lambda: (gate / 'entered').exists(), 'Graph request did not enter worker')
+                connection.shutdown(socket.SHUT_RDWR)
+                connection.close()
+                connection = None
+                _wait(lambda: _api_state(control, url)['api_unfinished'] == 0,
+                      'Disconnected graph request remained registered')
+            finally:
+                if connection is not None:
+                    connection.close()
+                if phase == 'queued':
+                    control.post(url + '/resume', timeout=10).raise_for_status()
+                else:
+                    (gate / 'release').write_text('release')
+            _compare(_post(url, model, f'after-graph-{phase}', data), baseline, data)
+            _quiescent(control, url)
+
+        control.post(url + '/collective_rpc', json={'method': 'bench_memory_reset'}, timeout=20).raise_for_status()
+        largest = _case('maximum-fallback', (8192,) * 16, .2, horizon=1024)
+        output = _post(url, model, 'maximum-fallback', largest)
+        assert len(output) == 16
+        assert all(len(entry['0.5']) == 1024 for entry in output)
+        memory = _rpc(control, url, 'bench_memory_stats')
+        _compare(_post(url, model, 'after-maximum-fallback', data), baseline, data)
+        _quiescent(control, url)
+        final = _rpc(control, url, 'bench_timesfm_forecast')
+        assert final['capture_attempts'] == 1 and final['fallbacks'] == 1
+        assert final['graph_replays'] == final['calls'] == 5
+        assert child.poll() is None
+        (tmp_path / f'{mode}-evidence.json').write_text(json.dumps({
+            'initial': initial, 'final': final, 'fallback_memory': memory,
+            'queued_disconnect': 'passed', 'inflight_disconnect': 'passed',
+        }, indent=2))
 
 
 @pytest.mark.usefixtures('gpu')

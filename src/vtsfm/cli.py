@@ -92,7 +92,7 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
         if timesfm_forecast_mode.startswith('paged-'):
             environment['TRITON_F32_DEFAULT'] = 'ieee'
         # The adapter owns its CUDA graph; keep the pinned vLLM bridge synchronous.
-        command += ['--no-async-scheduling']
+        command += ['--no-async-scheduling', '--served-model-name', selected.model_id]
     if max_num_seqs is not None:
         if type(max_num_seqs) is not int or max_num_seqs < 1:
             raise ValueError('max_num_seqs must be a positive integer')

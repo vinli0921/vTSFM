@@ -176,6 +176,7 @@ def test_timesfm_forecast_modes_pin_single_request_and_precision(monkeypatch, mo
     assert command[command.index('--max-num-seqs') + 1] == '1'
     assert command[command.index('--dtype') + 1] == 'float32'
     assert command[command.index('--worker-cls') + 1] == 'vtsfm.worker.ForecastWorker'
+    assert command[command.index('--served-model-name') + 1] == 'google/timesfm-2.5-200m-pytorch'
     assert '--enforce-eager' in command and '--no-async-scheduling' in command
     assert 'VTSFM_CONTINUOUS_BATCHING' not in environment
 

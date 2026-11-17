@@ -17,6 +17,7 @@ from vllm.entrypoints.serve.dev.rpc.api_router import router
 
 from vtsfm.adapters.pooling import ForecastIOProcessor
 from vtsfm.adapters.transport import decode_metadata
+from vtsfm.benchmark_memory import MemoryMetrics
 
 
 _INSTANCES = []
@@ -126,3 +127,7 @@ class LifecycleProbeExtension:
                 'pooler_has_routes': runner.get_model().pooler.routes is not None,
                 'allocated_bytes': torch.cuda.memory_allocated(),
                 'reserved_bytes': torch.cuda.memory_reserved()}
+
+
+class GraphLifecycleProbeExtension(LifecycleProbeExtension, MemoryMetrics):
+    """Combine the disconnect gate with the benchmark's graph counters."""
