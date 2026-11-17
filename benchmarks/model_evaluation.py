@@ -223,7 +223,7 @@ def signal_cases(data_dir, names=None, *, context=512, horizon=96, windows=5):
     actually recorded. Histories may contain slots causally forward-filled
     from the signal's own earlier readings; those positions are recorded and
     are never scored. Item IDs are ``<signal>/origin-<slot>``. Reads files
-    already placed by ``python -m benchmarks.prepare_data``; never downloads.
+    already placed by ``python -m benchmarks.prepare_data --assetops-signals``.
     """
     for value, label in [(context, "context"), (horizon, "horizon"), (windows, "windows")]:
         _positive_integer(value, label)
@@ -245,6 +245,8 @@ def signal_cases(data_dir, names=None, *, context=512, horizon=96, windows=5):
             raise ValueError(f"{name}: need {windows} origins with {horizon} recorded future values "
                              f"after context {context}; found {len(origins)}")
         chosen = [origins[(index * (len(origins) - 1)) // max(1, windows - 1)] for index in range(windows)]
+        imputed_positions = [[index for index in range(origin - context, origin) if not observed[index]]
+                             for origin in chosen]
         cases.append(validate_case({
             "name": f"signal-{name.replace('/', '-')}-c{context}-h{horizon}",
             "data": {"inputs": [{"target": filled[origin - context:origin], "item_id": f"{name}/origin-{origin}"}
@@ -254,8 +256,8 @@ def signal_cases(data_dir, names=None, *, context=512, horizon=96, windows=5):
                            "observed": [[True] * horizon for _ in chosen], "seasonality": signal["seasonality"]},
             "provenance": {**signal["provenance"], "origins": chosen,
                            "forecast_starts": [signal["axis"][origin] for origin in chosen],
-                           "past_imputed_positions": [[index for index in range(origin - context, origin)
-                                                       if not observed[index]] for origin in chosen],
+                           "past_imputed_positions": imputed_positions,
+                           "past_imputed_counts": [len(positions) for positions in imputed_positions],
                            "history_policy": "Recorded readings; missing slots causally forward-filled from earlier readings only",
                            "truth_policy": "Only windows whose whole horizon was recorded; no filled value is scored",
                            "sampling_unit": "Windows from one asset's signal; correlated, not independent assets"},

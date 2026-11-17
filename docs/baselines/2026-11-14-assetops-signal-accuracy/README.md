@@ -11,7 +11,7 @@ where the whole horizon was recorded. Missing history slots are causally forward
 scored. Scores below are the official native models'. Chronos-2 (separate legacy environment) is not included.
 
 ```bash
-.venv/bin/python -m benchmarks.prepare_data --output data
+.venv/bin/python -m benchmarks.prepare_data --output data --assetops-signals
 .venv/bin/python -m benchmarks.model_evaluation prepare --data-dir data \
   --assetops-signals --output data/accuracy-signals.json
 ./scripts/test-models.sh --adapter all --profile accuracy \
@@ -33,14 +33,30 @@ naive is a point forecast, so its SQL equals its MASE. Hydraulic values are one 
 seasonality 1, so its MASE scale is the one-cycle change and values above 1 are expected; compare models with
 each other and with naive there.
 
+### MetroPT history imputation
+
+Oil temperature and motor current use the same five forecast origins. In each 512-slot history,
+32–89 slots (6–17%) were forward-filled. The reported seasonal scale uses all 488 lag-24 pairs
+from each history. Restricting the scale calculation to pairs with two observed readings gives
+scales 3–12% smaller for oil temperature and 4–31% smaller for motor current across these
+origins. The reported model spreads apply to these windows and their forward-filled inputs.
+
+| Forecast origin slot | Forward-filled history slots | Lag-24 pairs with both readings observed |
+| ---: | ---: | ---: |
+| 559 | 32 | 435 |
+| 3177 | 62 | 370 |
+| 3409 | 39 | 412 |
+| 4015 | 89 | 331 |
+| 4534 | 51 | 391 |
+
 ## Answer
 
 - **"Accuracy is a tie" holds only for the chiller signals.** On both chiller signals all three models are
   within 1–3%. On the others they are not: worst ÷ best MASE is 1.33 for oil temperature, 1.16 for motor current
   and 1.44 for hydraulic pressure (1.69 in SQL). No model is best everywhere: Toto leads on the chiller and
   hydraulic signals, TimesFM on oil temperature, and Moirai/TimesFM split motor current.
-- **Every model beats seasonal naive on every signal** in MASE and SQL. The narrowest margin is Toto on oil
-  temperature (0.879 vs 0.887).
+- **All three models scored below seasonal naive on the sampled signals** in MASE and SQL. Toto's oil-temperature
+  MASE was narrowly lower at 0.879 versus 0.887 across five correlated windows.
 - **"BF16 is lossless" is not tested yet.** Native BF16 (#21, PR #57) is not on `main`; it merged into the
   compilation branch (#56). Combine an FP32 and a BF16 run with `python -m benchmarks.accuracy_table`, which then
   adds per-signal BF16 − FP32 deltas.
@@ -51,9 +67,12 @@ TimesFM matched native exactly on all 21,600 values. Toto and Moirai passed ever
 flow, where 79 (Toto) and 68 (Moirai) of 4,320 values exceed the `rtol=atol=1e-4` gate. All failures are
 forecasts within 9 of zero in series whose forecasts reach about 10,000. Measured in FP32 steps at each series'
 largest value, the largest mismatch is 5 (Toto) and 12.5 (Moirai) on condenser flow, against 2–9.5 on the
-signals that pass. The served paths therefore differ from native by a few rounding steps everywhere; near zero,
-a series in the thousands cannot be resolved to the gate's 1e-4 absolute floor in FP32. The tolerance was not
-changed. A floor that scales with series magnitude would be a separate, explicit decision.
+signals that pass. The relative tolerance contributes little near zero, so those differences can exceed
+the gate's absolute tolerance. The accuracy profile exits nonzero on these failures.
+
+Follow-up work should measure a magnitude-aware absolute floor on the reference GPU using this condenser-flow
+case and the passing signals. Include perturbed forecasts to verify that the candidate still rejects material
+deviations. The accuracy profile continues to require `rtol=atol=1e-4`.
 
 ## Limits
 

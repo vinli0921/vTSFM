@@ -135,6 +135,7 @@ def test_counter_signal_uses_one_slot_per_cycle(sources):
 @pytest.mark.parametrize("change,match", [
     (lambda rows: rows.append(dict(rows[3])), "share slot"),
     (lambda rows: rows[2].update(timestamp=(START + timedelta(seconds=900 * 2 + 300)).isoformat()), "from the 900s grid"),
+    (lambda rows: rows[2].pop("timestamp"), r"Invalid timestamp at time\.json row 2"),
     (lambda rows: rows[4].update(flow=True), "Non-numeric"),
     (lambda rows: rows[4].update(asset_id="other"), "Unexpected asset"),
 ])
@@ -155,6 +156,7 @@ def test_signal_cases_score_only_recorded_futures_with_causal_history(sources):
         case, = signal_cases(sources["data"], ["t/flow"], context=8, horizon=4, windows=3)
     origins = case["provenance"]["origins"]
     assert origins == sorted(set(origins)) and len(origins) == 3
+    assert case["provenance"]["past_imputed_counts"] == [int(origin - 8 <= 5 < origin) for origin in origins]
     assert case["evaluation"]["seasonality"] == 4
     for origin, item, truth in zip(origins, case["data"]["inputs"], case["evaluation"]["targets"]):
         assert item["item_id"] == f"t/flow/origin-{origin}"
@@ -167,7 +169,7 @@ def test_signal_cases_score_only_recorded_futures_with_causal_history(sources):
 
 def test_signal_cases_need_prepared_sources_and_enough_origins(sources):
     with patch("urllib.request.urlopen", side_effect=_no_download):
-        with pytest.raises(ValueError, match="run python -m benchmarks.prepare_data"):
+        with pytest.raises(ValueError, match=r"python -m benchmarks\.prepare_data --assetops-signals"):
             signal_cases(sources["data"], ["c/pressure"])
     prepare_data.fetch_sources(sources["data"], checkout=sources["checkout"])
     with pytest.raises(ValueError, match="origins"):

@@ -3,9 +3,9 @@
 
 Standard library only. ``assetops_sources.json`` pins every AssetOpsBench sensor
 file this repository uses, plus the named signals built from them. The CLI
-downloads any pinned file not yet in ``<output>/source/`` (each checked against
-its SHA256), then builds the MetroPT fixture used by the integration,
-performance and default accuracy checks.
+prepares the MetroPT fixture used by the integration, performance and default
+accuracy checks. ``--assetops-signals`` also fetches files used by the named
+signals. Each source is cached in ``<output>/source/`` and verified by SHA256.
 
 The fixture is a NumPy-compatible data.npz containing ``series`` with shape
 [7, 5116], dtype float32, and a provenance manifest. The source has 560 wholly
@@ -156,9 +156,9 @@ def _numeric(value, name, index):
 def load_signal(data_dir: Path, name: str, *, sources: dict | None = None) -> dict:
     """Load one pinned signal as a regular series with an observed mask.
 
-    Never downloads: run this module's CLI first. Timestamp axes are placed on
-    a grid of ``step_seconds`` starting at the first reading; each reading goes
-    to its nearest slot and must lie within a quarter step of it. Counter axes
+    Run this module's CLI with ``--assetops-signals`` to prepare the local
+    sources. Each timestamp goes to the nearest slot on a ``step_seconds`` grid
+    and must lie within a quarter step of it. Counter axes
     (e.g. hydraulic ``cycle``) use one slot per integer step. Slots without a
     reading are ``None`` with ``observed`` false; two readings in one slot are
     an error. Returns ``values``, ``observed``, ``axis`` labels, ``seasonality``
@@ -171,7 +171,8 @@ def load_signal(data_dir: Path, name: str, *, sources: dict | None = None) -> di
     file_name, column, axis = signal["file"], signal["column"], signal["axis"]
     path = Path(data_dir) / "source" / file_name
     if not path.is_file():
-        raise ValueError(f"Missing {path}; run python -m benchmarks.prepare_data first")
+        raise ValueError(f"Missing {path}. Run python -m benchmarks.prepare_data --assetops-signals "
+                         "with --output set to your data directory.")
     content = path.read_bytes()
     if sha256(content) != sources["files"][file_name]["sha256"]:
         raise ValueError(f"{path} does not match its pinned SHA256")
@@ -189,7 +190,10 @@ def load_signal(data_dir: Path, name: str, *, sources: dict | None = None) -> di
             continue
         key = row.get(axis["field"])
         if "step_seconds" in axis:
-            key = datetime.fromisoformat(key)
+            try:
+                key = datetime.fromisoformat(key)
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"Invalid {axis['field']} at {file_name} row {index}: {key!r}") from error
         elif type(key) is not int:
             raise ValueError(f"Non-integer {axis['field']} at {file_name} row {index}")
         readings.append((key, index, value))
@@ -419,18 +423,23 @@ def prepare(output_dir: Path, source_file: Path | None = None) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--output", "--output-dir", dest="output_dir", type=Path, default=Path("data"))
-    parser.add_argument("--source-file", type=Path, help="Use an offline MetroPT fixture copy; the pinned SHA256 is still verified")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--source-file", type=Path, help="Prepare only MetroPT from a verified local copy")
+    selection.add_argument("--assetops-signals", action="store_true", help="Also fetch files used by the pinned signals")
     parser.add_argument("--assetops-checkout", type=Path,
-                        help="Copy pinned files from a local AssetOpsBench checkout instead of downloading")
+                        help="Copy requested files from a local AssetOpsBench checkout instead of downloading")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     output = args.output_dir if args.output_dir.is_absolute() else root / args.output_dir
-    output.mkdir(parents=True, exist_ok=True)
     if args.source_file is not None:
-        (output / "source").mkdir(exist_ok=True)
-        atomic_write(output / "source/metro_pump_1.json", fetch_source(args.source_file, output / "unused"))
-    fetched = fetch_sources(output, checkout=args.assetops_checkout)
-    manifest = prepare(output)
+        manifest = prepare(output, args.source_file)
+        fetched = {"metro_pump_1.json": "copied"}
+    else:
+        names = {"metro_pump_1.json"}
+        if args.assetops_signals:
+            names.update(signal["file"] for signal in SOURCES["signals"].values())
+        fetched = fetch_sources(output, sorted(names), checkout=args.assetops_checkout)
+        manifest = prepare(output)
     print(json.dumps({"output_dir": str(output.resolve()), "sources": fetched,
                       "array": manifest["array"], "benchmark": manifest["benchmark"]}, indent=2))
 

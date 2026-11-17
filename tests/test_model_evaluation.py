@@ -14,6 +14,7 @@ import zipfile
 import numpy as np
 import pytest
 
+from benchmarks import prepare_data
 from benchmarks.model_evaluation import (
     QUANTILES,
     _causal_fill,
@@ -55,6 +56,40 @@ def case_for_scores(pasts=None, targets=None, observed=None, seasonality=1):
         "parameters": {"prediction_length": len(targets[0]), "quantile_levels": list(QUANTILES)}},
         "evaluation": {"targets": targets, "observed": observed, "seasonality": seasonality},
         "provenance": {"fixture": "artificial unit-test values, not benchmark data"}}
+
+
+@pytest.mark.parametrize("mode,expected", [
+    ("default", {"metro_pump_1.json"}),
+    ("offline", set()),
+    ("signals", {"metro_pump_1.json", "chiller_6.json", "hydraulic_pump_1.json"}),
+])
+def test_prepare_data_cli_fetches_only_requested_sources(prepared_data, tmp_path, monkeypatch, mode, expected):
+    source_file = prepared_data / "unit-test-source.json"
+    payloads = {"metro_pump_1.json": source_file.read_bytes(), "chiller_6.json": b"[]",
+                "hydraulic_pump_1.json": b"[{}]"}
+    for name, payload in payloads.items():
+        monkeypatch.setitem(prepare_data.SOURCES["files"][name], "sha256", hashlib.sha256(payload).hexdigest())
+
+    downloaded = []
+
+    def read_pinned_file(request, **kwargs):
+        name = request.full_url.rsplit("/", 1)[-1]
+        assert name in expected, f"Unexpected download: {name}"
+        downloaded.append(name)
+        return io.BytesIO(payloads[name])
+
+    args = ["prepare_data", "--output", str(tmp_path)]
+    if mode == "offline":
+        args += ["--source-file", str(source_file)]
+    if mode == "signals":
+        args.append("--assetops-signals")
+    monkeypatch.setattr(sys, "argv", args)
+    with patch("urllib.request.urlopen", side_effect=read_pinned_file):
+        prepare_data.main()
+
+    assert set(downloaded) == expected and len(downloaded) == len(expected)
+    assert {path.name for path in (tmp_path / "source").iterdir()} == expected | {"metro_pump_1.json"}
+    assert (tmp_path / "data_manifest.json").is_file()
 
 
 def test_assetops_origins_are_observed_chronological_and_reproducible(prepared_data):

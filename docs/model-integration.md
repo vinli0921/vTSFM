@@ -191,13 +191,15 @@ change the three model environments' dependency baselines.
 here (commit and SHA256) and names the signals built from them. The default
 signals are Chiller 6 supply temperature and condenser water flow, MetroPT oil
 temperature and motor current, and hydraulic `PS1` pressure. `prepare_data`
-downloads any pinned file missing from `data/source/` and verifies the rest, so
-it only needs to run once. `--assetops-checkout PATH` copies from a local
-AssetOpsBench checkout instead. To evaluate another `iot/*.json` signal, pin
-its file and add a signal entry; nothing downloads unpinned files.
+prepares MetroPT by default. `--assetops-signals` also fetches the files used
+by the named signals. It verifies and reuses any requested files already in
+`data/source/`. Add `--assetops-checkout PATH` to copy missing files from a
+local AssetOpsBench checkout. Use `--source-file PATH` to prepare only MetroPT
+offline from a verified local copy. To evaluate another `iot/*.json` signal,
+pin its file and add a signal entry.
 
 ```bash
-.venv/bin/python -m benchmarks.prepare_data --output data
+.venv/bin/python -m benchmarks.prepare_data --output data --assetops-signals
 .venv/bin/python -m benchmarks.model_evaluation prepare --data-dir data \
   --assetops-signals --output data/accuracy-signals.json
 ./scripts/test-models.sh --profile accuracy --cases data/accuracy-signals.json --gpu 0
@@ -206,17 +208,20 @@ its file and add a signal entry; nothing downloads unpinned files.
 Each signal becomes one case: five forecast origins, by default C512/H96,
 whose whole horizon was recorded. Readings are placed on the signal's time
 grid (15 minutes for Chiller 6, hourly for MetroPT) or one slot per hydraulic
-cycle. Missing history slots are causally forward-filled and recorded; missing
-future slots are never scored. Seasonality is 96, 24 and 1 respectively.
+cycle. Missing history slots are causally forward-filled. The case provenance
+records their positions and counts for each window. Every scored future slot
+is observed. Seasonality is 96, 24 and 1 respectively.
 Hydraulic cycles have no calendar meaning, so its seasonal naive is last-value
 naive and its MASE scale is the one-cycle change; compare models with each
 other and with naive there, not with 1.
 
-Every accuracy run ends by writing `accuracy_table.md` and `accuracy_table.csv`:
-native MAE, MASE and SQL per model and signal, seasonal-naive scores, counts of
-scaled and zero-scale series, and the largest served-minus-native SQL
-difference. Combine runs at different precisions into one model × signal ×
-dtype table, with model spread and reduced-precision deltas:
+An accuracy run writes `accuracy_table.md` and `accuracy_table.csv` after the
+selected adapters finish. The tables summarize all available scores from the
+run, including native MAE, MASE and SQL per model and signal, seasonal-naive
+scores, counts of scaled and zero-scale series, and the largest
+served-minus-native SQL difference. Combining runs at different precisions
+produces a model × signal × dtype table with model spread and reduced-precision
+deltas.
 
 ```bash
 python3 -m benchmarks.accuracy_table results/model-accuracy/FP32_RUN \
@@ -227,11 +232,11 @@ SQL is the harness's quantile approximation of a scaled CRPS. Windows come from
 one asset per signal and are correlated; treat the table as evidence about
 these signals, not a model ranking.
 
-An accuracy run scores every case before failing, and the table marks signals
-whose cases failed parity. On the reference A100, Toto and Moirai fail the
-unchanged `1e-4` gate only on condenser water flow: forecasts near zero in a
-series reaching about 10,000 differ from native by a few FP32 rounding steps,
-the same margin that passes on smaller signals. See the
+An accuracy run scores every usable case before exiting with a nonzero status
+for any parity failure. The table marks affected signals. On the reference A100,
+Toto and Moirai fail the `rtol=atol=1e-4` gate only on condenser water flow.
+Forecasts near zero in a series reaching about 10,000 differ from native by a
+few FP32 rounding steps. See the
 [November 14 baseline](baselines/2026-11-14-assetops-signal-accuracy/README.md).
 
 ## Performance profile
