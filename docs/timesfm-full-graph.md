@@ -1,10 +1,12 @@
 # TimesFM complete-forecast CUDA graph experiment
 
 See the [measured four-arm results](baselines/2026-11-13-full-forecast-graphs/README.md)
-for source pins, setup/memory costs, validation and measurement limits.
+for source pins, setup/memory costs, validation and measurement limits. Those
+measurements used separate sign prefills. Rerun all four arms to measure the
+current batched prefill.
 
 `FixedForecast` in `adapters/timesfm25/full_graph.py` captures the complete
-numerical forecast in one CUDA graph: outer normalization, both sign prefills,
+numerical forecast in one CUDA graph: outer normalization, one prefill for both signs,
 all continuation blocks and running statistics, both heads, quantile correction,
 denormalization and positivity handling. It uses the optimized stepper and shared
 neural helper; no decoder is replaced by a cached prediction.
@@ -18,8 +20,8 @@ implemented. Construct another owner when geometry changes.
 ## Capture and ownership
 
 Dense prefill uses a known-position hook to avoid upstream CUDA-scalar slice
-bounds. Paged execution freezes every prefill/continuation metadata tensor and
-holds independent `(series, sign)` leases until owner destruction. All warmup,
+bounds. Paged execution freezes one stream-major prefill plan and one plan
+per continuation, holding independent `(series, sign)` leases until owner destruction. All warmup,
 capture, replay and teardown use the arena's owning CUDA stream.
 
 GPU initialization and counter/statistics resets are captured on every forecast.

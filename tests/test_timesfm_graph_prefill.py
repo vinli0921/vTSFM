@@ -68,3 +68,35 @@ def test_prefill_checks_full_query_capacity_before_cache_mutation(model):
     for cache, before in zip(caches, original, strict=True):
         for name in ('key', 'value', 'next_index', 'num_masked'):
             torch.testing.assert_close(getattr(cache, name), getattr(before, name), rtol=0, atol=0)
+
+
+def test_paged_graph_freezes_one_prefill_plan_for_both_signs(monkeypatch):
+    from types import SimpleNamespace
+
+    from vtsfm.adapters.timesfm25 import full_graph
+
+    class PlanArena:
+        def __init__(self, *args, **kwargs):
+            self.allocations = {}
+            self.plans = []
+
+        def reserve(self, identity, capacity):
+            self.allocations[identity] = capacity
+
+        def add_plan(self, identities, start, queries):
+            assert all(name in self.allocations for name in identities)
+            self.plans.append((identities, start, queries))
+
+        def close(self):
+            self.allocations.clear()
+
+    monkeypatch.setattr(full_graph._PagedStepper, '_arena_type', PlanArena)
+    model = tiny_model()
+    with full_graph._PagedStepper(SimpleNamespace(model=model), rows=2, patches=3, horizon=257) as stepper:
+        routes = stepper.identities[0] + stepper.identities[1]
+        assert len(set(routes)) == 4
+        assert stepper.arena.plans == [(routes, 0, 3), (routes, 3, 4), (routes, 7, 4)]
+        assert set(stepper.arena.allocations.values()) == {11}
+        assert all('forward' not in vars(layer.attn) for layer in model.stacked_xf)
+    assert not stepper.arena.allocations
+    assert not hasattr(model, '_vtsfm_paged_stepper_active')

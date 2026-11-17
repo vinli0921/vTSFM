@@ -12,7 +12,7 @@ import time
 import torch
 
 from .block_decode import _decode_positions, block_decode_forward
-from .native_stepping import PagedTimesFMStepper
+from .native_stepping import PagedTimesFMStepper, _run_cleanups
 from .paged_cache import PagedCacheArena
 from .stepping import TimesFMStepper
 
@@ -56,20 +56,18 @@ class _PagedStepper(PagedTimesFMStepper):
         try:
             # All prefills now use the shared explicit helper. Restore the
             # native model immediately; it is never monkeypatched for replay.
-            for attention, original in self._original:
-                attention.forward = original
-            self._original.clear()
+            self._restore_attention()
             self.identities = tuple(tuple(f'graph-sign-{sign}-row-{row}' for row in range(rows))
                                     for sign in range(2))
-            for names in self.identities:
-                for identity in names:
-                    self.arena.reserve(identity, capacity)
-                self.arena.add_plan(names, 0, patches)
+            # Prefill and every continuation use the same stream-major order.
             all_names = self.identities[0] + self.identities[1]
+            for identity in all_names:
+                self.arena.reserve(identity, capacity)
+            self.arena.add_plan(all_names, 0, patches)
             for block in range((horizon - 1) // 128):
                 self.arena.add_plan(all_names, patches + block * 4, 4)
-        except BaseException:
-            self.close()
+        except BaseException as error:
+            _run_cleanups((self.close,), primary_error=error)
             raise
 
     def initialize(self, context, horizon):
@@ -120,8 +118,8 @@ class FixedForecast:
 
     ``run`` includes finite-input validation, device-to-device input staging and
     output cloning in both modes. Shape, horizon, cache plans and leases are
-    frozen at construction. The graph contains outer normalization, both sign
-    prefills, all continuation blocks, both heads and quantile postprocessing.
+    frozen at construction. The graph contains outer normalization, batched
+    sign prefill, all continuation blocks, both heads and quantile postprocessing.
     Capture/setup and persistent slot ownership are outside steady-state timing.
     """
 
