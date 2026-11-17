@@ -3,8 +3,9 @@
 """Experimental fixed-shape complete forecasts, eager or one CUDA graph.
 
 Finite equal-length contiguous CUDA FP32 inputs only. The optimized stepper owns
-all numerical operations; these private subclasses freeze cache geometry and
-remove prefill scalar readbacks. No serving flag selects this implementation.
+all numerical operations. These private subclasses freeze cache geometry and
+remove prefill scalar readbacks. The serving policy uses this owner for its
+fixed shape.
 """
 
 import time

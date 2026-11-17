@@ -4,6 +4,10 @@ The experimental `--timesfm-forecast-mode` option selects a dense or paged
 forecast inside the TimesFM vLLM V1 pooling worker. Use the pinned Linux
 TimesFM environment and a compatible NVIDIA GPU.
 
+See the [A100 HTTP benchmark](baselines/2026-11-17-timesfm-graph-http/README.md)
+for latency, throughput, GPU memory, and native forecast parity across all four
+modes.
+
 ```bash
 ./scripts/serve.sh --adapter timesfm25 --timesfm-forecast-mode dense-graph --port 8001
 ```
@@ -59,10 +63,12 @@ time, worker setup and first-request latency are saved separately. The harness
 records Torch allocator counters and whole-device NVML memory throughout the
 steady-state measurements.
 
-The A100 lifecycle checks passed for dense and paged graphs. The tests
+The A100 lifecycle checks passed for dense and paged graphs before the
+batched sign-prefill merge. The tests
 disconnect a queued request and another request that has entered the worker,
 then verify the original owner still serves correctly. Both modes also handled
 an eager B16/C8192/H1024 fallback while retaining the graph. Peak Torch
 allocation during the fallback was 2,491 MiB for dense and 2,532 MiB for paged.
-This is a fallback capacity check. The benchmark checks output parity against
-the native reference on its own input cases.
+The HTTP benchmark on the merged revision covers native parity and the small
+fallback. The lifecycle check covers client disconnects and maximum-shape
+capacity.
