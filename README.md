@@ -52,7 +52,8 @@ Use a Linux machine with an NVIDIA GPU and a compatible NVIDIA driver. The
 reference machine has an A100-SXM4-40GB and driver 595.91.07. TimesFM, Toto, and
 Moirai use CUDA 13.0 Torch binaries; the Chronos baseline uses CUDA 12.8. Setup
 does not install or change drivers. Model downloads need network access and disk
-space; keep weights outside Git.
+space; keep weights outside Git. On Columbia's Insomnia cluster, whose drivers
+predate CUDA 13, follow [the Insomnia setup guide](docs/insomnia.md).
 
 ```bash
 ./scripts/setup.sh
@@ -89,9 +90,10 @@ use the smaller numerical contract described below.
 
 ## TimesFM 2.5, Toto 2, and Moirai 2.0
 
-These adapters run complete upstream forecasts through the same vLLM pooling
-pattern. They do not add scheduling or attention optimizations. Each has its own
-environment, leaving `.venv` and the Chronos baseline unchanged:
+By default, these adapters run complete upstream forecasts through the same
+vLLM pooling pattern. TimesFM also supports opt-in forecast-block scheduling
+and batched native attention, described below. Each has its own environment,
+leaving `.venv` and the Chronos baseline unchanged:
 
 ```bash
 ./scripts/setup.sh --adapter timesfm25

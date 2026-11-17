@@ -153,7 +153,13 @@ def test_normal_and_flipped_streams_use_their_own_feedback_statistics(runtime):
     stepper.prefill([state])
     normal, flipped = state.passes
     assert normal.feedback.untyped_storage().data_ptr() != flipped.feedback.untyped_storage().data_ptr()
-    assert normal.caches[0].key.untyped_storage().data_ptr() != flipped.caches[0].key.untyped_storage().data_ptr()
+    # A singleton keeps the stacked [x; -x] prefill allocation: the two flip
+    # streams may share storage but must own disjoint row ranges of it.
+    for mine, other in zip(normal.caches, flipped.caches, strict=True):
+        for a, b in ((mine.key, other.key), (mine.value, other.value)):
+            a_end = a.data_ptr() + a.numel() * a.element_size()
+            b_end = b.data_ptr() + b.numel() * b.element_size()
+            assert a_end <= b.data_ptr() or b_end <= a.data_ptr()
     expected = []
     for stream in state.passes:
         n, mu, sigma = stream.last_n, stream.last_mu, stream.last_sigma

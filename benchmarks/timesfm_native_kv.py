@@ -183,9 +183,16 @@ def _forecast(runtime, stepper, context, horizon):
         while not stepper.complete(state):
             stepper.advance([state])
         # Keep the returned tensor alive after release clears the state's copy.
-        return stepper.finalize(state)
-    finally:
-        stepper.release(state)
+        forecast = stepper.finalize(state)
+    except BaseException as error:
+        try:
+            stepper.release(state)
+        except BaseException as cleanup_error:
+            if cleanup_error is not error:
+                error.add_note(f'Forecast state release failed: {cleanup_error!r}')
+        raise
+    stepper.release(state)
+    return forecast
 
 
 def _trace_summary(path):
@@ -346,7 +353,7 @@ def _child(args):
         if not torch.cuda.is_available():
             raise RuntimeError('This manual benchmark requires CUDA')
         properties = torch.cuda.get_device_properties(0)
-        ensure_worker_gpu({'gpu': {'uuid': str(getattr(properties, 'uuid', ''))}}, monitor.uuid)
+        ensure_worker_gpu({'gpu': {'uuid': getattr(properties, 'uuid', None)}}, monitor.uuid, require_uuid=True)
         directory = snapshot_download(MODEL_ID, revision=MODEL_REVISION, local_files_only=True,
                                       allow_patterns=['config.json', 'model.safetensors'])
         runtime = TimesFMRuntime({})

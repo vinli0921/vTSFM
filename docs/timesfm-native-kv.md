@@ -13,10 +13,17 @@ PR #61's optimized block executor, with a small attention/cache boundary shared
 by dense and paged execution. Reproduce each report at its recorded revision;
 the original separate-sign prototype is at `be7fd68`.
 
+The current stepper uses #68's stream-major batch for both prefill and
+continuation, with a separate page lease for every (series, sign). The published
+forecast timings used separate sign prefills. Repeat the matched runs below to
+measure the current executor.
+
 ## Execution and ownership
 
-`native_stepping.py` changes attention only on a dedicated runtime instance and
-restores its forward methods on close. It retains the original tokenizer,
+`native_stepping.py` takes exclusive ownership of the runtime's model until close.
+Close restores the original attention forwards even when lease cleanup raises.
+Run whole forecasts before constructing the paged stepper or after closing it.
+The stepper retains the original tokenizer,
 transformers/FFNs, weights, heads, outer/cumulative normalization, four-patch
 feedback, sign statistics and forecast postprocessing. Attention preserves
 **RoPE → Q/K RMS → learned Q scaling**, with backend scale **1.0**.
@@ -55,7 +62,7 @@ are unchanged. `TRITON_F32_DEFAULT=ieee` must precede Triton import/compilation.
 Torch's TF32 flags alone do not specify Triton `tl.dot` input precision.
 
 ```bash
-export CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 NVIDIA_TF32_OVERRIDE=0
+export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 NVIDIA_TF32_OVERRIDE=0
 export OMP_NUM_THREADS=4 TRITON_F32_DEFAULT=ieee
 export TRITON_CACHE_DIR="$PWD/results/native-kv-triton-ieee"
 export VTSFM_RUN_TIMESFM_NATIVE_KV=1 PYTHONPATH=src:tests:.
@@ -115,9 +122,15 @@ commit; the copied harness is its only intended working-tree difference.
 ## Precomputed attention diagnostic
 
 For a narrower comparison, `benchmarks.timesfm_attention_ablation` uses identical
-synthetic FP32 Q/K/V with 16 heads of size 80, scale 1, four causal queries and
-exactly the same valid cache prefix. It compares native TimesFM SDPA and vLLM
-2D Triton attention, each with and without four-slot cache updates:
+synthetic FP32 Q/K/V with 16 heads of size 80, scale 1 and four causal queries.
+The compact SDPA control uses exactly `prefix + 4` contiguous K/V positions.
+The optimized dense forecast path uses the full padded cache width. At
+C512/H1024, the first decode has 20 valid positions and the dense forecast
+passes all 44 cache slots to SDPA with a mask. The paged graph advantage at short
+prefixes and the crossover apply to the compact control.
+
+The diagnostic times SDPA and vLLM 2D Triton attention, each with and without
+four-slot cache updates.
 
 ```bash
 .venv-timesfm25/bin/python -m benchmarks.timesfm_attention_ablation \

@@ -9,9 +9,10 @@ The results below remain the earlier eager and isolated-attention study.
 **Decision: retain optimized dense execution for the current eager workload.**
 The complete guarded comparison measures 387.5 ms dense versus 427.7 ms paged:
 paged mean latency is 10.38% higher. The narrower diagnostic finds a conditional
-benefit: with fixed-operation graph replay, paged update-plus-attention is 1.89×
-faster at a short prefix, but loses at long prefixes. These results support
-profiling/capture and shape-specific backend work before a production runner port.
+benefit. With fixed-operation graph replay, paged update-plus-attention is 1.89×
+faster than a compact dense SDPA control at a short prefix. The compact dense
+control is faster at long prefixes. These results support profiling/capture and
+shape-specific backend work before a production runner port.
 
 All 800 forecasts and both nine-shape diagnostic grids completed successfully.
 An earlier interrupted attempt is retained but excluded from primary results.
@@ -27,12 +28,14 @@ not native GPUModelRunner/EngineCore or HTTP enablement.
 Measured source: `62f61f1f09aa460bd4f0bdbbfe73779e4aa099c1`, clean checkout.
 Model/executor source is unchanged from the validated implementation and
 interrupted attempt at `04f8eb60eabffb62c9a1a6e4b420f1a3124d09e1`.
-The branch reuses PR #61's TimesFM executor/tests at
+The measured implementation used PR #61's TimesFM executor/tests at
 `58a3c843984c932f0eaf837a79fa496872260120`, adding an optional attention boundary.
-PR #61 must land first; its copied source overlap should be resolved before
-merging this experiment. No other changes from that PR are assumed by this study.
+The current implementation also includes PR #68's batched sign prefill. The
+numbers below are the historical control with separate sign prefills; rerun
+both arms before attributing any result to the current implementation.
 
-Both forecast paths share `_advance_passes` and `block_decode_forward`, including
+Both measured forecast paths share `_advance_passes` and
+`block_decode_forward`, including
 normal/flipped fusion, running statistics, tokenizer, QKV, RoPE, Q/K RMS, learned
 query scaling, projections, FFNs, both heads and forecast assembly. Both keep two
 separate sign calls during prefill. The optional boundary supplies metadata,
@@ -119,8 +122,12 @@ This separate checkpoint-free synthetic experiment uses identical precomputed
 FP32 Q/K/V with 16 heads, head size 80, scale 1 and four causal queries. Prefixes
 16/64/256 patches correspond to 512/2048/8192 observation positions. Internal
 rows 2/4/16 correspond to 1/2/8 independent series when both signs are included.
-Native TimesFM SDPA and vLLM's conservative 2D Triton backend see the same valid
-prefix, with no extra unused dense cache capacity.
+Native TimesFM SDPA uses a compact `prefix + 4` cache. vLLM's conservative 2D
+Triton backend sees the same valid positions in pages. The optimized dense
+forecast passes the full padded width to SDPA with a causal mask. At C512/H1024,
+the first decode passes 44 cache slots to optimized dense SDPA and the diagnostic
+passes 20 to compact SDPA. The graph speedup and crossover below apply to the
+compact SDPA control.
 
 Each of the nine shapes has four rotated timing paths: native/paged attention
 alone and native/paged four-slot update plus attention. Each path has four rounds,
@@ -245,7 +252,7 @@ Use the [manual guide](../../timesfm-native-kv.md) at the measured source, with
 the unchanged pinned Linux TimesFM environment and cached data/weights:
 
 ```bash
-export CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 NVIDIA_TF32_OVERRIDE=0
+export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 NVIDIA_TF32_OVERRIDE=0
 export OMP_NUM_THREADS=4 TRITON_F32_DEFAULT=ieee
 export VTSFM_RUN_TIMESFM_NATIVE_KV=1 PYTHONPATH=src:tests:.
 export TRITON_CACHE_DIR="$PWD/results/combined-triton-ieee"
