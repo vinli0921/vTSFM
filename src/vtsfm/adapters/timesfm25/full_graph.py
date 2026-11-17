@@ -181,13 +181,14 @@ class FixedForecast:
             self.stepper.release(state)
 
     @torch.inference_mode()
-    def run(self, context):
+    def run(self, context, *, prevalidated=False):
+        """Run one forecast; a serving caller may have already checked finiteness."""
         if self._closed:
             raise ValueError('Full-forecast owner is closed')
         if (not isinstance(context, torch.Tensor) or tuple(context.shape) != self.shape
                 or context.dtype != torch.float32 or context.device != self.device):
             raise ValueError('Full-forecast input shape/device/dtype requires a new owner')
-        if not torch.isfinite(context).all():
+        if not prevalidated and not torch.isfinite(context).all():
             raise ValueError('Full-forecast inputs must be finite; mask changes need a new owner')
         caller = torch.cuda.current_stream(self.device)
         self.stream.wait_stream(caller)

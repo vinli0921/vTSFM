@@ -13,11 +13,17 @@ from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TIMESFM25
 class TimesFMRuntime:
     def __init__(self, config):
         self.model = timesfm.TimesFM_2p5_200M_torch(torch_compile=False).model
+        self.fixed_forecast = None
 
     @torch.inference_mode()
     def forecast(self, context, horizon):
         """Forecast [rows, 9, horizon] from finite histories with left NaN padding."""
         context = context.to(device=next(self.model.parameters()).device, dtype=torch.float32)
+        policy = getattr(self, 'fixed_forecast', None)
+        if policy is not None:
+            output = policy.try_forecast(context, horizon)
+            if output is not None:
+                return output
         return self._forecast(context, torch.isfinite(context), horizon)
 
     @torch.inference_mode()

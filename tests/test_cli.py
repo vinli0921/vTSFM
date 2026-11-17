@@ -157,3 +157,81 @@ def test_continuous_mode_selects_its_pinned_bridge_and_bounded_queue(monkeypatch
         build_vllm_command(adapter='toto2', continuous_batching=True)
     with pytest.raises(ValueError, match='positive integer'):
         build_vllm_command(adapter='timesfm25', forecast_queue_limit=0)
+
+
+@pytest.mark.parametrize('mode,triton_precision', [
+    ('dense-graph', None), ('paged-graph', 'ieee'),
+    ('dense-eager', None), ('paged-eager', 'ieee'),
+])
+def test_timesfm_forecast_modes_pin_single_request_and_precision(monkeypatch, mode, triton_precision):
+    from vtsfm.cli import build_vllm_command
+
+    monkeypatch.setenv('VTSFM_TIMESFM_FORECAST_MODE', 'inherited-mode')
+    monkeypatch.setenv('NVIDIA_TF32_OVERRIDE', '1')
+    monkeypatch.delenv('TRITON_F32_DEFAULT', raising=False)
+    command, environment = build_vllm_command(adapter='timesfm25', timesfm_forecast_mode=mode)
+    assert environment['VTSFM_TIMESFM_FORECAST_MODE'] == mode
+    assert environment['NVIDIA_TF32_OVERRIDE'] == '0'
+    assert environment.get('TRITON_F32_DEFAULT') == triton_precision
+    assert command[command.index('--max-num-seqs') + 1] == '1'
+    assert command[command.index('--dtype') + 1] == 'float32'
+    assert command[command.index('--worker-cls') + 1] == 'vtsfm.worker.ForecastWorker'
+    assert '--enforce-eager' in command and '--no-async-scheduling' in command
+    assert 'VTSFM_CONTINUOUS_BATCHING' not in environment
+
+
+def test_forecast_mode_never_leaks_into_an_unselected_launch(monkeypatch):
+    from vtsfm.cli import build_native_command, build_vllm_command
+
+    monkeypatch.setenv('VTSFM_TIMESFM_FORECAST_MODE', 'paged-graph')
+    for builder, kwargs in ((build_vllm_command, {'adapter': 'timesfm25'}),
+                            (build_vllm_command, {'adapter': 'toto2'}),
+                            (build_native_command, {})):
+        _, environment = builder(**kwargs)
+        assert environment.get('VTSFM_TIMESFM_FORECAST_MODE') is None
+
+
+@pytest.mark.parametrize('mode', ['', 'unknown', True])
+def test_forecast_mode_rejects_unknown_execution_modes(mode):
+    from vtsfm.cli import build_vllm_command
+
+    with pytest.raises(ValueError, match='--timesfm-forecast-mode'):
+        build_vllm_command(adapter='timesfm25', timesfm_forecast_mode=mode)
+
+
+@pytest.mark.parametrize('settings,reason', [
+    ({'adapter': 'toto2'}, 'TimesFM.*vtsfm'),
+    ({'adapter': 'chronos2', 'backend': 'chronos2'}, 'TimesFM.*vtsfm'),
+    ({'continuous_batching': True}, '--continuous-batching'),
+    ({'forecast_batch_rows': 2}, '--forecast-batch-rows'),
+    ({'max_num_seqs': 2}, 'exactly one scheduled request'),
+    ({'max_num_seqs': True}, 'exactly one scheduled request'),
+])
+def test_forecast_mode_rejects_incompatible_serving_paths(settings, reason):
+    from vtsfm.cli import build_vllm_command
+
+    with pytest.raises(ValueError, match=reason):
+        build_vllm_command(**({'adapter': 'timesfm25', 'timesfm_forecast_mode': 'dense-graph'} | settings))
+
+
+def test_forecast_mode_dry_run_is_cpu_safe_and_shows_experimental_settings():
+    script = '''
+import sys
+from vtsfm.cli import main
+main(['serve', '--adapter', 'timesfm25', '--timesfm-forecast-mode', 'paged-graph', '--dry-run'])
+assert not any(name.split('.')[0] in ('torch', 'vllm', 'timesfm', 'triton') for name in sys.modules)
+'''
+    process = subprocess.run([sys.executable, '-c', script], check=True, capture_output=True, text=True)
+    environment = json.loads(process.stdout)['environment']
+    assert environment['VTSFM_TIMESFM_FORECAST_MODE'] == 'paged-graph'
+    assert environment['NVIDIA_TF32_OVERRIDE'] == '0'
+    assert environment['TRITON_F32_DEFAULT'] == 'ieee'
+
+
+def test_native_cli_rejects_forecast_mode_instead_of_ignoring_it():
+    process = subprocess.run([sys.executable, '-m', 'vtsfm.cli', 'serve', '--backend', 'native',
+                              '--timesfm-forecast-mode', 'dense-graph', '--dry-run'],
+                             capture_output=True, text=True)
+    assert process.returncode == 2
+    assert '--timesfm-forecast-mode applies to the vLLM backend' in process.stderr
+    assert 'Traceback' not in process.stderr

@@ -15,6 +15,7 @@ from vtsfm.config import (
     DEFAULT_PORT, FORECAST_BATCH_ROWS_ENV, MAX_FORECAST_BATCH_ROWS, PYTHON_VERSION, serving_pins,
 )
 from vtsfm.adapters import get_adapter, list_adapters
+from vtsfm.adapters.timesfm25.graph_config import FORECAST_GRAPH_SHAPE, FORECAST_MODE_ENV, FORECAST_MODES
 from vtsfm.admission import FORECAST_LIMITS_ENV, resolve_limits
 from vtsfm.stepping import CONTINUOUS_ENV
 
@@ -33,6 +34,7 @@ def _environment(benchmark: bool = False) -> dict[str, str]:
     environment['OMP_NUM_THREADS'] = '4' if benchmark else environment.get('OMP_NUM_THREADS', '4')
     environment['HF_HUB_DISABLE_TELEMETRY'] = '1'
     environment.pop('VLLM_SERVER_DEV_MODE', None)
+    environment.pop(FORECAST_MODE_ENV, None)
     return environment
 
 
@@ -43,8 +45,21 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
                        forecast_limits: str | None = None,
                        continuous_batching: bool = False,
                        forecast_queue_limit: int | None = None,
+                       timesfm_forecast_mode: str | None = None,
                        ) -> tuple[list[str], dict[str, str]]:
     selected = get_adapter(adapter)
+    if timesfm_forecast_mode is not None:
+        if timesfm_forecast_mode not in FORECAST_MODES:
+            raise ValueError(f'--timesfm-forecast-mode must be one of {", ".join(FORECAST_MODES)}')
+        if selected.name != 'timesfm25' or backend != 'vtsfm':
+            raise ValueError('--timesfm-forecast-mode supports only TimesFM through the vtsfm backend')
+        if continuous_batching:
+            raise ValueError('--timesfm-forecast-mode cannot be combined with --continuous-batching')
+        if forecast_batch_rows is not None:
+            raise ValueError('--timesfm-forecast-mode cannot be combined with --forecast-batch-rows')
+        if max_num_seqs is not None and (type(max_num_seqs) is not int or max_num_seqs != 1):
+            raise ValueError('--timesfm-forecast-mode requires exactly one scheduled request (--max-num-seqs 1)')
+        max_num_seqs = 1
     if backend == 'vtsfm':
         plugin = 'vtsfm'
     elif backend in ('upstream', selected.upstream_io_plugin) and selected.upstream_io_plugin:
@@ -71,6 +86,13 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
     command = [str(Path(sys.executable).with_name('vllm')), 'serve', selected.model_id,
                '--revision', selected.model_revision, '--host', host, '--port', str(port),
                '--io-processor-plugin', plugin, *selected.vllm_args]
+    if timesfm_forecast_mode is not None:
+        environment[FORECAST_MODE_ENV] = timesfm_forecast_mode
+        environment['NVIDIA_TF32_OVERRIDE'] = '0'
+        if timesfm_forecast_mode.startswith('paged-'):
+            environment['TRITON_F32_DEFAULT'] = 'ieee'
+        # The adapter owns its CUDA graph; keep the pinned vLLM bridge synchronous.
+        command += ['--no-async-scheduling']
     if max_num_seqs is not None:
         if type(max_num_seqs) is not int or max_num_seqs < 1:
             raise ValueError('max_num_seqs must be a positive integer')
@@ -181,6 +203,9 @@ def main(argv: list[str] | None = None) -> int:
                        help='Enable experimental TimesFM forecast-block scheduling (default: 4 slots, 16 fused rows)')
     serve.add_argument('--forecast-queue-limit', type=int,
                        help='Maximum TimesFM HTTP requests waiting/running (block mode default: 16; overflow: 503)')
+    rows, context, horizon = FORECAST_GRAPH_SHAPE
+    serve.add_argument('--timesfm-forecast-mode', choices=FORECAST_MODES,
+                       help=f'Experimental TimesFM/vtsfm whole forecast at B{rows}/C{context}/H{horizon}; one scheduled request')
     serve.add_argument('--dry-run', action='store_true', help='Print a command without starting a server')
     diagnostic = commands.add_parser('doctor', help='Check the installed environment')
     diagnostic.add_argument('--cpu', action='store_true', help='Skip imports and checks of GPU dependencies')
@@ -208,6 +233,9 @@ def main(argv: list[str] | None = None) -> int:
             kwargs['forecast_limits'] = args.forecast_limits
             kwargs['continuous_batching'] = args.continuous_batching
             kwargs['forecast_queue_limit'] = args.forecast_queue_limit
+            kwargs['timesfm_forecast_mode'] = args.timesfm_forecast_mode
+        elif args.timesfm_forecast_mode is not None:
+            raise ValueError('--timesfm-forecast-mode applies to the vLLM backend')
         elif args.max_num_seqs is not None:
             raise ValueError('--max-num-seqs applies to the vLLM backend')
         elif args.forecast_batch_rows is not None:
@@ -222,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         keys = ('VTSFM_ADAPTER', 'VLLM_PLUGINS', 'VLLM_USE_V2_MODEL_RUNNER', 'VLLM_SERVER_DEV_MODE',
                 'OMP_NUM_THREADS', 'HF_HUB_DISABLE_TELEMETRY', FORECAST_BATCH_ROWS_ENV, FORECAST_LIMITS_ENV,
-                CONTINUOUS_ENV)
+                CONTINUOUS_ENV, FORECAST_MODE_ENV, 'NVIDIA_TF32_OVERRIDE', 'TRITON_F32_DEFAULT')
         print(json.dumps({'command': command, 'environment': {
             key: environment[key] for key in keys if key in environment}}, indent=2))
         return 0
