@@ -158,7 +158,7 @@ def test_compile_selection_reaches_profiles_and_integration_adds_retained_shape_
     result = run(root, env, '--adapter', 'moirai2', '--profile', profile,
                  '--forecast-execution', 'compile')
     assert result.returncode == 0, result.stderr
-    record, = calls(env)
+    record, = (entry for entry in calls(env) if entry['args'][:2] == ['-m', 'pytest'])
     assert record['execution'] == 'compile'
     assert record['fp_fusion'] == '0'
     assert ('tests/test_compiled_forecast_runtime.py' in record['args']) == (profile == 'integration')
