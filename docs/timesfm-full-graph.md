@@ -10,7 +10,7 @@ denormalization and positivity handling. It uses the optimized stepper and share
 neural helper; no decoder is replaced by a cached prediction.
 
 This is an opt-in manual experiment, separate from serving. The owner accepts
-one fixed batch/context/horizon of finite equal-length CUDA FP32 histories.
+one fixed batch/context/horizon of finite, equal-length, contiguous CUDA FP32 histories.
 Calls are serialized; concurrent use of one owner is unsupported. Dynamic shape
 caches, ragged masks, per-block joins, admission and request cancellation are not
 implemented. Construct another owner when geometry changes.
@@ -26,6 +26,11 @@ GPU initialization and counter/statistics resets are captured on every forecast.
 Paged prefixes are overwritten before use; Python trace state is not replayed.
 The graph is synchronized and destroyed before its plans or leases are freed.
 Leases deliberately remain held between forecasts, including the eager control.
+
+Captured kernels keep the original parameter addresses and precision settings.
+Replacing a model parameter or changing TF32 or matmul precision settings after
+capture can silently change eager results while graph replays continue using the
+captured configuration. Close and recreate the owner after either change.
 
 Both modes use the same `run` wrapper: validate finite inputs, copy into the
 static CUDA input, execute the complete eager body or replay its graph, and
@@ -48,9 +53,10 @@ export PYTHONPATH=src:tests:.
 ```
 
 The checks cover A→B→A changed inputs, retained output ownership, independent
-rows, C31/32/33/512/8192 and H1/128/129/257/1024. All nine quantiles retain
-`rtol=atol=1e-4`. They also reject geometry/nonfinite-input changes and check
-lease/pool release after close. Full-model tests stay manual, not in Modal.
+rows, batches of 1/2/8, C31/32/33/512/8192 and H1/128/129/257/1024. All nine
+quantiles use `rtol=atol=1e-4`. They also reject changes to input shape, device,
+dtype, contiguity and finiteness, and check paged resource release after close
+or a capture failure. Full-model tests run manually on an idle GPU.
 
 ## Matched performance comparison
 
