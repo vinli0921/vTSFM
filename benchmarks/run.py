@@ -229,8 +229,10 @@ def backend_command(backend, port, gpu_index):
     return command, environment
 
 
-def ensure_worker_gpu(worker_config, selected_uuid):
+def ensure_worker_gpu(worker_config, selected_uuid, *, require_uuid=False):
     worker_uuid = worker_config.get("gpu", {}).get("uuid")
+    if require_uuid and (not worker_uuid or not selected_uuid):
+        raise RuntimeError("Cannot verify the CUDA worker GPU without a UUID")
     # Torch reports a bare UUID; NVML includes the GPU- prefix.
     normalize = lambda value: str(value).lower().removeprefix("gpu-")
     if worker_uuid and normalize(worker_uuid) != normalize(selected_uuid):

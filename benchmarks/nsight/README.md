@@ -41,3 +41,40 @@ Notes:
 - CUDA tracing adds roughly 6–8 µs per kernel launch. Compare traced splits against the untraced
   timing runs, not against absolute traced wall times.
 - TimesFM admission caps a request at 16 rows, so its batched HTTP round is `0b16`.
+
+## Compare TimesFM flip batching (issue #52)
+
+Use two clean checkouts on the same idle GPU. Run these commands for each
+revision, with the same pinned data, model, FP32 settings, and environment.
+Set `RUN_LABEL` to a unique value for each pass and repeat the
+untraced comparison in baseline, candidate, candidate, baseline order.
+
+```bash
+# From the root of each checkout. Set NSYS, AOB_ROOT and HF_HOME as above.
+export PYTHONPATH="$PWD/src"
+py=.venv-timesfm25/bin/python
+out="results/timesfm-flip-$(git rev-parse --short HEAD)-${RUN_LABEL:?set a unique run label}"
+mkdir -p "$out"
+git rev-parse HEAD > "$out/revision.txt"
+
+# The runtime path bypasses HTTP admission. 0b runs B64/C2048/H96.
+for round in 1 0b16 0b; do
+  "$py" benchmarks/nsight/driver.py --model timesfm25 --path runtime \
+    --round "$round" --warm 10 --n 100 --out "$out/runtime-${round}.json"
+done
+
+# Trace separately so profiling overhead stays out of the latency comparison.
+"$NSYS" profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none \
+  --capture-range=cudaProfilerApi --capture-range-end=stop \
+  -o "$out/runtime-b1" "$py" benchmarks/nsight/driver.py --model timesfm25 \
+  --path runtime --round 1 --n 50 --out "$out/runtime-b1-traced.json"
+"$NSYS" export --type sqlite -o "$out/runtime-b1.sqlite" "$out/runtime-b1.nsys-rep"
+"$py" benchmarks/nsight/analyze.py "$out/runtime-b1.sqlite" > "$out/runtime-b1-analysis.jsonl"
+```
+
+Use the untraced JSON files for mean, p50 and p95 and the trace for kernels and
+launch calls per request. For matched HTTP timings and traces, use
+`benchmarks/nsight/run.sh <output> timesfm25` on each revision. It uses B16 for
+the batched HTTP round. Report any B64 runtime OOM or slowdown as a measured
+result. Recheck peak memory for the admitted whole and block workloads as
+described in [numerical admission](../../docs/numerical-admission.md).

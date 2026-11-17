@@ -234,16 +234,20 @@ class TimesFMStepper:
             sigmas.append(sigma)
         context_mu, context_sigma = torch.stack(means, 1), torch.stack(sigmas, 1)
         inputs = revin(inputs, context_mu, context_sigma, reverse=False)
-        from .block_decode import block_decode_forward
-
-        (_, _, point, _), _ = block_decode_forward(
-            self.model, inputs, masks, [stream.caches for stream in streams],
+        (_, _, point, _), _ = self._block_decode_forward(
+            states, inputs, masks, [stream.caches for stream in streams],
             [state.cache_position for _ in range(2) for state in states],
         )
         point = revin(point, context_mu, context_sigma, reverse=True).reshape(-1, self.model.m, self.model.o, self.model.q)[:, -1]
         for stream in range(2):
             section = slice(stream * rows, (stream + 1) * rows)
             self._store(states, stream, None, tuple(value[section] for value in (n, mu, sigma)), point[section])
+
+    def _block_decode_forward(self, states, inputs, masks, cache_groups, positions):
+        """Keep the optimized executor shared with experimental attention paths."""
+        from .block_decode import block_decode_forward
+
+        return block_decode_forward(self.model, inputs, masks, cache_groups, positions)
 
     def _finish_block(self, states):
         for state in states:

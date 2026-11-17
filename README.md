@@ -155,6 +155,10 @@ API process (overflow: HTTP 503). Final responses are unchanged. See
 pinned V1 scheduler/worker hooks, parity tests, memory measurements and offered-load
 benchmarks. This mode is opt-in.
 
+An isolated [native-attention/KV feasibility experiment](docs/timesfm-native-kv.md)
+reuses vLLM's block allocator and Triton backend for TimesFM. It is a manual
+in-process prototype, separate from the serving paths above.
+
 Toto uses Python 3.12.12 and a pinned upstream revision. Moirai keeps its
 NumPy 1.26 dependencies and explicitly overrides its Torch
 upper bound and vLLM's OpenCV requirement in `scripts/moirai2-overrides.txt`.

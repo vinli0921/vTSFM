@@ -28,6 +28,11 @@ class BenchmarkResourceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "does not match"):
             ensure_worker_gpu({"gpu": {"uuid": "wrong-device"}}, "GPU-abcdef-1234")
 
+    def test_strict_worker_gpu_identity_rejects_missing_cuda_or_nvml_uuid(self):
+        for worker, device in ((None, "GPU-abc"), ("abc", "")):
+            with self.subTest(worker=worker, device=device), self.assertRaisesRegex(RuntimeError, "without a UUID"):
+                ensure_worker_gpu({"gpu": {"uuid": worker}}, device, require_uuid=True)
+
     def test_an_occupied_port_is_refused(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
             listener.bind(("127.0.0.1", 0))
