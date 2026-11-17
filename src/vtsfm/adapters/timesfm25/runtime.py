@@ -69,8 +69,14 @@ class TimesFMRuntime:
         std = values.std(dim=-1, keepdim=True)
         normalized = revin(values, mean, std, reverse=False)
 
-        forecast, spread = self._decode_quantiles(normalized, padding, horizon)
-        flipped_forecast, flipped_spread = self._decode_quantiles(-normalized, padding, horizon)
+        # Flip invariance decodes x and -x. Upstream runs two decode calls; the
+        # rows are independent, so one stream-major [x; -x] call (as in block
+        # mode) computes the same per-row values with half the kernel launches.
+        rows = normalized.shape[0]
+        both, both_spread = self._decode_quantiles(
+            torch.cat((normalized, -normalized)), padding.repeat(2, 1), horizon)
+        forecast, flipped_forecast = both[:rows], both[rows:]
+        spread, flipped_spread = both_spread[:rows], both_spread[rows:]
         forecast = (forecast - flipped_forecast.flip(-1)) / 2
         spread = (spread - flipped_spread.flip(-1)) / 2
 
