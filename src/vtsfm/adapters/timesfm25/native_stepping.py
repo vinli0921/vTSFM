@@ -49,6 +49,8 @@ class PagedTimesFMStepper(TimesFMStepper):
     and leased_cache_bytes explicitly. All work is on one CUDA stream.
     """
 
+    _arena_type = None
+
     def __init__(self, runtime, *, max_sequences=2, max_tokens=284):
         if not all(hasattr(TimesFMStepper, method)
                    for method in ('_prefill_passes', '_advance_passes', '_store', '_block_decode_forward')):
@@ -61,9 +63,10 @@ class PagedTimesFMStepper(TimesFMStepper):
                    and attention.use_rotary_position_embeddings and attention.use_per_dim_scale
                    for attention in attentions):
             raise ValueError('Native proof requires the pinned fused-QKV TimesFM attention')
-        self.arena = PagedCacheArena(self.model.x, self.model.h, self.model.hd,
-                                     2 * max_sequences, max_tokens, streams=1,
-                                     device=next(self.model.parameters()).device)
+        arena_type = self._arena_type or PagedCacheArena
+        self.arena = arena_type(self.model.x, self.model.h, self.model.hd,
+                               2 * max_sequences, max_tokens, streams=1,
+                               device=next(self.model.parameters()).device)
         self._routes = {}
         self._active = None
         self._counter = 0

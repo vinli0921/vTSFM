@@ -160,6 +160,8 @@ benchmarks. This mode is opt-in.
 An isolated [native-attention/KV feasibility experiment](docs/timesfm-native-kv.md)
 reuses vLLM's block allocator and Triton backend for TimesFM. It is a manual
 in-process prototype, separate from the serving paths above.
+The [complete-forecast CUDA graph experiment](docs/timesfm-full-graph.md) compares
+fixed-shape dense/paged forecasts with matched eager and captured execution.
 
 Toto uses Python 3.12.12 and a pinned upstream revision. Moirai keeps its
 NumPy 1.26 dependencies and explicitly overrides its Torch

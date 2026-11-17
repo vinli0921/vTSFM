@@ -159,6 +159,13 @@ Use the checkout's environments, not global Python packages:
   Its forecast/attention harnesses check GPU ownership before/after timed samples
   outside timing; retain but exclude contended points and rerun counterbalanced
   comparisons. These snapshots detect activity but do not reserve the shared GPU.
+- The [full-forecast CUDA graph experiment](docs/timesfm-full-graph.md) uses one
+  serialized, fixed finite B/C/H owner. Dense/paged eager and graph controls share
+  graph-safe prefill, validation, input staging and owned output clones. Paged
+  leases/metadata remain pinned until synchronization and graph destruction;
+  zero leases are expected after close, not between replays. Keep setup/capture
+  costs and held graph/private-pool memory distinct from steady-state timing.
+  This does not enable graphs in the HTTP/worker path or dynamic scheduling.
 
 Keep handoffs short: what changed, why, checks run, and remaining limitations.
 These conventions take inspiration from [vLLM's agent guide](https://github.com/vllm-project/vllm/blob/main/AGENTS.md),
