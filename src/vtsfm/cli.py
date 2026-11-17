@@ -16,7 +16,7 @@ from vtsfm.config import (
 )
 from vtsfm.adapters import get_adapter, list_adapters
 from vtsfm.adapters.timesfm25.graph_config import FORECAST_GRAPH_SHAPE, FORECAST_MODE_ENV, FORECAST_MODES
-from vtsfm.admission import FORECAST_LIMITS_ENV, resolve_limits
+from vtsfm.admission import FORECAST_LIMITS_ENV, resolve_cost, resolve_limits
 from vtsfm.stepping import CONTINUOUS_ENV
 
 
@@ -100,28 +100,28 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
             raise ValueError('Concurrent forecast routing is enabled only for TimesFM, Toto, and Moirai')
         command[command.index('--max-num-seqs') + 1] = str(max_num_seqs)
     if forecast_batch_rows is not None:
-        if selected.name != 'timesfm25' or backend != 'vtsfm':
-            raise ValueError('Forecast batching currently supports only TimesFM through vTSFM')
+        if selected.admission_limits is None or backend != 'vtsfm':
+            raise ValueError('Forecast batching requires a vTSFM adapter with a numerical admission policy')
         if max_num_seqs is None or max_num_seqs < 2:
             raise ValueError('Forecast batching requires --max-num-seqs of at least 2')
         if type(forecast_batch_rows) is not int or not 2 <= forecast_batch_rows <= MAX_FORECAST_BATCH_ROWS:
             raise ValueError(f'--forecast-batch-rows must be between 2 and {MAX_FORECAST_BATCH_ROWS}')
         environment[FORECAST_BATCH_ROWS_ENV] = str(forecast_batch_rows)
-    if selected.name == 'timesfm25' and selected.admission_limits is not None:
+    if selected.admission_limits is not None:
         encoded = Path(forecast_limits).read_text() if forecast_limits is not None else None
         limits = resolve_limits(selected.admission_limits, encoded)
         slots = int(command[command.index('--max-num-seqs') + 1])
-        # TimesFM owns its model-specific cost; importing it is CPU-safe.
-        from vtsfm.adapters.timesfm25.admission import forecast_cost
+        # The adapter owns this cost; its descriptor imports no model runtime.
+        forecast_cost = resolve_cost(selected)
         limits.validate_launch(slots, forecast_cost(
             limits.max_request_rows, limits.max_context, limits.max_horizon))
         # Resolve a file once so frontend/worker see the exact same policy.
         environment[FORECAST_LIMITS_ENV] = json.dumps(asdict(limits), separators=(',', ':'))
     elif forecast_limits is not None:
-        raise ValueError('--forecast-limits currently supports only TimesFM')
+        raise ValueError('--forecast-limits requires an adapter with a numerical admission policy')
     if forecast_queue_limit is not None:
-        if selected.name != 'timesfm25' or type(forecast_queue_limit) is not int or forecast_queue_limit < 1:
-            raise ValueError('--forecast-queue-limit requires TimesFM and a positive integer')
+        if selected.admission_limits is None or type(forecast_queue_limit) is not int or forecast_queue_limit < 1:
+            raise ValueError('--forecast-queue-limit requires a numerical admission policy and a positive integer')
         command += ['--max-num-queued-reqs', str(forecast_queue_limit)]
     if continuous_batching:
         environment[CONTINUOUS_ENV] = '1'
@@ -196,13 +196,13 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument('--max-num-seqs', type=int,
                        help='Maximum scheduled forecast requests (default: 1)')
     serve.add_argument('--forecast-batch-rows', type=int,
-                       help='Enable experimental TimesFM batching with this fused series limit (2–16)')
+                       help='Enable bounded whole-forecast batching with this fused series limit (2–16)')
     serve.add_argument('--forecast-limits', metavar='JSON_FILE',
-                       help='Tighten TimesFM request/execution limits using a JSON policy file')
+                       help='Tighten the selected adapter\'s numerical limits using a JSON policy file')
     serve.add_argument('--continuous-batching', action='store_true',
                        help='Enable experimental TimesFM forecast-block scheduling (default: 4 slots, 16 fused rows)')
     serve.add_argument('--forecast-queue-limit', type=int,
-                       help='Maximum TimesFM HTTP requests waiting/running (block mode default: 16; overflow: 503)')
+                       help='Maximum numerical HTTP requests waiting/running (block default: 16; overflow: 503)')
     rows, context, horizon = FORECAST_GRAPH_SHAPE
     serve.add_argument('--timesfm-forecast-mode', choices=FORECAST_MODES,
                        help=f'Experimental TimesFM/vtsfm whole forecast at B{rows}/C{context}/H{horizon}; one scheduled request')

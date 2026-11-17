@@ -270,6 +270,18 @@ def test_forecast_matches_official(toto, case):
 
 @pytest.mark.gpu
 @requires_toto
+@pytest.mark.parametrize('rows,horizon', [(1, 1), (1, 33), (2, 33), (2, 769)])
+def test_public_output_owns_only_its_cropped_storage(toto, rows, horizon):
+    """Retaining a short forecast must not retain native padded output storage."""
+    histories = [signal(64, index / 3) for index in range(rows)]
+    actual = toto.runtime.forecast(nan_padded(toto, histories), horizon)
+    assert_forecast(actual, official(toto, histories, horizon), toto)
+    assert actual.is_contiguous()
+    assert actual.untyped_storage().nbytes() == rows * 9 * horizon * actual.element_size()
+
+
+@pytest.mark.gpu
+@requires_toto
 def test_forecast_matches_official_with_missing_observations(toto):
     """NaN gaps inside a history, including in the final context patch, which
     upstream forces to observed (with value zero)."""

@@ -4,16 +4,18 @@ The [TimesFM HTTP serving experiment](timesfm-graph-serving.md) builds on this
 fixed-owner implementation.
 
 See the [measured four-arm results](baselines/2026-11-13-full-forecast-graphs/README.md)
-for source pins, setup/memory costs, validation and measurement limits.
+for source pins, setup/memory costs, validation and measurement limits. Those
+measurements used separate sign prefills. Rerun all four arms to measure the
+current batched prefill.
 
 `FixedForecast` in `adapters/timesfm25/full_graph.py` captures the complete
-numerical forecast in one CUDA graph: outer normalization, both sign prefills,
+numerical forecast in one CUDA graph: outer normalization, one prefill for both signs,
 all continuation blocks and running statistics, both heads, quantile correction,
 denormalization and positivity handling. It uses the optimized stepper and shared
 neural helper; no decoder is replaced by a cached prediction.
 
 This page describes the in-process experiment. The owner accepts
-one fixed batch/context/horizon of finite equal-length CUDA FP32 histories.
+one fixed batch/context/horizon of finite, equal-length, contiguous CUDA FP32 histories.
 Calls are serialized; concurrent use of one owner is unsupported. Dynamic shape
 caches, ragged masks, per-block joins, admission and request cancellation are not
 implemented. Construct another owner when geometry changes.
@@ -21,14 +23,19 @@ implemented. Construct another owner when geometry changes.
 ## Capture and ownership
 
 Dense prefill uses a known-position hook to avoid upstream CUDA-scalar slice
-bounds. Paged execution freezes every prefill/continuation metadata tensor and
-holds independent `(series, sign)` leases until owner destruction. All warmup,
+bounds. Paged execution freezes one stream-major prefill plan and one plan
+per continuation, holding independent `(series, sign)` leases until owner destruction. All warmup,
 capture, replay and teardown use the arena's owning CUDA stream.
 
 GPU initialization and counter/statistics resets are captured on every forecast.
 Paged prefixes are overwritten before use; Python trace state is not replayed.
 The graph is synchronized and destroyed before its plans or leases are freed.
 Leases deliberately remain held between forecasts, including the eager control.
+
+Captured kernels keep the original parameter addresses and precision settings.
+Replacing a model parameter or changing TF32 or matmul precision settings after
+capture can silently change eager results while graph replays continue using the
+captured configuration. Close and recreate the owner after either change.
 
 Both modes use the same `run` wrapper: validate finite inputs, copy into the
 static CUDA input, execute the complete eager body or replay its graph, and
@@ -51,9 +58,10 @@ export PYTHONPATH=src:tests:.
 ```
 
 The checks cover A→B→A changed inputs, retained output ownership, independent
-rows, C31/32/33/512/8192 and H1/128/129/257/1024. All nine quantiles retain
-`rtol=atol=1e-4`. They also reject geometry/nonfinite-input changes and check
-lease/pool release after close. Full-model tests stay manual, not in Modal.
+rows, batches of 1/2/8, C31/32/33/512/8192 and H1/128/129/257/1024. All nine
+quantiles use `rtol=atol=1e-4`. They also reject changes to input shape, device,
+dtype, contiguity and finiteness, and check paged resource release after close
+or a capture failure. Full-model tests run manually on an idle GPU.
 
 ## Matched performance comparison
 

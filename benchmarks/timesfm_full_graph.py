@@ -91,8 +91,8 @@ def _point(args, runtime, torch, monitor, data, rows, length, horizon, destinati
         second = -context * 1.7 + .3
         record['input_sha256'] = hashlib.sha256(context.cpu().numpy().tobytes()).hexdigest()
         record['auxiliary_input_sha256'] = hashlib.sha256(second.cpu().numpy().tobytes()).hexdigest()
-        # Compute both independent native references before the owned model is
-        # patched/captured; never call the reference through the candidate.
+        # Compute both whole-runtime reference forecasts before constructing
+        # the fixed owner, which takes exclusive access for the paged arm.
         expected_a = runtime.forecast(context, horizon).cpu()
         expected_b = runtime.forecast(second, horizon).cpu()
         if torch.allclose(expected_a, expected_b, **TOLERANCE):
@@ -232,7 +232,7 @@ def _child(args):
         torch.set_float32_matmul_precision('highest')
         torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = False
         properties = torch.cuda.get_device_properties(0)
-        ensure_worker_gpu({'gpu': {'uuid': str(getattr(properties, 'uuid', ''))}}, monitor.uuid)
+        ensure_worker_gpu({'gpu': {'uuid': getattr(properties, 'uuid', None)}}, monitor.uuid, require_uuid=True)
         directory = snapshot_download(MODEL_ID, revision=MODEL_REVISION, local_files_only=True,
                                       allow_patterns=['config.json', 'model.safetensors'])
         runtime = TimesFMRuntime({})

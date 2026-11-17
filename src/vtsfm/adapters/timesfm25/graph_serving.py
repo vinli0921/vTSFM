@@ -29,7 +29,7 @@ class ServingFixedForecast:
             if self.owner is None:
                 raise RuntimeError('TimesFM fixed forecast owner was not initialized by the routing worker')
             before = self.owner.replay_count
-            output = self.owner.run(context, prevalidated=True)
+            output = self.owner.run(context.contiguous(), prevalidated=True)
             self.graph_replays += self.owner.replay_count - before
             self.calls += 1
             return output

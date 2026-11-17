@@ -68,7 +68,13 @@ def _point(args, torch, monitor, prefix, rows, destination):
         'execution_mode': 'cuda_graph_replay' if args.cuda_graphs else 'eager',
         'data': 'Synthetic precomputed Q/K/V, CPU generator seed 140000 + prefix*100 + rows; randn/3.',
         'timing_boundary': 'Fixed-cache replay of attention only, or four-slot update plus attention. Metadata, leases, tensor preparation and QKV/MLP/head/normalization excluded. CUDA stream elapsed includes possible CPU launch gaps; it is not summed kernel duration. Wall time includes final event synchronization, amortized over iterations.',
-        'layout_scope': 'Native uses exactly prefix+4 contiguous cache positions and an explicit causal mask; paged uses exactly the same valid positions in newly leased pages. Eager paths include output allocation; graph mode captures allocation outside timing and retains static outputs. No fragmentation or prefix-sharing experiment.',
+        'layout_scope': (
+            'The dense SDPA control uses a compact prefix+4 contiguous cache and an explicit causal mask. '
+            'The optimized full-forecast dense path uses the full padded cache width. Paged attention uses '
+            'the same valid positions in newly leased pages. Eager paths include output allocation. Graph mode '
+            'captures allocation outside timing and retains static outputs. Fragmentation and prefix sharing '
+            'are outside this diagnostic.'
+        ),
         'memory_scope': 'Both paths and inputs coexist; fixed pool bytes describe geometry only, not matched process/peak memory.',
         'rounds': [],
     }
@@ -245,6 +251,8 @@ def main():
         parser.error('Set TRITON_F32_DEFAULT=ieee before launching the diagnostic')
     if os.environ.get('NVIDIA_TF32_OVERRIDE') != '0' or os.environ.get('CUDA_VISIBLE_DEVICES') != str(args.gpu):
         parser.error('Set NVIDIA_TF32_OVERRIDE=0 and CUDA_VISIBLE_DEVICES to the selected physical GPU index before launch')
+    if os.environ.get('CUDA_DEVICE_ORDER') != 'PCI_BUS_ID':
+        parser.error('Set CUDA_DEVICE_ORDER=PCI_BUS_ID before launching the diagnostic')
     args.output = args.output.expanduser().resolve()
     args.output.mkdir(parents=True, exist_ok=False)
     metadata = dict(_source_metadata(), benchmark='timesfm-precomputed-attention-ablation',
@@ -267,7 +275,7 @@ def main():
         torch.set_float32_matmul_precision('highest')
         torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = False
         properties = torch.cuda.get_device_properties(0)
-        ensure_worker_gpu({'gpu': {'uuid': str(getattr(properties, 'uuid', ''))}}, monitor.uuid)
+        ensure_worker_gpu({'gpu': {'uuid': getattr(properties, 'uuid', None)}}, monitor.uuid, require_uuid=True)
         metadata.update(python=sys.version, gpu=monitor.metadata(), packages=_installed_metadata(),
                         torch_cuda_runtime=torch.version.cuda,
                         precision={'dtype': 'float32', 'TRITON_F32_DEFAULT': os.environ['TRITON_F32_DEFAULT'],

@@ -10,6 +10,7 @@ normalization, transformer layers, heads and forecast assembly stay upstream.
 No CLI serving flag selects this implementation. Use only the manual harness.
 """
 
+from functools import partial
 from types import MethodType
 
 import torch
@@ -17,6 +18,24 @@ from timesfm.torch.util import DecodeCache
 
 from .paged_cache import PagedCacheArena
 from .stepping import TimesFMStepper
+
+
+_NO_FORWARD_OVERRIDE = object()
+
+
+def _run_cleanups(actions, primary_error=None):
+    """Attempt every cleanup and keep the original error as the one raised."""
+    first_error = primary_error
+    for action in actions:
+        try:
+            action()
+        except BaseException as cleanup_error:
+            if first_error is None:
+                first_error = cleanup_error
+            elif cleanup_error is not first_error:
+                first_error.add_note(f'Additional paged TimesFM cleanup failure: {cleanup_error!r}')
+    if primary_error is None and first_error is not None:
+        raise first_error
 
 
 class PagedTimesFMStepper(TimesFMStepper):
@@ -30,29 +49,50 @@ class PagedTimesFMStepper(TimesFMStepper):
     and leased_cache_bytes explicitly. All work is on one CUDA stream.
     """
 
-    _arena_type = PagedCacheArena
+    _arena_type = None
+    _patch_attention = True
 
     def __init__(self, runtime, *, max_sequences=2, max_tokens=284):
         if not all(hasattr(TimesFMStepper, method)
-                   for method in ('_prefill_pass', '_advance_passes', '_store', '_block_decode_forward')):
+                   for method in ('_prefill_passes', '_advance_passes', '_store', '_block_decode_forward')):
             raise ValueError('Native proof requires the recorded optimized stepper and attention seam')
+        if getattr(runtime.model, '_vtsfm_paged_stepper_mode', None) is not None:
+            raise ValueError('TimesFM model is already owned by a paged stepper')
         super().__init__(runtime)
-        self.arena = self._arena_type(self.model.x, self.model.h, self.model.hd,
-                                     2 * max_sequences, max_tokens, streams=1,
-                                     device=next(self.model.parameters()).device)
+        attentions = [layer.attn for layer in self.model.stacked_xf]
+        if not all(attention.fuse_qkv and not attention.use_bias
+                   and attention.use_rotary_position_embeddings and attention.use_per_dim_scale
+                   for attention in attentions):
+            raise ValueError('Native proof requires the pinned fused-QKV TimesFM attention')
+        arena_type = self._arena_type or PagedCacheArena
+        self.arena = arena_type(self.model.x, self.model.h, self.model.hd,
+                               2 * max_sequences, max_tokens, streams=1,
+                               device=next(self.model.parameters()).device)
         self._routes = {}
         self._active = None
         self._counter = 0
         self._original = []
         self._closed = False
-        for index, layer in enumerate(self.model.stacked_xf):
-            attention = layer.attn
-            if not (attention.fuse_qkv and not attention.use_bias
-                    and attention.use_rotary_position_embeddings and attention.use_per_dim_scale):
-                self.close()
-                raise ValueError('Native proof requires the pinned fused-QKV TimesFM attention')
-            self._original.append((attention, attention.forward))
-            attention.forward = MethodType(self._forward_for_layer(index), attention)
+        self.model._vtsfm_paged_stepper_mode = 'patched' if self._patch_attention else 'explicit'
+        if not self._patch_attention:
+            return
+        try:
+            for index, attention in enumerate(attentions):
+                original = vars(attention).get('forward', _NO_FORWARD_OVERRIDE)
+                self._original.append((attention, original))
+                attention.forward = MethodType(self._forward_for_layer(index), attention)
+        except BaseException as error:
+            _run_cleanups((self.close,), primary_error=error)
+            raise
+
+    def _restore_attention(self):
+        # Preserve class-level descriptor lookup for unwrapped attention.
+        for attention, original in reversed(self._original):
+            if original is _NO_FORWARD_OVERRIDE:
+                vars(attention).pop('forward', None)
+            else:
+                vars(attention)['forward'] = original
+        self._original.clear()
 
     def _forward_for_layer(self, index):
         def forward(attention, inputs_q, *, decode_cache=None, patch_mask=None):
@@ -104,30 +144,31 @@ class PagedTimesFMStepper(TimesFMStepper):
                 or 2 * context.shape[0] + len(self.arena.allocated) > self.arena.max_sequences):
             raise ValueError('Native inputs must fit the arena series slots on its CUDA device')
         state = super().initialize(context, horizon)
-        # Drop whole masked PATCH tokens only. Trimming raw histories before
-        # original outer/running normalization would change forecast semantics.
-        observed = ~state.padding
-        starts = observed.shape[1] - observed.sum(-1)
-        expected = torch.arange(observed.shape[1], device=context.device) < starts[:, None]
-        if not torch.equal(state.padding, expected) or not observed.any(-1).all():
-            super().release(state)
-            raise ValueError('Native proof supports finite histories with left padding only')
-        masked = [int(start) // self.model.p for start in starts.tolist()]
-        self._counter += 1
-        identities = tuple(tuple(f'proof-{self._counter}-sign-{stream}-row-{row}'
-                                 for row in range(state.rows)) for stream in range(2))
-        reserved = []
+        attempted = []
         try:
+            # Drop whole masked PATCH tokens only. Trimming raw histories before
+            # original outer/running normalization would change forecast semantics.
+            observed = ~state.padding
+            starts = observed.shape[1] - observed.sum(-1)
+            expected = torch.arange(observed.shape[1], device=context.device) < starts[:, None]
+            if not torch.equal(state.padding, expected) or not observed.any(-1).all():
+                raise ValueError('Native proof supports finite histories with left padding only')
+            masked = [int(start) // self.model.p for start in starts.tolist()]
+            self._counter += 1
+            identities = tuple(tuple(f'proof-{self._counter}-sign-{stream}-row-{row}'
+                                     for row in range(state.rows)) for stream in range(2))
             for stream_names in identities:
                 for identity, cut in zip(stream_names, masked):
+                    # A reservation can fail after the arena registers its lease.
+                    attempted.append(identity)
                     self.arena.reserve(identity, state.cache_capacity - cut)
-                    reserved.append(identity)
-        except BaseException:
-            for identity in reserved:
-                self.arena.release(identity)
-            super().release(state)
+            self._routes[id(state)] = (state, identities, masked)
+        except BaseException as error:
+            _run_cleanups((
+                *(partial(self.arena.release, identity) for identity in attempted),
+                partial(super().release, state),
+            ), primary_error=error)
             raise
-        self._routes[id(state)] = (state, identities, masked)
         return state
 
     def sequence_ids(self, state):
@@ -144,10 +185,10 @@ class PagedTimesFMStepper(TimesFMStepper):
                 cuts.extend(masked if not state.blocks_done else [0] * state.rows)
         self._active = tuple(identities), tuple(starts), tuple(cuts)
 
-    def _prefill_pass(self, states, stream):
-        self._activate(states, (stream,))
+    def _prefill_passes(self, states):
+        self._activate(states, (0, 1))
         try:
-            super()._prefill_pass(states, stream)
+            super()._prefill_passes(states)
         finally:
             self._active = None
 
@@ -221,35 +262,35 @@ class PagedTimesFMStepper(TimesFMStepper):
     def _free(self, state):
         route = self._routes.pop(id(state), None)
         if route is not None:
-            for stream in route[1]:
-                for identity in stream:
-                    self.arena.release(identity)
+            _run_cleanups(partial(self.arena.release, identity)
+                          for stream in route[1] for identity in stream)
 
     def _finish_block(self, states):
         super()._finish_block(states)
-        for state in states:
-            if self.complete(state):
-                self._free(state)
+        _run_cleanups(partial(self._free, state) for state in states if self.complete(state))
 
     def release(self, state):
         self._owner(state)
-        self._free(state)
-        super().release(state)
+        _run_cleanups((partial(self._free, state), partial(super().release, state)))
 
     def close(self):
         if self._closed:
+            # A failed arena close can be retried on its original stream.
+            self.arena.close()
             return
-        for state, _, _ in tuple(self._routes.values()):
-            self.release(state)
-        for attention, original in self._original:
-            attention.forward = original
-        self._original.clear()
-        self.arena.close()
-        self._active = None
-        self._closed = True
+        try:
+            _run_cleanups((
+                *(partial(self.release, state) for state, _, _ in tuple(self._routes.values())),
+                self.arena.close,
+            ))
+        finally:
+            self._restore_attention()
+            del self.model._vtsfm_paged_stepper_mode
+            self._active = None
+            self._closed = True
 
     def __enter__(self):
         return self
 
-    def __exit__(self, *args):
-        self.close()
+    def __exit__(self, exc_type, exc_value, traceback):
+        _run_cleanups((self.close,), primary_error=exc_value)

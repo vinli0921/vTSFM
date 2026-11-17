@@ -1,5 +1,9 @@
 # Complete TimesFM forecast graphs — November 13, 2026
 
+These results describe the measured revisions and their separate sign prefills.
+The current executor batches both signs at prefill. Rerun the four-arm
+comparison before using these timings for the updated executor.
+
 ## Outcome
 
 Full numerical forecast capture works for both backends. On the matched fixed
