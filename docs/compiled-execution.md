@@ -1,6 +1,7 @@
 # Compiled forecasts
 
-TimesFM, Toto and Moirai can compile their neural cores with `torch.compile`:
+The experimental `--forecast-execution compile` option uses `torch.compile`
+for the TimesFM, Toto and Moirai neural cores.
 
 ```bash
 ./scripts/serve.sh --adapter toto2 --forecast-execution compile
@@ -32,13 +33,16 @@ intermediate rounding. The body follows the pinned upstream implementation;
 FP32/TF32 keep the original layer forward. This branch includes the
 [precision controls](precision.md) from #57.
 
-The preserved behavior explains where the current implementation breaks the
-compiled graph. Earlier parity checks exercised this set of boundaries together.
-They did not establish which individual boundaries are necessary. To test a
-boundary independently, remove only that boundary in a clean experiment checkout,
-run the adapter's compiled integration profile, and keep the error statistics
-and compiler logs (`TORCH_LOGS=graph_breaks,recompiles`). Keep precision,
-checkpoint, contraction and Inductor settings fixed across the comparison.
+An earlier Moirai B16/C2048/H800 experiment failed forecast parity with
+broader compilation. The largest absolute error was about 0.00984.
+Compiling just the encoder and disabling FP contraction still missed the
+existing tolerance. Parity checks exercised the current set of boundaries
+together. They did not establish which individual boundaries are necessary.
+To test a boundary independently, remove only that boundary in a clean
+experiment checkout, run the adapter's compiled integration profile, and keep
+the error statistics and compiler logs (`TORCH_LOGS=graph_breaks,recompiles`).
+Keep precision, checkpoint, contraction and Inductor settings fixed across
+the comparison.
 
 The launcher sets `TRITON_DEFAULT_FP_FUSION=0` before Torch/Triton imports.
 Direct runtime users must set it before importing Torch. Compilation uses
@@ -62,12 +66,11 @@ and [Inductor settings](https://github.com/pytorch/pytorch/blob/v2.14.0/torch/_i
 | `upstream` (default) | Enabled | Enabled | Enabled |
 | `univariate` | Enabled | Rejected at startup | Rejected at startup |
 
-The table describes accepted settings. Earlier GPU checks covered Moirai with
+The table describes accepted settings. The combined revision's compiled FP32
+check is recorded below. Earlier GPU checks covered Moirai with
 upstream attention in eager FP32, BF16 and TF32 (#57), and in compiled FP32 and
-BF16 (#56). #46 qualified univariate attention in eager FP32. This integration
-changes the startup checks, so rerun parity for the enabled settings before
-claiming qualification on the combined revision. Compiled TF32 also needs
-separate qualification.
+BF16 (#56). #46 qualified univariate attention in eager FP32. Qualify other
+settings separately on the target revision, including compiled TF32.
 
 For `VTSFM_MOIRAI_ATTENTION=univariate`, the launcher and direct runtime select
 FP32 when precision is unspecified. The launcher sets `NVIDIA_TF32_OVERRIDE=0`
@@ -100,6 +103,10 @@ regardless of the HTTP profile's selected precision. Tiny official CPU models in
 `tests/test_compilation_models.py` additionally check parameter ownership,
 checkpoint loading and independent model instances.
 
+At `83637a9`, the combined branch passed the six compiled FP32 Moirai
+native-versus-HTTP cases with upstream attention and the retained-shape
+check. Four compiled Toto tests passed for compact output storage.
+
 On the pinned Torch 2.14/CUDA 13/vLLM 0.33 A100 stack, prior runs passed six
 native-versus-HTTP cases plus the FP32 retained-shape check for all three
 adapters. BF16 plus compilation passed six HTTP cases for Toto and Moirai.
@@ -115,6 +122,33 @@ TF32 disabled. Recheck the maximum accepted requests and repeated concurrent
 waves before relying on those measurements with compilation or reduced precision.
 
 ## Matched performance and profiling
+
+### Batch-one A100 results
+
+A local integration checkout at `f750fdd` ran the same AssetOpsBench MetroPT
+request through eager and compiled vTSFM HTTP in both orders. The A100-SXM4-40GB
+runs used vLLM 0.33.0 V1, Torch 2.14.0+cu130, FP32 with TF32 disabled, upstream
+Moirai attention, one client, 512 context points and a 96-point horizon.
+Each run completed 100 requests after ten warmups. Startup and first-request
+latency were measured separately. Parity checks were outside the timed samples.
+
+| Adapter | Eager p50 / p95 (ms), repeats 1 and 2 | Compiled p50 / p95 (ms), repeats 1 and 2 | First request (s), eager / compiled |
+| --- | --- | --- | --- |
+| TimesFM | 59.23 / 60.34, 58.53 / 60.31 | 60.14 / 65.52, 59.76 / 61.03 | 0.38 / 8.66 |
+| Toto | 123.38 / 126.08, 125.06 / 127.33 | 110.70 / 113.28, 111.07 / 112.62 | 0.42 / 6.34 |
+| Moirai | 41.91 / 43.88, 44.16 / 45.55 | 48.23 / 49.57, 48.67 / 50.32 | 0.37 / 5.77 |
+
+The first compiled worker used a fresh disk cache. Toto's warm median fell
+10–11%. TimesFM's was about 2% higher and Moirai's was 10–15% higher.
+These results cover whole forecasts on this one workload at `f750fdd`.
+
+Separate in-process Torch profiler traces at `3e3ee1d` used the same
+shape and confirmed compiler activity for all three adapters. SDPA itself
+accounted for about 4–12% of summed GPU kernel time across the six
+adapter and execution combinations. That number covers the SDPA call
+and excludes the surrounding attention work.
+
+### Reproduce
 
 On one idle GPU, use the same clean checkout and pinned data for both vTSFM
 modes. This compares compiled and eager vTSFM HTTP points at the same precision,
@@ -168,5 +202,4 @@ done
 
 Compare CUDA launches and GPU busy time per request alongside the untraced HTTP
 measurements. Review graph breaks and recompilations in a separate diagnostic run
-with `TORCH_LOGS=graph_breaks,recompiles`. No matched profile at this revision
-has established the size or direction of a speed change.
+with `TORCH_LOGS=graph_breaks,recompiles`.
