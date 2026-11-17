@@ -148,6 +148,23 @@ def test_each_model_admits_only_its_own_resolved_envelope(adapter, monkeypatch, 
         build_vllm_command(adapter=adapter, max_num_seqs=spec.admission_limits.max_scheduled_requests + 1)
 
 
+@pytest.mark.parametrize('adapter,max_rows', [('toto2', 16), ('moirai2', 8)])
+def test_compile_bf16_keeps_the_adapter_admission_limits(adapter, max_rows, monkeypatch):
+    from vtsfm.admission import FORECAST_LIMITS_ENV
+    from vtsfm.cli import build_vllm_command
+
+    monkeypatch.delenv('VTSFM_MOIRAI_ATTENTION', raising=False)
+    options = dict(adapter=adapter, forecast_execution='compile', forecast_precision='bf16',
+                   forecast_batch_rows=4, forecast_queue_limit=8)
+    command, env = build_vllm_command(**options, max_num_seqs=4)
+    policy = json.loads(env[FORECAST_LIMITS_ENV])
+    assert (policy['max_request_rows'], policy['max_scheduled_requests']) == (max_rows, 4)
+    assert (env['VTSFM_FORECAST_EXECUTION'], env['VTSFM_PRECISION']) == ('compile', 'bf16')
+    assert command[command.index('--max-num-queued-reqs') + 1] == '8'
+    with pytest.raises(ValueError, match='scheduled requests'):
+        build_vllm_command(**options, max_num_seqs=5)
+
+
 @pytest.mark.parametrize('adapter', ['timesfm25', 'toto2', 'moirai2'])
 def test_model_limits_dry_run_imports_no_runtime_packages(adapter):
     process = subprocess.run([sys.executable, '-c',

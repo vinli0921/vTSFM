@@ -6,13 +6,18 @@ from timesfm.torch.util import revin
 from torch.nn import functional as F
 
 from vtsfm.execution import ExecutionResult, PreparedBatch
+from vtsfm.precision import configure_precision
+from vtsfm.compilation import compile_core, execution_mode
 
 from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TIMESFM25
 
 
 class TimesFMRuntime:
     def __init__(self, config):
+        self.precision = configure_precision('timesfm25')
         self.model = timesfm.TimesFM_2p5_200M_torch(torch_compile=False).model
+        if execution_mode() == 'compile':
+            compile_model(self.model)
 
     @torch.inference_mode()
     def forecast(self, context, horizon):
@@ -91,3 +96,17 @@ class TimesFMRuntime:
         upper = upper.cummax(dim=-1).values[..., 1:]
         quantiles = revin(torch.cat((lower, median, upper), dim=-1), mean, std, reverse=True)
         return torch.where(positive, quantiles.clamp_min(0), quantiles).transpose(1, 2)
+
+
+def compile_model(model):
+    """Keep native norm, activation and SDPA arithmetic inside the neural core."""
+    from timesfm.torch.normalization import RMSNorm
+    from timesfm.torch.transformer import MultiHeadAttention
+
+    native_calls = []
+    for module in model.modules():
+        if isinstance(module, (RMSNorm, torch.nn.ReLU, torch.nn.SiLU, torch.nn.GELU)):
+            native_calls.append((module, 'forward'))
+        if isinstance(module, MultiHeadAttention):
+            native_calls.append((module, 'attention_fn'))
+    compile_core(model, native_calls)

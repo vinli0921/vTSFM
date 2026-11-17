@@ -50,6 +50,13 @@ For one model or an explicit output directory:
   --output results/model-integration/toto-before-change
 ```
 
+Use `--forecast-execution compile` to exercise the experimental neural compiler
+in any profile. Native references and the native HTTP backend stay eager; saved
+evidence records the per-backend mode. Compile integration also adds the
+retained-shape/full-horizon regression described in
+[compiled execution](compiled-execution.md), along with the recorded current-stack
+correctness checks. Performance comparisons remain manual.
+
 `--gpu` is a numeric physical GPU index, used consistently for CUDA visibility
 and GPU availability checks. The runner sets `CUDA_DEVICE_ORDER=PCI_BUS_ID`,
 FP32/TF32 controls, and four CPU threads. Use a different free port if needed.

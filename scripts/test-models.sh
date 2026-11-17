@@ -11,6 +11,8 @@ Usage: scripts/test-models.sh [--adapter all|timesfm25|toto2|moirai2]
                             [--requests 100] [--warmups 5] [--batches 1,4]
                             [--contexts 128,512] [--clients 1,4] [--horizon 96]
                             [--backend-order native,vtsfm]
+                            [--forecast-precision fp32|tf32|bf16]
+                            [--forecast-execution eager|compile]
 
 Run model integration checks sequentially on an idle Linux NVIDIA GPU.
 Defaults: all three adapters, GPU 0, port 18001, and a new UTC/commit directory
@@ -19,6 +21,7 @@ model environment with scripts/setup.sh --adapter NAME before running.
 Integration includes a small pinned AssetOpsBench fixture, downloaded once.
 Accuracy scores observed labels; --cases selects an optional prepared fev slice.
 Performance compares native HTTP and vLLM with matching request boundaries.
+--forecast-execution selects the vTSFM neural core; native references stay eager.
 EOF
 }
 
@@ -41,10 +44,12 @@ contexts=128,512
 clients=1,4
 horizon=96
 backend_order=native,vtsfm
+forecast_precision="${VTSFM_TEST_PRECISION:-}"
+forecast_execution="${VTSFM_TEST_EXECUTION:-eager}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
-    --adapter|--profile|--gpu|--port|--output|--data-dir|--cases|--requests|--warmups|--batches|--contexts|--clients|--horizon|--backend-order)
+    --adapter|--profile|--gpu|--port|--output|--data-dir|--cases|--requests|--warmups|--batches|--contexts|--clients|--horizon|--backend-order|--forecast-precision|--forecast-execution)
       [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || fail "Missing value for $1"
       case "$1" in
         --adapter) adapter="$2" ;;
@@ -61,6 +66,8 @@ while [[ $# -gt 0 ]]; do
         --clients) clients="$2" ;;
         --horizon) horizon="$2" ;;
         --backend-order) backend_order="$2" ;;
+        --forecast-precision) forecast_precision="$2" ;;
+        --forecast-execution) forecast_execution="$2" ;;
       esac
       shift 2 ;;
     *) fail "Unknown argument: $1" ;;
@@ -76,7 +83,16 @@ case "$profile" in
   integration|accuracy|performance) ;;
   *) fail 'Unsupported profile; use integration, accuracy, or performance' ;;
 esac
+case "$forecast_execution" in
+  eager|compile) ;;
+  *) fail '--forecast-execution must be eager or compile' ;;
+esac
 [[ -z "$cases" || "$profile" == accuracy ]] || fail '--cases requires --profile accuracy'
+case "$forecast_precision" in
+  ''|fp32|tf32) ;;
+  bf16) [[ "$adapter" != all && "$adapter" != timesfm25 ]] || fail 'Native BF16 requires --adapter toto2 or moirai2' ;;
+  *) fail '--forecast-precision must be fp32, tf32, or bf16' ;;
+esac
 [[ "$requests" =~ ^[0-9]+$ && ${#requests} -le 7 && 10#$requests -ge 1 ]] || fail '--requests must be positive'
 [[ "$warmups" =~ ^[0-9]+$ && ${#warmups} -le 7 ]] || fail '--warmups must be nonnegative'
 [[ "$horizon" =~ ^[0-9]+$ && ${#horizon} -le 4 ]] || fail '--horizon must be in [1,1024]'
@@ -107,6 +123,11 @@ fi
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 test_file="tests/test_model_$profile.py"
 [[ -f "$root/$test_file" ]] || fail "Missing $test_file"
+test_files=("$test_file")
+if [[ "$forecast_execution" == compile && "$profile" == integration ]]; then
+  test_files+=(tests/test_compiled_forecast_runtime.py)
+  [[ -f "$root/${test_files[1]}" ]] || fail "Missing ${test_files[1]}"
+fi
 if [[ -z "$data_dir" ]]; then data_dir="$root/data";
 elif [[ "$data_dir" != /* ]]; then data_dir="$PWD/$data_dir"; fi
 if [[ -n "$cases" ]]; then
@@ -138,10 +159,17 @@ printf 'adapter\tpytest_exit_code\tlog_exit_code\n' > "$summary"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$gpu"
 export VTSFM_TEST_GPU_INDEX="$gpu" VTSFM_TEST_PORT="$port"
 export VTSFM_TEST_PROFILE="$profile" VTSFM_TEST_DATA="$data_dir" VTSFM_TEST_CASES="$cases"
+export VTSFM_TEST_EXECUTION="$forecast_execution"
+if [[ "$forecast_execution" == compile ]]; then export TRITON_DEFAULT_FP_FUSION=0; fi
 export VTSFM_PERF_REQUESTS="$requests" VTSFM_PERF_WARMUPS="$warmups"
 export VTSFM_PERF_BATCHES="$batches" VTSFM_PERF_CONTEXTS="$contexts"
 export VTSFM_PERF_CLIENTS="$clients" VTSFM_PERF_HORIZON="$horizon" VTSFM_PERF_ORDER="$backend_order"
 export NVIDIA_TF32_OVERRIDE=0 OMP_NUM_THREADS=4 PYTHONUNBUFFERED=1
+unset VTSFM_PRECISION VTSFM_TEST_PRECISION
+if [[ -n "$forecast_precision" ]]; then
+  export VTSFM_TEST_PRECISION="$forecast_precision"
+  if [[ "$forecast_precision" == tf32 ]]; then export NVIDIA_TF32_OVERRIDE=1; fi
+fi
 export PYTHONPATH="$root/src:$root${PYTHONPATH:+:$PYTHONPATH}"
 
 pytest_pid=
@@ -218,7 +246,7 @@ for name in "${adapters[@]}"; do
   mkfifo -- "$fifo"
   tee "$folder/pytest.log" < "$fifo" &
   log_pid=$!
-  "$root/.venv-$name/bin/python" -m pytest -m gpu "$test_file" \
+  "$root/.venv-$name/bin/python" -m pytest -m gpu "${test_files[@]}" \
     -q -s --junitxml "$folder/junit.xml" > "$fifo" 2>&1 &
   pytest_pid=$!
   launching=0

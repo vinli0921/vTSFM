@@ -19,7 +19,8 @@ def test_observed_forecast_quality_preserves_native(served_model):
         try:
             payload = {'model': run['spec'].model_id, 'task': 'plugin', 'data': case['data']}
             save_json(run['output'] / f'{index}-request.json', payload)
-            response = run['session'].post(run['url'] + '/pooling', json=payload, timeout=180)
+            response = run['session'].post(run['url'] + '/pooling', json=payload,
+                                           timeout=run['parity_timeout_s'])
             (run['output'] / f'{index}-response.txt').write_text(response.text)
             response.raise_for_status()
             body = response.json()

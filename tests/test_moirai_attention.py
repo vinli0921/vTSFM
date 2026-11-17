@@ -12,11 +12,15 @@ the causal mask must change the forecast well beyond the parity tolerance.
 """
 
 import math
+import os
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
 
 from vtsfm.adapters.moirai2.spec import MOIRAI_ATTENTION_ENV, resolve_attention_mode
+from vtsfm.cli import build_vllm_command
 
 TOL = dict(rtol=1e-5, atol=1e-5)
 
@@ -34,6 +38,87 @@ def test_attention_mode_defaults_to_upstream():
 def test_unknown_attention_mode_is_rejected(value):
     with pytest.raises(ValueError, match=MOIRAI_ATTENTION_ENV):
         resolve_attention_mode({MOIRAI_ATTENTION_ENV: value})
+
+
+@pytest.mark.parametrize('execution, precision', [
+    ('compile', None), ('compile', 'fp32'), ('compile', 'bf16'), ('compile', 'tf32'),
+    ('eager', 'bf16'), ('eager', 'tf32'),
+])
+def test_cli_rejects_unqualified_univariate_attention(monkeypatch, execution, precision):
+    monkeypatch.setenv(MOIRAI_ATTENTION_ENV, 'univariate')
+    monkeypatch.setenv('VTSFM_FORECAST_EXECUTION', execution)
+    if precision is not None:
+        monkeypatch.setenv('VTSFM_PRECISION', precision)
+    else:
+        monkeypatch.delenv('VTSFM_PRECISION', raising=False)
+    with pytest.raises(ValueError, match='requires eager execution and FP32'):
+        build_vllm_command(adapter='moirai2')
+
+
+def test_cli_explicit_modes_take_precedence_for_univariate_attention(monkeypatch):
+    monkeypatch.setenv(MOIRAI_ATTENTION_ENV, 'univariate')
+    monkeypatch.setenv('VTSFM_FORECAST_EXECUTION', 'compile')
+    monkeypatch.setenv('VTSFM_PRECISION', 'bf16')
+    _, environment = build_vllm_command(
+        adapter='moirai2', forecast_execution='eager', forecast_precision='fp32')
+    assert environment[MOIRAI_ATTENTION_ENV] == 'univariate'
+    assert environment['VTSFM_FORECAST_EXECUTION'] == 'eager'
+    assert environment['VTSFM_PRECISION'] == 'fp32'
+    assert environment['NVIDIA_TF32_OVERRIDE'] == '0'
+
+
+def test_cli_pins_fp32_for_univariate_attention_without_explicit_precision(monkeypatch):
+    monkeypatch.setenv(MOIRAI_ATTENTION_ENV, 'univariate')
+    monkeypatch.delenv('VTSFM_PRECISION', raising=False)
+    monkeypatch.setenv('NVIDIA_TF32_OVERRIDE', '1')
+    _, environment = build_vllm_command(adapter='moirai2', forecast_execution='eager')
+    assert environment['VTSFM_PRECISION'] == 'fp32'
+    assert environment['NVIDIA_TF32_OVERRIDE'] == '0'
+    assert 'VTSFM_PRECISION' not in os.environ
+
+
+@pytest.mark.parametrize('execution, precision, override, expected', [
+    ('compile', '', '0', 'requires eager execution and FP32'),
+    ('eager', 'bf16', '0', 'requires eager execution and FP32'),
+    ('eager', 'tf32', '1', 'requires eager execution and FP32'),
+    ('eager', '', '1', 'conflicts with fp32'),
+])
+def test_runtime_rejects_unsupported_attention_before_model_construction(
+        execution, precision, override, expected):
+    pytest.importorskip('torch')
+    # A stand-in constructor makes the startup boundary observable without a
+    # checkpoint or uni2ts installation. Run in a fresh process for the env config.
+    script = """
+import os
+import sys
+from types import ModuleType
+
+execution, precision, override, expected = sys.argv[1:]
+os.environ.update(VTSFM_MOIRAI_ATTENTION='univariate', VTSFM_FORECAST_EXECUTION=execution,
+                  NVIDIA_TF32_OVERRIDE=override, TRITON_DEFAULT_FP_FUSION='0')
+if precision:
+    os.environ['VTSFM_PRECISION'] = precision
+else:
+    os.environ.pop('VTSFM_PRECISION', None)
+
+upstream = ModuleType('uni2ts.model.moirai2')
+def construct(**config):
+    raise AssertionError('Loaded model before validating its execution settings')
+upstream.Moirai2Module = construct
+upstream.Moirai2Forecast = object
+sys.modules[upstream.__name__] = upstream
+
+from vtsfm.adapters.moirai2.runtime import MoiraiRuntime
+try:
+    MoiraiRuntime({})
+except ValueError as error:
+    assert expected in str(error), str(error)
+else:
+    raise AssertionError('Expected ValueError at runtime startup')
+"""
+    result = subprocess.run([sys.executable, '-c', script, execution, precision, override, expected],
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +344,24 @@ def test_runtime_installs_only_when_selected(lib, monkeypatch):
     monkeypatch.setenv(MOIRAI_ATTENTION_ENV, 'bogus')
     with pytest.raises(ValueError):
         runtime.MoiraiRuntime(TINY)
+
+
+def test_runtime_pins_univariate_attention_to_fp32(lib, monkeypatch):
+    from vtsfm.adapters.moirai2.runtime import MoiraiRuntime
+
+    monkeypatch.setenv(MOIRAI_ATTENTION_ENV, 'univariate')
+    monkeypatch.setenv('VTSFM_FORECAST_EXECUTION', 'eager')
+    monkeypatch.delenv('VTSFM_PRECISION', raising=False)
+    monkeypatch.delenv('NVIDIA_TF32_OVERRIDE', raising=False)
+    torch = lib.torch
+    previous = torch.get_float32_matmul_precision()
+    try:
+        torch.set_float32_matmul_precision('high')
+        MoiraiRuntime(TINY)
+        assert torch.get_float32_matmul_precision() == 'highest'
+        assert torch.backends.cuda.matmul.allow_tf32 is False
+    finally:
+        torch.set_float32_matmul_precision(previous)
 
 
 def test_snapshot_creates_its_output_directory_before_gpu_work(tmp_path, monkeypatch):
