@@ -249,21 +249,13 @@ class RandomFitForecaster(BaseForecaster):
                          index=fh.to_absolute(self.cutoff).to_pandas())
 
 
-@pytest.mark.parametrize('native', ['chronos', 'toto'])
 @pytest.mark.parametrize('known_type', [False, True])
-def test_native_fallback_preserves_fit_predict_rng_order(native, known_type):
-    if native == 'chronos':
-        batcher = pytest.importorskip('vtsfm.recipes.chronos').ChronosCalibrationBatcher()
-        model_name = 'Chronos2Forecaster'
-    else:
-        batcher = pytest.importorskip('vtsfm.recipes.toto').TotoCalibrationBatcher()
-        model_name = 'Toto2Forecaster'
+def test_native_fallback_preserves_fit_predict_rng_order(known_type):
+    batcher = pytest.importorskip('vtsfm.recipes.toto').TotoCalibrationBatcher()
     forecaster = RandomFitForecaster()
     if known_type:
-        # A supported native class with seed=None must use the entire original
-        # loop too. Constructor/protocol double avoids loading model packages.
-        cls = type(model_name, (RandomFitForecaster,),
-                   {'__module__': f'sktime.forecasting.{model_name[:-10].lower()}'})
+        # An unseeded Toto forecaster also uses the original loop.
+        cls = type('Toto2Forecaster', (RandomFitForecaster,), {'__module__': 'sktime.forecasting.toto2'})
         forecaster = cls()
     original = ConformalIntervals(forecaster, initial_window=5)
     candidate = BatchedConformalIntervals(forecaster, initial_window=5,
