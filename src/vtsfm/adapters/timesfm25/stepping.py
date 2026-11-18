@@ -5,10 +5,9 @@
 # See https://github.com/google-research/timesfm and the repository LICENSE.
 """Resumable TimesFM forecasts with adapter-owned, request-local decode caches.
 
-The whole-forecast runtime remains the reference. A shared call requires equal
-physical cache positions because the pinned upstream attention implementation
-writes every row using ``decode_cache.next_index[0]``. Cache rows are copied back
-to individual owners after a call so a retired request retains no peer storage.
+Shared decode calls batch neural layers while preserving each request's owned
+caches. Temporary attention gathers never replace those caches, and retired
+requests retain no peer storage.
 """
 
 from dataclasses import dataclass, field
@@ -62,7 +61,7 @@ class TimesFMForecastState:
     def bucket(self):
         if self.released:
             raise ValueError('Released forecast state cannot be scheduled')
-        return ('prefill', self.padded_context_length) if self.blocks_done == 0 else ('decode', self.cache_position)
+        return ('prefill', self.padded_context_length) if self.blocks_done == 0 else ('decode',)
 
     @property
     def cache_bytes(self):
@@ -87,6 +86,8 @@ class TimesFMStepper:
     Inputs are FP32 tensors ``[series, raw padded history]`` with left NaNs for
     missing history. States and forecasts stay on the model device. Normal and
     sign-flipped decoders retain independent running stats, feedback and caches.
+    Prefill and AR calls batch both passes, so the internal neural batch has twice the
+    independent series counted by admission; the work bound includes both flips.
     """
 
     def __init__(self, runtime):
@@ -95,6 +96,9 @@ class TimesFMStepper:
         self.owner = object()
         if (self.model.p, self.model.o, self.model.os, self.model.q, self.model.aridx) != (32, 128, 1024, 10, 5):
             raise ValueError('Block execution requires the pinned TimesFM 2.5 architecture')
+        from .block_decode import validate_block_decode_source
+
+        validate_block_decode_source(self.model)
 
     @torch.inference_mode()
     def initialize(self, context, horizon):
@@ -125,7 +129,7 @@ class TimesFMStepper:
         return state.blocks_done >= (state.horizon + self.model.o - 1) // self.model.o
 
     def model_call_work(self, states):
-        """Conservative work for padded shared caches, including both flips."""
+        """Conservative shared-call work bound, including both flips."""
         states = tuple(states)
         return 2 * sum(state.rows for state in states) * max(state.cache_capacity for state in states) ** 2 if states else 0
 
@@ -143,6 +147,9 @@ class TimesFMStepper:
                 raise ValueError('Completed or released forecast state cannot advance')
         if any(state.bucket[0] != phase or state.bucket != states[0].bucket for state in states):
             raise ValueError('Shared TimesFM block states require matching execution buckets')
+        if phase == 'decode' and any(state.cache_position + self.model.m > state.cache_capacity
+                                     for state in states):
+            raise ValueError('TimesFM block write exceeds the request cache capacity')
         return states
 
     def _new_caches(self, rows, capacity, device):
@@ -153,35 +160,23 @@ class TimesFMStepper:
             value=torch.zeros(rows, capacity, self.model.h, self.model.hd, dtype=torch.float32, device=device),
         ) for _ in range(self.model.x)]
 
-    @staticmethod
-    def _pad_cache(values, capacity):
-        extra = capacity - values.shape[1]
-        return F.pad(values, (0, 0, 0, 0, 0, extra)) if extra else values
-
-    def _merge_caches(self, states, stream, capacity):
-        result = []
-        for layer in range(self.model.x):
-            parts = [state.passes[stream].caches[layer] for state in states]
-            result.append(DecodeCache(
-                next_index=torch.cat([part.next_index for part in parts]),
-                num_masked=torch.cat([part.num_masked for part in parts]),
-                key=torch.cat([self._pad_cache(part.key, capacity) for part in parts]),
-                value=torch.cat([self._pad_cache(part.value, capacity) for part in parts]),
-            ))
-        return result
-
     def _store(self, states, stream, caches, stats, block, spread=None):
         cursor = 0
         for state in states:
             section = slice(cursor, cursor + state.rows)
             target = state.passes[stream]
-            # Clone every row owner: a completed request must not pin peer rows.
-            target.caches = [DecodeCache(
-                next_index=cache.next_index[section].clone(),
-                num_masked=cache.num_masked[section].clone(),
-                key=cache.key[section, :state.cache_capacity].clone(),
-                value=cache.value[section, :state.cache_capacity].clone(),
-            ) for cache in caches]
+            if caches is not None and len(states) == 1:
+                # New prefill allocations and singleton updates already belong
+                # exclusively to this request. Keep their storage in place.
+                target.caches = caches
+            elif caches is not None:
+                # Split prefill once; no request may retain peer allocations.
+                target.caches = [DecodeCache(
+                    next_index=cache.next_index[section].clone(),
+                    num_masked=cache.num_masked[section].clone(),
+                    key=cache.key[section, :state.cache_capacity].clone(),
+                    value=cache.value[section, :state.cache_capacity].clone(),
+                ) for cache in caches]
             target.last_n, target.last_mu, target.last_sigma = (value[section].clone() for value in stats)
             target.feedback = block[section, :, self.model.aridx].clone()
             target.block = block[section, :, 1:].clone()
@@ -189,15 +184,17 @@ class TimesFMStepper:
                 target.spread = spread[section, :, 1:].clone()
             cursor += state.rows
 
-    def _prefill_pass(self, states, stream):
+    def _prefill_passes(self, states):
+        # One stream-major [x; -x] call, as in _advance_passes. Rows (and both
+        # flip streams) stay independent; each stream then stores its own half.
         normalized = torch.cat([state.normalized for state in states])
-        if stream:
-            normalized = -normalized
         masks = torch.cat([state.padding for state in states])
         rows = normalized.shape[0]
-        inputs = normalized.reshape(rows, -1, self.model.p)
-        masks = masks.reshape(rows, -1, self.model.p)
-        n = torch.zeros(rows, device=normalized.device)
+        normalized = torch.cat((normalized, -normalized))
+        masks = masks.repeat(2, 1)
+        inputs = normalized.reshape(2 * rows, -1, self.model.p)
+        masks = masks.reshape(2 * rows, -1, self.model.p)
+        n = torch.zeros(2 * rows, device=normalized.device)
         mu = torch.zeros_like(n)
         sigma = torch.zeros_like(n)
         means, sigmas = [], []
@@ -206,18 +203,33 @@ class TimesFMStepper:
             means.append(mu)
             sigmas.append(sigma)
         context_mu, context_sigma = torch.stack(means, 1), torch.stack(sigmas, 1)
-        caches = self._new_caches(rows, max(state.cache_capacity for state in states), normalized.device)
+        caches = self._new_caches(2 * rows, max(state.cache_capacity for state in states), normalized.device)
         inputs = revin(inputs, context_mu, context_sigma, reverse=False)
         inputs = torch.where(masks, 0.0, inputs)
-        (_, _, point, spread), caches = self.model(inputs, masks, caches)
-        point = revin(point, context_mu, context_sigma, reverse=True).reshape(rows, -1, self.model.o, self.model.q)[:, -1]
-        spread = revin(spread, context_mu, context_sigma, reverse=True).reshape(rows, -1, self.model.os, self.model.q)[:, -1]
-        self._store(states, stream, caches, (n, mu, sigma), point, spread)
+        (_, _, point, spread), caches = self._prefill_forward(inputs, masks, caches)
+        point = revin(point, context_mu, context_sigma, reverse=True).reshape(2 * rows, -1, self.model.o, self.model.q)[:, -1]
+        spread = revin(spread, context_mu, context_sigma, reverse=True).reshape(2 * rows, -1, self.model.os, self.model.q)[:, -1]
+        for stream in range(2):
+            half = slice(stream * rows, (stream + 1) * rows)
+            # Row slices are views. A singleton request keeps both halves of its
+            # own allocation; shared cohorts are cloned per request by _store.
+            stream_caches = [DecodeCache(
+                next_index=cache.next_index[half], num_masked=cache.num_masked[half],
+                key=cache.key[half], value=cache.value[half],
+            ) for cache in caches]
+            self._store(states, stream, stream_caches, (n[half], mu[half], sigma[half]), point[half], spread[half])
 
-    def _advance_pass(self, states, stream):
-        inputs = torch.cat([state.passes[stream].feedback for state in states]).reshape(-1, self.model.m, self.model.p)
+    def _prefill_forward(self, inputs, masks, caches):
+        """Preserve native prefill; fixed-shape graph experiments override it."""
+        return self.model(inputs, masks, caches)
+
+    def _advance_passes(self, states):
+        # Stream-major order keeps normal and flipped statistics independent.
+        streams = [state.passes[stream] for stream in range(2) for state in states]
+        rows = sum(state.rows for state in states)
+        inputs = torch.cat([stream.feedback for stream in streams]).reshape(-1, self.model.m, self.model.p)
         masks = torch.zeros_like(inputs, dtype=torch.bool)
-        n, mu, sigma = (torch.cat([getattr(state.passes[stream], name) for state in states])
+        n, mu, sigma = (torch.cat([getattr(stream, name) for stream in streams])
                         for name in ('last_n', 'last_mu', 'last_sigma'))
         means, sigmas = [], []
         for patch in range(self.model.m):
@@ -225,11 +237,21 @@ class TimesFMStepper:
             means.append(mu)
             sigmas.append(sigma)
         context_mu, context_sigma = torch.stack(means, 1), torch.stack(sigmas, 1)
-        caches = self._merge_caches(states, stream, max(state.cache_capacity for state in states))
         inputs = revin(inputs, context_mu, context_sigma, reverse=False)
-        (_, _, point, _), caches = self.model(inputs, masks, caches)
+        (_, _, point, _), _ = self._block_decode_forward(
+            states, inputs, masks, [stream.caches for stream in streams],
+            [state.cache_position for _ in range(2) for state in states],
+        )
         point = revin(point, context_mu, context_sigma, reverse=True).reshape(-1, self.model.m, self.model.o, self.model.q)[:, -1]
-        self._store(states, stream, caches, (n, mu, sigma), point)
+        for stream in range(2):
+            section = slice(stream * rows, (stream + 1) * rows)
+            self._store(states, stream, None, tuple(value[section] for value in (n, mu, sigma)), point[section])
+
+    def _block_decode_forward(self, states, inputs, masks, cache_groups, positions):
+        """Keep the optimized executor shared with experimental attention paths."""
+        from .block_decode import block_decode_forward
+
+        return block_decode_forward(self.model, inputs, masks, cache_groups, positions)
 
     def _finish_block(self, states):
         for state in states:
@@ -256,15 +278,13 @@ class TimesFMStepper:
     @torch.inference_mode()
     def prefill(self, states):
         states = self._cohort(states, 'prefill')
-        self._prefill_pass(states, 0)
-        self._prefill_pass(states, 1)
+        self._prefill_passes(states)
         self._finish_block(states)
 
     @torch.inference_mode()
     def advance(self, states):
         states = self._cohort(states, 'decode')
-        self._advance_pass(states, 0)
-        self._advance_pass(states, 1)
+        self._advance_passes(states)
         self._finish_block(states)
 
     def finalize(self, state):

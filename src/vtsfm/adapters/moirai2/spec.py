@@ -4,6 +4,7 @@ import json
 from vtsfm.adapters.base import AdapterSpec, FORECAST_VLLM_ARGS
 from vtsfm.adapters.forecast import ForecastSettings
 from vtsfm.execution import ExecutionCapabilities
+from .admission import DEFAULT_LIMITS, OUTPUT_BLOCK_SIZE, PATCH_SIZE
 
 MODEL_ID = 'Salesforce/moirai-2.0-R-small'
 MODEL_REVISION = '30f43ff08c8494f4943ae1521e9d4e94a0fbb389'
@@ -12,9 +13,7 @@ FORECAST_SETTINGS = ForecastSettings(
     quantiles=(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
     default_horizon=96, default_quantiles=(0.1, 0.5, 0.9),
 )
-# From config.json at MODEL_REVISION; GPU tests check the loaded checkpoint.
-PATCH_SIZE = 16
-OUTPUT_BLOCK_SIZE = PATCH_SIZE * 4  # patch_size * num_predict_token per decoder pass
+# Patch/block constants come from the pinned config; GPU tests check the loaded checkpoint.
 MOIRAI2 = AdapterSpec(
     name='moirai2', model_id=MODEL_ID, model_revision=MODEL_REVISION,
     architectures=('VTSFMMoiraiForForecasting',),
@@ -27,6 +26,8 @@ MOIRAI2 = AdapterSpec(
                                      'num_attention_heads': 6}),
     ),
     supports_group_attention=False,
+    admission_limits=DEFAULT_LIMITS,
+    admission_cost='vtsfm.adapters.moirai2.admission:forecast_cost',
     execution_capabilities=ExecutionCapabilities(
         max_context=FORECAST_SETTINGS.max_context, max_horizon=FORECAST_SETTINGS.max_horizon,
         quantiles=FORECAST_SETTINGS.quantiles, supports_point_forecast=False,
@@ -37,3 +38,33 @@ MOIRAI2 = AdapterSpec(
         # them against isolated official forecasts on the GPU.
     ),
 )
+
+# Experimental attention implementation for the Moirai runtime (issue #24).
+# 'upstream' (default) runs pinned uni2ts attention unchanged. 'univariate'
+# replaces it on the loaded model with an exact 4-D fused-SDPA path that drops
+# the per-head constant variate bias; valid because this adapter serves only
+# univariate rows. Univariate only: multivariate input raises ValueError.
+# The server inherits the variable from the launching shell.
+MOIRAI_ATTENTION_ENV = 'VTSFM_MOIRAI_ATTENTION'
+MOIRAI_ATTENTION_MODES = ('upstream', 'univariate')
+
+
+def resolve_attention_mode(environ=None):
+    """Return the selected attention mode; reject unknown values explicitly."""
+    import os
+
+    value = (os.environ if environ is None else environ).get(MOIRAI_ATTENTION_ENV, 'upstream')
+    if value not in MOIRAI_ATTENTION_MODES:
+        raise ValueError(f'{MOIRAI_ATTENTION_ENV} must be one of {", ".join(MOIRAI_ATTENTION_MODES)}; got {value!r}')
+    return value
+
+
+def resolve_attention_config(execution: str, precision: str | None, environ=None) -> tuple[str, str | None]:
+    """Resolve the attention mode and pin the opt-in path to eager FP32."""
+    attention = resolve_attention_mode(environ)
+    if attention == 'univariate':
+        if execution != 'eager' or precision not in (None, 'fp32'):
+            raise ValueError(f'{MOIRAI_ATTENTION_ENV}=univariate requires eager execution and FP32 precision. '
+                             f'Use {MOIRAI_ATTENTION_ENV}=upstream for compiled, BF16, or TF32 forecasts.')
+        precision = 'fp32'
+    return attention, precision

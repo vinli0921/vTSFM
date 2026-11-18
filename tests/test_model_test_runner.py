@@ -28,6 +28,7 @@ def checkout(tmp_path):
     (root / 'tests').mkdir()
     for profile in ('integration', 'accuracy', 'performance'):
         (root / f'tests/test_model_{profile}.py').touch()
+    (root / 'tests/test_compiled_forecast_runtime.py').touch()
     commands = tmp_path / 'commands'
     commands.mkdir()
     uname = commands / 'uname'
@@ -47,6 +48,9 @@ def install_environments(root, failures=None):
         body = f'''import json, os, pathlib, sys
 record = {{'adapter': {adapter!r}, 'args': sys.argv[1:], 'cwd': os.getcwd(),
           'profile': os.environ.get('VTSFM_TEST_PROFILE'),
+          'precision': os.environ.get('VTSFM_TEST_PRECISION'),
+          'execution': os.environ.get('VTSFM_TEST_EXECUTION'),
+          'fp_fusion': os.environ.get('TRITON_DEFAULT_FP_FUSION'),
           'data_dir': os.environ.get('VTSFM_TEST_DATA'), 'cases': os.environ.get('VTSFM_TEST_CASES'),
           'performance': {{key: os.environ.get('VTSFM_PERF_' + key) for key in
               ('REQUESTS','WARMUPS','BATCHES','CONTEXTS','CLIENTS','HORIZON','ORDER')}},
@@ -112,9 +116,58 @@ def test_profiles_select_their_tests_and_forward_frozen_settings(checkout, profi
             'CONTEXTS':'128', 'CLIENTS':'1,2', 'HORIZON':'32', 'ORDER':'vtsfm,native'}
 
 
+@pytest.mark.parametrize('precision,override', [('fp32', '0'), ('tf32', '1'), ('bf16', '0')])
+def test_precision_is_forwarded_before_model_startup(checkout, precision, override):
+    root, env = checkout
+    install_environments(root)
+    result = run(root, env, '--adapter', 'toto2', '--forecast-precision', precision)
+    assert result.returncode == 0, result.stderr
+    record, = calls(env)
+    assert record['precision'] == precision
+    assert record['env']['NVIDIA_TF32_OVERRIDE'] == override
+
+
+def test_default_profile_does_not_inherit_an_experimental_precision(checkout):
+    root, env = checkout
+    install_environments(root)
+    env['VTSFM_PRECISION'] = 'bf16'
+    env.pop('VTSFM_TEST_PRECISION', None)
+    result = run(root, env, '--adapter', 'toto2')
+    assert result.returncode == 0, result.stderr
+    record, = calls(env)
+    assert record['precision'] is None
+    assert record['env']['NVIDIA_TF32_OVERRIDE'] == '0'
+
+
+def test_compilation_and_native_bf16_are_forwarded_together(checkout):
+    root, env = checkout
+    install_environments(root)
+    result = run(root, env, '--adapter', 'toto2', '--profile', 'performance',
+                 '--forecast-execution', 'compile', '--forecast-precision', 'bf16')
+    assert result.returncode == 0, result.stderr
+    record, = calls(env)
+    assert record['precision'] == 'bf16' and record['execution'] == 'compile'
+    assert record['fp_fusion'] == '0'
+    assert record['env']['NVIDIA_TF32_OVERRIDE'] == '0'
+
+
+@pytest.mark.parametrize('profile', ['integration', 'accuracy', 'performance'])
+def test_compile_selection_reaches_profiles_and_integration_adds_retained_shape_gate(checkout, profile):
+    root, env = checkout
+    install_environments(root)
+    result = run(root, env, '--adapter', 'moirai2', '--profile', profile,
+                 '--forecast-execution', 'compile')
+    assert result.returncode == 0, result.stderr
+    record, = (entry for entry in calls(env) if entry['args'][:2] == ['-m', 'pytest'])
+    assert record['execution'] == 'compile'
+    assert record['fp_fusion'] == '0'
+    assert ('tests/test_compiled_forecast_runtime.py' in record['args']) == (profile == 'integration')
+
+
 @pytest.mark.parametrize('arguments', [('--profile','unknown'), ('--requests','0'),
     ('--warmups','-1'), ('--batches','0,4'), ('--clients','one'), ('--horizon','1025'),
-    ('--backend-order','native,native'), ('--cases','anything.json')])
+    ('--backend-order','native,native'), ('--cases','anything.json'),
+    ('--forecast-execution', 'unknown')])
 def test_invalid_profile_settings_do_not_start_model_processes(checkout, arguments):
     root, env = checkout
     install_environments(root)

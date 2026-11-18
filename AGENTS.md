@@ -89,9 +89,10 @@ Use the checkout's environments, not global Python packages:
 - Save a baseline before optimizing. Compare matching workloads and settings;
   record revisions, hardware, precision, warmups, timing boundaries, failures,
   and memory methodology. Distinguish observed, imputed, and synthetic data.
-- Describe only what is implemented and measured. TimesFM can execute compatible
-  whole forecasts together and enforces a validated numerical envelope. Toto and
-  Moirai retain their upstream forecast paths. TimesFM can opt into forecast-block
+- Describe only what is implemented and measured. Whole-forecast batching uses
+  each adapter's own cost policy. TimesFM, Toto and Moirai have measured A100
+  numerical envelopes; changes to their runtime or ceilings need fresh validation.
+  TimesFM can opt into forecast-block
   scheduling; no new attention kernel or vLLM-managed KV is claimed.
 - Use an idle GPU and free port for benchmarks. Do not interrupt another
   person's workload or change shared drivers/services without authorization.
@@ -132,16 +133,23 @@ Use the checkout's environments, not global Python packages:
   synchronous scheduler/worker hooks isolated. Prompt markers count forecast
   blocks, never observations. Count all active caches toward global numerical
   capacity; vLLM owns bounded HTTP intake and cancellation. Shared AR calls need
-  matching physical cache positions and independently owned request buffers.
+  per-row cache writes when positions differ and independently owned request
+  buffers. Preserve native rotary positions and attention masks.
   Serving changes need real staggered-arrival, completion, error/cancellation,
   parity and peak-memory checks. Keep timing passes untraced and queue diagnostics
   separately labeled.
-- Follow [numerical admission](docs/numerical-admission.md) for TimesFM limits.
+- Follow [numerical admission](docs/numerical-admission.md) for each model's limits.
   Request overload must fail before EngineCore submission. Split scheduled work
   within model-call budgets; validate the full resident slot envelope at startup.
   JSON overrides may tighten measured ceilings only. The shared resident-byte
   bound excludes model scratch/weights; raising ceilings needs fresh GPU peak
-  measurements. Keep Toto/Moirai admission support unclaimed until validated.
+  measurements. Run `tests/test_model_admission.py` with
+  `VTSFM_RUN_ADMISSION_ADAPTER=toto2` or `moirai2` in that adapter's environment;
+  policy metadata alone is not measured model capacity. Do not silently raise
+  Moirai's eight-row or Toto's sixteen-row caps. Compact public outputs must not
+  retain larger native scratch allocations through views. Preserve Moirai's
+  explicit Lightning constructor-frame handling and GC-disabled input-lifetime
+  regression; neither per-request GC nor looser memory tolerances replaces it.
 - Shared IO has no pending map; output metadata travels in the versioned result
   tensor. See [request lifecycle](docs/request-lifecycle.md). For lifecycle
   changes, run the opt-in TimesFM offline/HTTP failure and cancellation suite
@@ -149,6 +157,22 @@ Use the checkout's environments, not global Python packages:
   worker model exceptions can be engine-fatal; distinguish clean restart from
   recovery within a healthy engine. Offline synchronous `LLM` calls are
   sequential; concurrent clients use the HTTP/async path.
+- The optional [TimesFM native-KV experiment](docs/timesfm-native-kv.md) is a
+  direct backend/block-allocator proof, not native GPUModelRunner or HTTP support.
+  Use the recorded source and `TRITON_F32_DEFAULT=ieee`; Torch TF32 flags alone
+  do not specify Triton arithmetic. Keep fixed-pool, leased-page and actual peak
+  memory distinct. Do not connect the private stepper to production or remove
+  its source-compatibility guard without new engine/lifecycle qualification.
+  Its forecast/attention harnesses check GPU ownership before/after timed samples
+  outside timing; retain but exclude contended points and rerun counterbalanced
+  comparisons. These snapshots detect activity but do not reserve the shared GPU.
+- The [full-forecast CUDA graph experiment](docs/timesfm-full-graph.md) uses one
+  serialized, fixed finite B/C/H owner. Dense/paged eager and graph controls share
+  graph-safe prefill, validation, input staging and owned output clones. Paged
+  leases/metadata remain pinned until synchronization and graph destruction;
+  zero leases are expected after close, not between replays. Keep setup/capture
+  costs and held graph/private-pool memory distinct from steady-state timing.
+  This does not enable graphs in the HTTP/worker path or dynamic scheduling.
 
 Keep handoffs short: what changed, why, checks run, and remaining limitations.
 These conventions take inspiration from [vLLM's agent guide](https://github.com/vllm-project/vllm/blob/main/AGENTS.md),

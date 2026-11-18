@@ -19,7 +19,8 @@ def test_http_forecast_matches_native(served_model, index):
     record = {'case': case['name'], 'status': 'failed'}
     try:
         save_json(run['output'] / f'{index}-request.json', payload)
-        response = run['session'].post(run['url'] + '/pooling', json=payload, timeout=180)
+        response = run['session'].post(run['url'] + '/pooling', json=payload,
+                                       timeout=run['parity_timeout_s'])
         (run['output'] / f'{index}-response.txt').write_text(response.text)
         response.raise_for_status()
         body = response.json()

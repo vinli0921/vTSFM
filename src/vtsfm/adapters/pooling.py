@@ -3,6 +3,7 @@
 import os
 import uuid
 
+import numpy as np
 import torch
 from torch import nn
 from vllm.model_executor.layers.pooler import Pooler
@@ -149,8 +150,7 @@ class ForecastModel(nn.Module, IsAttentionFree, SupportsMultiModal):
             forecasts = (self.runtime.forecast(request.context, request.horizon) for request in requests)
         outputs = []
         for request, forecast in zip(requests, forecasts, strict=True):
-            # Moirai's current wrapper returns CPU tensors via its NumPy API.
-            # Tensor runtimes already return on the execution device.
+            # Keep the shared output boundary explicit for each tensor runtime.
             output = forecast.to(request.context.device)
             validate_forecast(request, output, len(self.settings.quantiles))
             outputs.append(output)
@@ -198,9 +198,13 @@ class ForecastIOProcessor(IOProcessor):
         item_ids = [item.get('item_id') for item in inputs]
         # Reject oversized output metadata here, before submitting GPU work.
         encode_result_metadata(item_ids, horizon, levels)
-        context = torch.full((len(inputs), max(len(x['target']) for x in inputs)), float('nan'))
-        for row, item in zip(context, inputs):
-            row[-len(item['target']):] = torch.tensor(item['target'], dtype=torch.float32)
+        # parse_request supplies FP32 arrays, so asarray is a no-op there. Row
+        # copies stay in NumPy; one from_numpy call avoids torch.tensor(list).
+        targets = [np.asarray(item['target'], dtype=np.float32) for item in inputs]
+        context = np.full((len(targets), max(map(len, targets))), np.nan, dtype=np.float32)
+        for row, target in zip(context, targets):
+            row[len(row) - len(target):] = target
+        context = torch.from_numpy(context)
         # HTTP headers can repeat and offline calls omit IDs. Each numerical
         # payload therefore needs an invocation ID independent of either case.
         identity = f'{request_id or "vtsfm"}:{uuid.uuid4().hex}'

@@ -44,6 +44,9 @@ def child_environment(gpu_index):
     environment = os.environ.copy()
     environment.update(CUDA_DEVICE_ORDER='PCI_BUS_ID', CUDA_VISIBLE_DEVICES=str(gpu_index),
                        NVIDIA_TF32_OVERRIDE='0', OMP_NUM_THREADS='4', PYTHONUNBUFFERED='1')
+    environment.pop('VTSFM_PRECISION', None)
+    if environment.get('VTSFM_TEST_PRECISION') == 'tf32':
+        environment['NVIDIA_TF32_OVERRIDE'] = '1'
     environment['PYTHONPATH'] = os.pathsep.join(
         [str(ROOT / 'tests'), str(ROOT / 'src'), str(ROOT), environment.get('PYTHONPATH', '')])
     return environment
@@ -95,6 +98,7 @@ def model_run():
     from benchmarks.run import GpuMonitor, OwnedProcesses, ensure_port_free, ensure_worker_gpu, wait_ready
     from vtsfm.adapters import get_adapter
     from vtsfm.cli import build_vllm_command
+    from vtsfm.compilation import EXECUTION_ENV, execution_mode
     from vtsfm.config import TORCH_VERSION, TRANSFORMERS_VERSION, VLLM_VERSION
 
     gpu_index = int(os.environ.get('VTSFM_TEST_GPU_INDEX', '0'))
@@ -106,9 +110,15 @@ def model_run():
     if (output / 'run.json').exists():
         pytest.fail(f'Refusing to overwrite an earlier run: {output}')
     spec = get_adapter(adapter)
+    from vtsfm.precision import validate_precision
+
+    precision = validate_precision(adapter, os.environ.get('VTSFM_TEST_PRECISION', 'fp32'))
+    execution = execution_mode(os.environ.get('VTSFM_TEST_EXECUTION', 'eager'))
     metadata = {**source_metadata(), 'adapter': adapter, 'profile': profile,
                 'model_id': spec.model_id, 'model_revision': spec.model_revision,
-                'precision': 'float32', 'tf32_override': '0', 'status': 'running', 'checks': []}
+                'precision': precision or 'fp32', 'tf32_override': '1' if precision == 'tf32' else '0',
+                'status': 'running', 'checks': []}
+    metadata['forecast_execution'] = {'native': 'eager', 'vtsfm': execution}
     monitor = None
     previous_term = signal.getsignal(signal.SIGTERM)
 
@@ -140,6 +150,8 @@ def model_run():
         save_json(manifest, {'cases': cases})
         environment = child_environment(gpu_index)
         environment['VTSFM_TEST_ADAPTER'] = adapter
+        # Keep the independent reference and native HTTP comparator pristine.
+        environment[EXECUTION_ENV] = 'eager'
         with OwnedProcesses(output) as owner:
             reference_file = output / 'native.json'
             reference = owner.spawn([sys.executable, str(ROOT / 'tests' / 'model_integration_support.py'),
@@ -169,7 +181,9 @@ def model_run():
                     serve_environment = dict(environment)
                     serve_environment['VLLM_PLUGINS'] = ''
                 elif kind == 'vtsfm':
-                    command, serve_environment = build_vllm_command(adapter=adapter, port=port)
+                    command, serve_environment = build_vllm_command(
+                        adapter=adapter, port=port, forecast_execution=execution,
+                        forecast_precision=precision)
                     for key in ('CUDA_DEVICE_ORDER', 'CUDA_VISIBLE_DEVICES', 'NVIDIA_TF32_OVERRIDE',
                                 'OMP_NUM_THREADS', 'PYTHONUNBUFFERED', 'PYTHONPATH'):
                         serve_environment[key] = environment[key]
@@ -177,6 +191,13 @@ def model_run():
                 else:
                     raise ValueError(f'Unknown backend: {kind}')
                 metadata.setdefault('server_commands', {})[kind] = command
+                metadata.setdefault('server_execution', {})[kind] = {
+                    'forecast_execution': serve_environment.get(EXECUTION_ENV, 'eager'),
+                    'triton_default_fp_fusion': serve_environment.get('TRITON_DEFAULT_FP_FUSION')}
+                # First use of each static shape may compile lazily. This bound
+                # applies to untimed correctness calls, not measured requests.
+                parity_timeout = 900 if kind == 'vtsfm' and execution == 'compile' else 180
+                metadata['server_execution'][kind]['parity_timeout_s'] = parity_timeout
                 server = owner.spawn(command, serve_environment, 'native-http' if kind == 'native' else 'vllm')
                 stopped = False
 
@@ -195,7 +216,8 @@ def model_run():
                             info = session.get(url + '/metadata', timeout=10)
                             info.raise_for_status()
                             ensure_worker_gpu({'gpu': {'uuid': info.json()['runtime']['uuid']}}, monitor.uuid)
-                        yield {'session': session, 'url': url, 'backend': kind, 'stop': stop_server}
+                        yield {'session': session, 'url': url, 'backend': kind,
+                               'parity_timeout_s': parity_timeout, 'stop': stop_server}
                 finally:
                     stop_server()
                     monitor.wait_idle()

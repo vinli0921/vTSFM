@@ -6,17 +6,34 @@ from toto2 import Toto2Model
 from toto2.configuration import Toto2ModelConfig
 
 from vtsfm.execution import ExecutionResult, PreparedBatch
+from vtsfm.precision import configure_precision
+from vtsfm.compilation import compile_core, execution_mode
 
 from .spec import DECODE_BLOCK_SIZE, FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TOTO2
 
 
 class TotoRuntime:
     def __init__(self, config):
+        self.precision = configure_precision('toto2')
         self.model = Toto2Model(Toto2ModelConfig(**config))
+        if self.precision == 'bf16':
+            from dd_unit_scaling import RMSNorm
+            from toto2.model import RotaryProjection, SelfAttention
+            from .precision import prepare_native_bf16
+
+            self._precision_handles = prepare_native_bf16(
+                self.model, RMSNorm, RotaryProjection, attention_type=SelfAttention)
+        elif self.precision == 'tf32':
+            from toto2.model import RotaryProjection
+            from .precision import prepare_native_tf32
+
+            prepare_native_tf32(self.model, RotaryProjection)
+        if execution_mode() == 'compile':
+            compile_model(self.model)
 
     @torch.inference_mode()
     def forecast(self, context, horizon):
-        context = context.to(next(self.model.parameters()).device)
+        context = context.to(device=next(self.model.parameters()).device, dtype=torch.float32)
         return self._forecast(context, torch.isfinite(context), horizon)
 
     @torch.inference_mode()
@@ -58,4 +75,52 @@ class TotoRuntime:
                   'series_ids': torch.zeros((len(target), 1), dtype=torch.long, device=target.device)}
         quantiles = self.model.forecast(inputs, horizon=horizon, decode_block_size=DECODE_BLOCK_SIZE)
         # Upstream returns [9 quantiles, rows, variates, horizon].
-        return quantiles[:, :, 0, :].permute(1, 0, 2)
+        # Public transport is FP32 and owns only the requested horizon, even
+        # when the upstream crop is already contiguous or shares padded storage.
+        output = quantiles[:, :, 0, :].permute(1, 0, 2)
+        return output.to(dtype=torch.float32, memory_format=torch.contiguous_format, copy=True)
+
+
+def compile_model(model):
+    """Compile the transformer, retaining native unit-scaling and attention math."""
+    from dd_unit_scaling import RMSNorm
+    from toto2.model import GatedLinearUnitFeedForwardNetwork, SelfAttention
+
+    native_calls = [(module, 'forward') for module in model.transformer.modules()
+                    if isinstance(module, (RMSNorm, SelfAttention, GatedLinearUnitFeedForwardNetwork))]
+    changed_layers = []
+    try:
+        if any(parameter.dtype in (torch.bfloat16, torch.float16)
+               for parameter in model.transformer.parameters()):
+            for layer in model.transformer.layers:
+                original, local = layer.forward, 'forward' in vars(layer)
+                layer.forward = _native_residual_forward(layer)
+                changed_layers.append((layer, original, local))
+        compile_core(model.transformer, native_calls)
+    except BaseException:
+        for layer, original, local in reversed(changed_layers):
+            if local:
+                layer.forward = original
+            else:
+                del layer.forward
+        raise
+
+
+def _native_residual_forward(layer):
+    # Derived from Datadog Toto's SelfAttentionTransformerLayer.forward,
+    # Copyright 2026 Datadog, Inc., Apache-2.0 (pinned upstream in spec.py).
+    # Only residual_add stays native: fusion otherwise changes BF16 rounding.
+    from dd_unit_scaling import functional as U
+
+    residual_add = torch.compiler.disable(U.residual_add, recursive=True)
+
+    def forward(x, seq_ids=None, **kwargs):
+        x, skip = U.residual_split(x, layer.attn_tau)
+        x = layer.attn(layer.norm1(x), seq_ids, **kwargs)
+        x = residual_add(layer.attn_resid_dropout(x), skip, layer.attn_tau)
+
+        x, skip = U.residual_split(x, layer.mlp_tau)
+        x = layer.ffn(layer.norm2(x))
+        return residual_add(layer.mlp_resid_dropout(x), skip, layer.mlp_tau)
+
+    return forward

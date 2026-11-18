@@ -60,7 +60,8 @@ support:
 | Moirai 2.0 | 7168 / 1024 | 16 / 64 | FP32 |
 
 All three declare independent singleton groups, nine available quantiles
-(0.1–0.9), no point-only output, and no block stepping. TimesFM and Toto declare
+(0.1–0.9) and no point-only output. Only TimesFM declares block stepping.
+TimesFM and Toto declare
 no validated ragged batching. Their existing HTTP paths still accept unequal
 histories; the flag gates the new contract until adapter parity tests establish
 safe collation.
@@ -96,6 +97,18 @@ and patch/block counts when sizes are known. These are dimensions, not predicted
 latency or memory. Flip passes, recursive quantile trajectories, temporary
 storage, and runtime caches require model-specific measurement and admission
 logic (#12).
+
+The descriptor's `admission_cost` is a CPU-only `module:function` path paired
+with `admission_limits`. The launcher resolves each family's policy before
+starting vLLM; model and IO bindings enforce the same policy for direct/offline
+calls. Costs include padded shapes and model-specific recursion. The shared
+whole-forecast helper splits compatible calls within row/work budgets and keeps
+ragged requests isolated even when their prepared executor supports ragged rows.
+See [numerical admission](numerical-admission.md) for the A100 qualification and
+reproduction commands. Moirai supplies Lightning the same constructor frame
+explicitly, avoiding a Python frame cycle that would otherwise keep request
+tensors alive until cyclic garbage collection. The upstream forecast and its
+hyperparameters are unchanged; a GC-disabled lifetime regression guards this path.
 
 ## CPU example
 

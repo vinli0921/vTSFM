@@ -129,7 +129,8 @@ class BlockExecutor:
             states = [self.states[identity] for identity in identities]
             stage = 'prefill' if states[0].blocks_done == 0 else 'decode'
             before = [state.blocks_done for state in states] if self.trace_path else None
-            cache_position = states[0].cache_position if self.trace_path else None
+            cache_positions = [state.cache_position for state in states] if self.trace_path else None
+            cache_position = cache_positions[0] if cache_positions and len(set(cache_positions)) == 1 else None
             records = [self.metadata[identity] for identity in identities]
             start = time.monotonic_ns() if self.trace_path else 0
             if stage == 'prefill':
@@ -150,7 +151,8 @@ class BlockExecutor:
                 self.trace('step', request_ids=[record.wire_id for record in records],
                            engine_request_ids=list(identities), stage=stage,
                            block_indices=before, rows=sum(state.rows for state in states),
-                           cache_position=cache_position, finished_ids=finished,
+                           cache_position=cache_position, cache_positions=cache_positions,
+                           finished_ids=finished,
                            timestamp_ns=start, start_ns=start, end_ns=time.monotonic_ns(),
                            active_rows=sum(state.rows for state in self.states.values()),
                            cache_bytes=sum(state.cache_bytes for state in self.states.values()),

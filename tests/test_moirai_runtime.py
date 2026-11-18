@@ -41,9 +41,11 @@ Assumed MoiraiRuntime behavior; update these tests if the design changes:
 """
 
 from contextlib import contextmanager
+import gc
 import math
 import os
 from types import SimpleNamespace
+import weakref
 
 import pytest
 
@@ -291,6 +293,47 @@ def test_forecast_matches_official_at_block_boundaries_and_recursion(moirai, hor
     histories = [signal(128), signal(128, 1.0), signal(128, 2.0)]
     actual = moirai.runtime.forecast(nan_padded(moirai, histories), horizon)
     assert_forecast(actual, official(moirai, histories, horizon), moirai)
+
+
+@pytest.mark.gpu
+@requires_moirai
+@pytest.mark.parametrize('horizon', [1, 16, 65])
+def test_public_forecast_owns_only_requested_output_storage(moirai, horizon):
+    """A short output must not pin full-context or patch-rounded predictions.
+
+    One predicted patch can already be contiguous while still viewing the
+    much larger context+future quantile grid, so contiguous() alone is unsafe.
+    """
+    histories = [signal(128), signal(128, 1.0)]
+    actual = moirai.runtime.forecast(nan_padded(moirai, histories), horizon)
+    assert_forecast(actual, official(moirai, histories, horizon), moirai)
+    assert actual.is_contiguous() and actual.storage_offset() == 0
+    assert actual.untyped_storage().nbytes() == actual.numel() * actual.element_size()
+
+
+@pytest.mark.gpu
+@requires_moirai
+def test_forecast_releases_input_without_cyclic_garbage_collection(moirai):
+    """Lightning constructor inspection must not pin the forecast caller frame."""
+    histories = [signal(128), signal(128, 1.0)]
+    expected = official(moirai, histories, 65)
+    # Clear cycles from the independent official reference before the probe.
+    gc.collect()
+    automatic_gc = gc.isenabled()
+    gc.disable()
+    try:
+        context = nan_padded(moirai, histories)
+        context_ref = weakref.ref(context)
+        actual = moirai.runtime.forecast(context, 65)
+        assert_forecast(actual, expected, moirai)
+        del context, actual
+        # No gc.collect here: request tensors must be released by ownership,
+        # rather than waiting for an unrelated Python allocation threshold.
+        assert context_ref() is None
+    finally:
+        if automatic_gc:
+            gc.enable()
+        gc.collect()
 
 
 @pytest.mark.gpu

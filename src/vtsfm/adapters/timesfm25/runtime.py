@@ -6,13 +6,18 @@ from timesfm.torch.util import revin
 from torch.nn import functional as F
 
 from vtsfm.execution import ExecutionResult, PreparedBatch
+from vtsfm.precision import configure_precision
+from vtsfm.compilation import compile_core, execution_mode
 
 from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TIMESFM25
 
 
 class TimesFMRuntime:
     def __init__(self, config):
+        self.precision = configure_precision('timesfm25')
         self.model = timesfm.TimesFM_2p5_200M_torch(torch_compile=False).model
+        if execution_mode() == 'compile':
+            compile_model(self.model)
 
     @torch.inference_mode()
     def forecast(self, context, horizon):
@@ -57,6 +62,8 @@ class TimesFMRuntime:
         return torch.cat(blocks, dim=1)[:, :horizon, 1:], spread[:, :horizon, 1:]
 
     def _forecast(self, context, observed, horizon):
+        if getattr(self.model, '_vtsfm_paged_stepper_active', False):
+            raise ValueError('TimesFM model is owned by a paged stepper. Close it before running a whole forecast.')
         if not 1 <= horizon <= self.model.os:
             raise ValueError(f'TimesFM forecast horizon must be in [1,{self.model.os}]')
         # Follow the pinned Google TimesFM 2.5 forecast closure (Apache-2.0).
@@ -69,8 +76,14 @@ class TimesFMRuntime:
         std = values.std(dim=-1, keepdim=True)
         normalized = revin(values, mean, std, reverse=False)
 
-        forecast, spread = self._decode_quantiles(normalized, padding, horizon)
-        flipped_forecast, flipped_spread = self._decode_quantiles(-normalized, padding, horizon)
+        # Flip invariance decodes x and -x. Upstream runs two decode calls; the
+        # rows are independent, so one stream-major [x; -x] call (as in block
+        # mode) computes the same per-row values with half the kernel launches.
+        rows = normalized.shape[0]
+        both, both_spread = self._decode_quantiles(
+            torch.cat((normalized, -normalized)), padding.repeat(2, 1), horizon)
+        forecast, flipped_forecast = both[:rows], both[rows:]
+        spread, flipped_spread = both_spread[:rows], both_spread[rows:]
         forecast = (forecast - flipped_forecast.flip(-1)) / 2
         spread = (spread - flipped_spread.flip(-1)) / 2
 
@@ -83,3 +96,17 @@ class TimesFMRuntime:
         upper = upper.cummax(dim=-1).values[..., 1:]
         quantiles = revin(torch.cat((lower, median, upper), dim=-1), mean, std, reverse=True)
         return torch.where(positive, quantiles.clamp_min(0), quantiles).transpose(1, 2)
+
+
+def compile_model(model):
+    """Keep native norm, activation and SDPA arithmetic inside the neural core."""
+    from timesfm.torch.normalization import RMSNorm
+    from timesfm.torch.transformer import MultiHeadAttention
+
+    native_calls = []
+    for module in model.modules():
+        if isinstance(module, (RMSNorm, torch.nn.ReLU, torch.nn.SiLU, torch.nn.GELU)):
+            native_calls.append((module, 'forward'))
+        if isinstance(module, MultiHeadAttention):
+            native_calls.append((module, 'attention_fn'))
+    compile_core(model, native_calls)

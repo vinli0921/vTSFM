@@ -74,20 +74,19 @@ def test_chronos_keeps_single_request_baseline():
         build_vllm_command(adapter='chronos2', max_num_seqs=3)
 
 
-def test_forecast_batching_is_opt_in_and_requires_timesfm_worker_slots(monkeypatch):
+@pytest.mark.parametrize('adapter', ['timesfm25', 'toto2', 'moirai2'])
+def test_forecast_batching_is_opt_in_and_requires_worker_slots(monkeypatch, adapter):
     from vtsfm.cli import build_vllm_command
 
     monkeypatch.setenv('VTSFM_FORECAST_BATCH_ROWS', '8')
-    _, normal = build_vllm_command(adapter='timesfm25', max_num_seqs=4)
+    _, normal = build_vllm_command(adapter=adapter, max_num_seqs=4)
     assert 'VTSFM_FORECAST_BATCH_ROWS' not in normal
-    _, enabled = build_vllm_command(adapter='timesfm25', max_num_seqs=4, forecast_batch_rows=8)
+    _, enabled = build_vllm_command(adapter=adapter, max_num_seqs=4, forecast_batch_rows=8)
     assert enabled['VTSFM_FORECAST_BATCH_ROWS'] == '8'
     with pytest.raises(ValueError, match='--max-num-seqs'):
-        build_vllm_command(adapter='timesfm25', forecast_batch_rows=8)
-    with pytest.raises(ValueError, match='TimesFM'):
-        build_vllm_command(adapter='toto2', max_num_seqs=4, forecast_batch_rows=8)
+        build_vllm_command(adapter=adapter, forecast_batch_rows=8)
     with pytest.raises(ValueError, match='2 and 16'):
-        build_vllm_command(adapter='timesfm25', max_num_seqs=4, forecast_batch_rows=17)
+        build_vllm_command(adapter=adapter, max_num_seqs=4, forecast_batch_rows=17)
 
 
 def test_timesfm_limits_are_resolved_once_and_do_not_inherit_another_server(monkeypatch, tmp_path):
@@ -105,7 +104,7 @@ def test_timesfm_limits_are_resolved_once_and_do_not_inherit_another_server(monk
     assert resolved['max_request_rows'] == 4 and resolved['max_execution_work'] == 200
     config.unlink()  # Workers consume resolved JSON, not a potentially changed file.
     assert json.loads(enabled[FORECAST_LIMITS_ENV]) == resolved
-    _, other = build_vllm_command(adapter='toto2')
+    _, other = build_vllm_command(adapter='chronos2')
     assert FORECAST_LIMITS_ENV not in other
 
 
@@ -121,8 +120,60 @@ def test_timesfm_rejects_unsafe_launch_before_starting_a_worker(tmp_path):
     config.write_text('{"max_request_rows":17}')
     with pytest.raises(ValueError, match='validated ceiling'):
         build_vllm_command(adapter='timesfm25', forecast_limits=str(config))
-    with pytest.raises(ValueError, match='only TimesFM'):
-        build_vllm_command(adapter='moirai2', forecast_limits=str(config))
+    with pytest.raises(ValueError, match='admission policy'):
+        build_vllm_command(adapter='chronos2', forecast_limits=str(config))
+
+
+@pytest.mark.parametrize('adapter', ['timesfm25', 'toto2', 'moirai2'])
+def test_each_model_admits_only_its_own_resolved_envelope(adapter, monkeypatch, tmp_path):
+    from vtsfm.adapters import get_adapter
+    from vtsfm.admission import FORECAST_LIMITS_ENV
+    from vtsfm.cli import build_vllm_command
+
+    # A preceding server's policy must not change the new adapter's defaults.
+    monkeypatch.setenv(FORECAST_LIMITS_ENV, '{"max_request_rows":1}')
+    spec = get_adapter(adapter)
+    assert spec.admission_limits is not None
+    _, default = build_vllm_command(adapter=adapter)
+    assert json.loads(default[FORECAST_LIMITS_ENV])['max_request_rows'] == spec.admission_limits.max_request_rows
+    policy = tmp_path / 'policy.json'
+    policy.write_text('{"max_request_rows":2}')
+    command, env = build_vllm_command(adapter=adapter, max_num_seqs=4,
+        forecast_batch_rows=4, forecast_limits=str(policy), forecast_queue_limit=8)
+    assert json.loads(env[FORECAST_LIMITS_ENV])['max_request_rows'] == 2
+    assert command[command.index('--max-num-queued-reqs') + 1] == '8'
+    policy.unlink()
+    assert json.loads(env[FORECAST_LIMITS_ENV])['max_request_rows'] == 2
+    with pytest.raises(ValueError, match='scheduled requests'):
+        build_vllm_command(adapter=adapter, max_num_seqs=spec.admission_limits.max_scheduled_requests + 1)
+
+
+@pytest.mark.parametrize('adapter,max_rows', [('toto2', 16), ('moirai2', 8)])
+def test_compile_bf16_keeps_the_adapter_admission_limits(adapter, max_rows, monkeypatch):
+    from vtsfm.admission import FORECAST_LIMITS_ENV
+    from vtsfm.cli import build_vllm_command
+
+    monkeypatch.delenv('VTSFM_MOIRAI_ATTENTION', raising=False)
+    options = dict(adapter=adapter, forecast_execution='compile', forecast_precision='bf16',
+                   forecast_batch_rows=4, forecast_queue_limit=8)
+    command, env = build_vllm_command(**options, max_num_seqs=4)
+    policy = json.loads(env[FORECAST_LIMITS_ENV])
+    assert (policy['max_request_rows'], policy['max_scheduled_requests']) == (max_rows, 4)
+    assert (env['VTSFM_FORECAST_EXECUTION'], env['VTSFM_PRECISION']) == ('compile', 'bf16')
+    assert command[command.index('--max-num-queued-reqs') + 1] == '8'
+    with pytest.raises(ValueError, match='scheduled requests'):
+        build_vllm_command(**options, max_num_seqs=5)
+
+
+@pytest.mark.parametrize('adapter', ['timesfm25', 'toto2', 'moirai2'])
+def test_model_limits_dry_run_imports_no_runtime_packages(adapter):
+    process = subprocess.run([sys.executable, '-c',
+        'import sys; from vtsfm.cli import main; '
+        f'main(["serve", "--adapter", "{adapter}", "--max-num-seqs", "4", '
+        '"--forecast-batch-rows", "4", "--dry-run"]); '
+        'assert not {"torch", "vllm", "timesfm", "toto2", "uni2ts"} & sys.modules.keys()'],
+        check=True, capture_output=True, text=True)
+    assert 'VTSFM_FORECAST_LIMITS' in json.loads(process.stdout)['environment']
 
 
 def test_missing_limits_file_is_a_cli_error_without_runtime_imports(tmp_path):
