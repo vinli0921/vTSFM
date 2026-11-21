@@ -54,6 +54,13 @@ The TimesFM adapter follows the preprocessing and postprocessing in Google's
 
 ## Other runtime dependencies
 
+The optional conformal calibration loop in `src/vtsfm/recipes/conformal.py` adapts
+[sktime 1.2.0](https://github.com/sktime/sktime/blob/v1.2.0/sktime/forecasting/conformal.py),
+copyright the sktime developers, under BSD-3-Clause. Its full license is retained
+in that module. The packaged optional factory patch in `vtsfm.recipes` targets
+AssetOpsBench's Apache-2.0 recipe source at the pinned commit above; the original
+recipe remains in the separately installed upstream project.
+
 vLLM, PyTorch, Transformers, NumPy, FastAPI, and other installed packages ship their
 own license information. Consult the installed distributions and upstream license
 files when redistributing an environment. GPU drivers and CUDA components have

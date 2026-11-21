@@ -310,6 +310,11 @@ TimesFM, Toto, and Moirai expose scheduled concurrency through
 whole-forecast batching, combine `--max-num-seqs 4` with
 `--forecast-batch-rows 8`. See the [batching boundaries](docs/numerical-transport.md#current-execution-boundary).
 
+Optional [conformal calibration batching](docs/calibration-batching.md) provides
+native Toto-2 batching plus an optional AssetOpsBench factory patch.
+The external patch must be applied separately; existing recipe calls keep their
+original estimator and behavior.
+
 Agents should start with [AGENTS.md](AGENTS.md); `CLAUDE.md` imports the same
 conventions. GitHub Actions runs basic Python lint, CPU tests, shell syntax
 checks, and package build/install smoke checks.
