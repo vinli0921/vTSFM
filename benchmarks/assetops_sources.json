@@ -28,7 +28,7 @@
       "asset_id": "Chiller 6",
       "axis": {"field": "timestamp", "step_seconds": 900},
       "seasonality": 96,
-      "notes": "The single smooth signal behind earlier accuracy conclusions; kept as the reference row"
+      "notes": "Reference signal used in the earlier Chiller 6 accuracy evaluation"
     },
     "chiller_6/condenser_water_flow": {
       "file": "chiller_6.json",

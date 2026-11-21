@@ -1,14 +1,22 @@
 # Forecast accuracy on more AssetOpsBench signals — November 14, 2026
 
-Issue #23. Harness: [AssetOps signals](../../model-integration.md#assetops-signals). Per-row data: [summary.csv](summary.csv).
+The [accuracy harness](../../model-integration.md#assetops-signals) evaluates five signals for [issue #23](https://github.com/vinli0921/vTSFM/issues/23). The [CSV](summary.csv) contains one row per model and signal.
 
 A100-SXM4-40GB, driver 595.91.07. vLLM 0.33.0 V1, Torch 2.14.0+cu130, Transformers 5.20.2, eager FP32,
 TF32 off. vTSFM `df22317` (clean tree). Pinned checkpoints: TimesFM `1d95242`, Toto `a7bab28`, Moirai `30f43ff`.
 AssetOpsBench data at `e844f64`, pinned in `benchmarks/assetops_sources.json`.
 
-Five signals, one case each: five forecast origins with context 512 and horizon 96, all nine quantiles, chosen
-where the whole horizon was recorded. Missing history slots are causally forward-filled; no filled value is
-scored. Scores below are the official native models'. Chronos-2 (separate legacy environment) is not included.
+The November 14 run directory was unavailable when we regenerated the CSV. On November 21 we replayed
+the same inputs at the original runtime revision on the A100 and generated the CSV with the table code at
+`467f2ff`. All 15 rows exactly reproduced the previously published fields. The new columns record the
+scale policy and percentage of forward-filled history. The team archive on the A100 is
+`~/vtsfm-pr66-fp32-20261121/pr66-fp32-five-signals-df22317-20261121.tar.gz`
+(SHA-256 `ae82bbc4ec262d8c98f008a9c80e32db4cbb6a85d1e587c410b60a99551091c3`).
+
+The five signals come from three assets. For each signal we selected five forecast origins with 512 history
+steps and 96 recorded future values. Missing history slots were causally forward-filled. The scores below use
+the official native FP32 forecasts and give equal weight to each origin. MAE and MASE use the median forecast.
+Scaled quantile loss (SQL) summarizes all nine quantiles.
 
 ```bash
 .venv/bin/python -m benchmarks.prepare_data --output data --assetops-signals
@@ -18,20 +26,47 @@ scored. Scores below are the official native models'. Chronos-2 (separate legacy
   --cases data/accuracy-signals.json --output results/issue23/fp32-run2
 ```
 
+To regenerate the published CSV from a completed run directory with this PR's table generator:
+
+```bash
+run=results/issue23/fp32-run2
+.venv/bin/python -m benchmarks.accuracy_table "$run" --scale all --output "$run"
+cp "$run/accuracy_table.csv" docs/baselines/2026-11-14-assetops-signal-accuracy/summary.csv
+```
+
 ## Results (FP32)
 
-| Signal | Seasonality | TimesFM MASE / SQL | Toto MASE / SQL | Moirai MASE / SQL | Seasonal naive MASE | Worst ÷ best MASE / SQL |
+| Signal | Seasonality | TimesFM MASE / SQL | Toto MASE / SQL | Moirai MASE / SQL | Seasonal naive MASE | History mean MASE |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Chiller 6 supply temperature | 96 | 0.805 / 0.591 | **0.803 / 0.586** | 0.809 / 0.601 | 1.080 | 1.01 / 1.02 |
-| Chiller 6 condenser water flow | 96 | 0.336 / 0.293 | **0.335 / 0.284** | 0.339 / 0.291 | 0.486 | 1.01 / 1.03 |
-| MetroPT oil temperature | 24 | **0.663 / 0.522** | 0.879 / 0.634 | 0.758 / 0.561 | 0.887 | 1.33 / 1.21 |
-| MetroPT motor current | 24 | 0.987 / **0.844** | 1.122 / 0.917 | **0.969** / 0.853 | 1.211 | 1.16 / 1.09 |
-| Hydraulic PS1 pressure | 1 | 7.262 / 5.686 | **6.451 / 4.352** | 9.265 / 7.369 | 11.696 | 1.44 / 1.69 |
+| Chiller 6 supply temperature | 96 | 0.805 / 0.591 | 0.803 / 0.586 | 0.809 / 0.601 | 1.080 | 0.806 |
+| Chiller 6 condenser water flow | 96 | 0.336 / 0.293 | 0.335 / 0.284 | 0.339 / 0.291 | 0.486 | 0.767 |
+| MetroPT oil temperature | 24 | 0.663 / 0.522 | 0.879 / 0.634 | 0.758 / 0.561 | 0.887 | 0.736 |
+| MetroPT motor current | 24 | 0.987 / 0.844 | 1.122 / 0.917 | 0.969 / 0.853 | 1.211 | 0.835 |
+| Hydraulic PS1 pressure | 1 | 7.262 / 5.686 | 6.451 / 4.352 | 9.265 / 7.369 | 11.696 | 14.197 |
 
-Bold marks the best model per metric. SQL is the harness's quantile approximation of a scaled CRPS; seasonal
-naive is a point forecast, so its SQL equals its MASE. Hydraulic values are one per machine cycle with
-seasonality 1, so its MASE scale is the one-cycle change and values above 1 are expected; compare models with
-each other and with naive there.
+The history-mean baseline predicts the arithmetic mean of the same 512 input values at each of the 96
+future steps. Both baselines are point forecasts, so their SQL equals their MASE when repeated across the
+nine quantiles.
+
+### Sensitivity to the forecast origin
+
+- **Chiller 6 supply temperature.** Lag-1 autocorrelations for the five input histories range from −0.012
+  to 0.124. Predicting the history mean gives MASE 0.806, within the models’ 0.803–0.809 range. On these
+  windows, the three models had about the same median-forecast error as predicting a constant.
+  Across 480 predictions per model, the native medians differed from their own window’s history mean
+  by 5.40 signal units on average for TimesFM, 4.58 for Toto and 6.72 for Moirai (absolute differences).
+  The actual future values differed from that mean by 33.38 units on average.
+- **Chiller 6 condenser flow.** At origin 512, all 96 future readings exceed 250 and reach 11,030.
+  At each of the four later origins, 79–85% of future readings are zero and the maximum is below 10.
+  The first origin accounts for 99.7–99.8% of each model's total absolute error. Two of the near-zero
+  windows have large seasonal scales (3,498 and 366), which give even smaller scaled errors for those windows.
+- **MetroPT.** Predicting the history mean gives lower MASE than all three models for motor current (0.835),
+  and lower MASE than Toto and Moirai for oil temperature (0.736). All three models score below seasonal
+  naive on the sampled windows. For Toto on oil temperature the margin is 0.879 versus 0.887.
+- **Hydraulic PS1.** Each window’s scale is its mean absolute one-cycle training change. The five scales
+  are 1.479, 2.489, 0.026, 0.027 and 0.030 bar. A given absolute error therefore contributes much more to
+  MASE in the last three windows. Mean MAE in bar is 1.506 for Moirai, 1.516 for TimesFM and 1.653 for
+  Toto, the reverse of their order under mean MASE. A small scale can push MASE above one.
 
 ### MetroPT history imputation
 
@@ -39,7 +74,7 @@ Oil temperature and motor current use the same five forecast origins. In each 51
 32–89 slots (6–17%) were forward-filled. The reported seasonal scale uses all 488 lag-24 pairs
 from each history. Restricting the scale calculation to pairs with two observed readings gives
 scales 3–12% smaller for oil temperature and 4–31% smaller for motor current across these
-origins. The reported model spreads apply to these windows and their forward-filled inputs.
+origins. Each model saw the same forward-filled inputs.
 
 | Forecast origin slot | Forward-filled history slots | Lag-24 pairs with both readings observed |
 | ---: | ---: | ---: |
@@ -50,28 +85,25 @@ origins. The reported model spreads apply to these windows and their forward-fil
 | 4534 | 51 | 391 |
 
 Re-scoring with scales over recorded pairs only (`accuracy_table --scale observed`, an exact rescaling of
-this run's scores) raises MetroPT MASE because the scales shrink, but leaves the comparison intact:
+this run's scores) raises the sampled MetroPT MASE because the scales shrink.
 
-| Signal | TimesFM MASE | Toto MASE | Moirai MASE | Naive MASE | Worst ÷ best MASE / SQL |
+| Signal | TimesFM MASE | Toto MASE | Moirai MASE | Seasonal naive MASE | Largest ÷ smallest sampled MASE / SQL |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | MetroPT oil temperature | 0.711 | 0.945 | 0.818 | 0.956 | 1.33 / 1.22 |
 | MetroPT motor current | 1.200 | 1.321 | 1.169 | 1.463 | 1.13 / 1.07 |
 
-Rankings, model spreads and the margins over seasonal naive keep their direction. Toto's oil-temperature margin
-over naive narrows further (0.945 vs 0.956). Chiller histories are 0.2% filled and hydraulic 0%, so their
-scores are effectively unchanged.
+The order of the three mean MASE values is the same under both scale policies on these five origins.
+Toto's oil-temperature margin over seasonal naive narrows to 0.945 versus 0.956. Chiller histories are
+0.2% filled and hydraulic histories are fully observed.
 
-## Answer
+## Interpretation
 
-- **"Accuracy is a tie" holds only for the chiller signals.** On both chiller signals all three models are
-  within 1–3%. On the others they are not: worst ÷ best MASE is 1.33 for oil temperature, 1.16 for motor current
-  and 1.44 for hydraulic pressure (1.69 in SQL). No model is best everywhere: Toto leads on the chiller and
-  hydraulic signals, TimesFM on oil temperature, and Moirai/TimesFM split motor current.
-- **All three models scored below seasonal naive on the sampled signals** in MASE and SQL. Toto's oil-temperature
-  MASE was narrowly lower at 0.879 versus 0.887 across five correlated windows.
-- **"BF16 is lossless" is not tested yet.** Native BF16 (#21, PR #57) is not on `main`; it merged into the
-  compilation branch (#56). Combine an FP32 and a BF16 run with `python -m benchmarks.accuracy_table`, which then
-  adds per-signal BF16 − FP32 deltas.
+Each signal represents one asset and five correlated origins. Changing the origin, error scale or baseline
+can change the comparison. Broader sampling and aggregation across operating regimes are tracked in [#84](https://github.com/vinli0921/vTSFM/issues/84).
+
+This run covers FP32. A matched BF16/TF32 accuracy comparison on these signals remains part of
+[#23](https://github.com/vinli0921/vTSFM/issues/23). The table generator can combine runs made with the
+same inputs at different precisions.
 
 ## Parity
 
@@ -86,9 +118,4 @@ Follow-up work ([#71](https://github.com/vinli0921/vTSFM/issues/71)) should meas
 case and the passing signals. Include perturbed forecasts to verify that the candidate still rejects material
 deviations. The accuracy profile continues to require `rtol=atol=1e-4`.
 
-## Limits
-
-- One asset per signal and five correlated windows each: evidence about these signals, not a model ranking.
-  Differences of a few percent are within what different windows could change.
-- One FP32 run; no repeats.
-- Chronos-2 and BF16/TF32 are not covered.
+The replay uses the same five origins per signal. This evaluation covers TimesFM, Toto and Moirai.

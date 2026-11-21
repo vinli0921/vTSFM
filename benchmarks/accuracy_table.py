@@ -156,7 +156,7 @@ def precision_deltas(table) -> list[dict]:
 
 
 def model_spread(table) -> list[dict]:
-    """Best and worst model per signal and dtype, to judge whether scores tie."""
+    """Smallest and largest sampled mean per signal and dtype."""
     spread = {}
     for row in table:
         if row["MASE"] is not None:
@@ -194,8 +194,8 @@ def markdown(table) -> str:
                      f"{' (parity failed)' if row['parity_failed_cases'] else ''} |")
     spread = model_spread(table)
     if spread:
-        lines += ["", "**Model spread** (worst ÷ best across models; near 1.00 means the models tie)", "",
-                  "| Signal | dtype | Best MASE | Worst MASE | Worst ÷ best MASE | Best SQL | Worst SQL | Worst ÷ best SQL |",
+        lines += ["", "**Model spread** (largest ÷ smallest mean on the sampled windows)", "",
+                  "| Signal | dtype | Lowest MASE | Highest MASE | Ratio | Lowest SQL | Highest SQL | Ratio |",
                   "| --- | --- | --- | --- | ---: | --- | --- | ---: |"]
         for entry in spread:
             lines.append(f"| {entry['signal']} | {entry['dtype']} | {entry['best_MASE']} | {entry['worst_MASE']} | "
