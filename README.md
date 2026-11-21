@@ -165,6 +165,9 @@ reuses vLLM's block allocator and Triton backend for TimesFM. It is a manual
 in-process prototype, separate from the serving paths above.
 The [complete-forecast CUDA graph experiment](docs/timesfm-full-graph.md) compares
 fixed-shape dense/paged forecasts with matched eager and captured execution.
+The [TimesFM HTTP graph mode](docs/timesfm-graph-serving.md) exposes this experiment
+through `/pooling` on a single scheduled slot at batch 2, context 512 and horizon
+1024.
 
 Toto uses Python 3.12.12 and a pinned upstream revision. Moirai keeps its
 NumPy 1.26 dependencies and explicitly overrides its Torch

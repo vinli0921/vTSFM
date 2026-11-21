@@ -61,3 +61,7 @@ class MemoryMetrics:
         if executor is not None:
             state.update(executor.snapshot())
         return state
+
+    def bench_timesfm_forecast(self):
+        """Experimental fixed-owner counters from the model that serves /pooling."""
+        return self.model_runner.get_model().fixed_forecast_snapshot()
