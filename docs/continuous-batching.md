@@ -135,6 +135,25 @@ request count is bounded separately by the API queue cap.
 
 ## Checks and reproduction
 
+### Experimental prefill grouping
+
+Set `VTSFM_PREFILL_GROUP_STEPS=1` when starting a TimesFM continuous server
+to let an already running decode finish a block before admitting the oldest
+waiting request. The scheduler considers a hold only when this can form a
+larger group of compatible queued prefills within the slot, row and work
+limits. With four configured slots it examines at most the first four
+requests in the FIFO queue. A one-block forecast in the
+examined prefix bypasses the hold. An idle worker starts immediately.
+
+The default is `0`. A value of `2` allows up to two scheduler iterations.
+The deadline belongs to the oldest waiter and cannot renew while it stays at
+the head. The bound applies to the extra grouping hold. Normal waits for
+busy slots or numerical capacity can last longer. The
+[A100 prefill grouping experiment](baselines/2026-11-20-timesfm-prefill-grouping/README.md)
+compares the one-step policy with PR #80 on long bursts and short requests.
+
+### GPU checks
+
 Run separately on an idle Linux GPU: the first command owns a native CUDA model.
 
 ```bash
@@ -142,6 +161,8 @@ CUDA_VISIBLE_DEVICES=0 VTSFM_RUN_TIMESFM_STEPPING=1 PYTHONPATH=src:tests:. \
   .venv-timesfm25/bin/python -m pytest tests/test_timesfm_stepping.py -q -s
 CUDA_VISIBLE_DEVICES=0 VTSFM_RUN_TIMESFM_CONTINUOUS=1 PYTHONPATH=src:tests:. \
   .venv-timesfm25/bin/python -m pytest tests/test_timesfm_continuous.py -q -s
+CUDA_VISIBLE_DEVICES=0 VTSFM_RUN_TIMESFM_PREFILL_HOLD=1 PYTHONPATH=src:tests:. \
+  .venv-timesfm25/bin/python -m pytest tests/test_timesfm_prefill_hold.py -q -s
 CUDA_VISIBLE_DEVICES=0 VTSFM_TEST_ADAPTER=timesfm25 \
   VTSFM_TEST_OUTPUT=results/timesfm-block-integration-NEW PYTHONPATH=src:tests:. \
   .venv-timesfm25/bin/python -m pytest tests/test_timesfm_block_integration.py -q -s
