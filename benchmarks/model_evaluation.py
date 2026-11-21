@@ -215,6 +215,56 @@ def assetops_cases(data_dir, *, count=2, context=128, horizon=32, batch_size=2):
     return cases
 
 
+def signal_cases(data_dir, names=None, *, context=512, horizon=96, windows=5):
+    """Build one accuracy case per pinned signal from ``assetops_sources.json``.
+
+    Each case holds ``windows`` independent rows of shape [context] from one
+    signal, at evenly spaced origins whose next ``horizon`` slots were all
+    actually recorded. Histories may contain slots causally forward-filled
+    from the signal's own earlier readings; those positions are recorded and
+    are never scored. Item IDs are ``<signal>/origin-<slot>``. Reads files
+    already placed by ``python -m benchmarks.prepare_data --assetops-signals``.
+    """
+    for value, label in [(context, "context"), (horizon, "horizon"), (windows, "windows")]:
+        _positive_integer(value, label)
+    if horizon > 1024:
+        raise ValueError("prediction_length must be <= 1024")
+    names = list(prepare_data.SOURCES["signals"]) if names is None else list(names)
+    cases = []
+    for name in names:
+        signal = prepare_data.load_signal(data_dir, name)
+        values, observed = signal["values"], signal["observed"]
+        first = observed.index(True)
+        filled, last = [], None
+        for value in values:
+            last = value if value is not None else last
+            filled.append(last)
+        origins = [origin for origin in range(first + context, len(values) - horizon + 1)
+                   if all(observed[origin:origin + horizon])]
+        if len(origins) < windows:
+            raise ValueError(f"{name}: need {windows} origins with {horizon} recorded future values "
+                             f"after context {context}; found {len(origins)}")
+        chosen = [origins[(index * (len(origins) - 1)) // max(1, windows - 1)] for index in range(windows)]
+        imputed_positions = [[index for index in range(origin - context, origin) if not observed[index]]
+                             for origin in chosen]
+        cases.append(validate_case({
+            "name": f"signal-{name.replace('/', '-')}-c{context}-h{horizon}",
+            "data": {"inputs": [{"target": filled[origin - context:origin], "item_id": f"{name}/origin-{origin}"}
+                                for origin in chosen],
+                     "parameters": {"prediction_length": horizon, "quantile_levels": list(QUANTILES)}},
+            "evaluation": {"targets": [values[origin:origin + horizon] for origin in chosen],
+                           "observed": [[True] * horizon for _ in chosen], "seasonality": signal["seasonality"]},
+            "provenance": {**signal["provenance"], "origins": chosen,
+                           "forecast_starts": [signal["axis"][origin] for origin in chosen],
+                           "past_imputed_positions": imputed_positions,
+                           "past_imputed_counts": [len(positions) for positions in imputed_positions],
+                           "history_policy": "Recorded readings; missing slots causally forward-filled from earlier readings only",
+                           "truth_policy": "Only windows whose whole horizon was recorded; no filled value is scored",
+                           "sampling_unit": "Windows from one asset's signal; correlated, not independent assets"},
+        }))
+    return cases
+
+
 def seasonal_naive_forecasts(case):
     """Return [series, nine quantiles, horizon] repeating the last season."""
     import numpy as np
@@ -231,18 +281,69 @@ def seasonal_naive_forecasts(case):
     return np.asarray(rows, dtype=float)
 
 
-def score_forecasts(case, values):
+SCALES = ("all", "observed")
+
+
+def history_observed(case):
+    """Per-row history masks: True where a value was recorded, False where filled.
+
+    Read from provenance: signal cases (``origins`` with per-row absolute
+    ``past_imputed_positions``), MetroPT fixture cases (one ``origin`` shared by
+    all rows) and fev cases (``series[i].past_imputed_offsets`` within each
+    history). Returns None for a case that does not record its imputation.
+    """
+    provenance = case.get("provenance") or {}
+    lengths = [len(item["target"]) for item in case["data"]["inputs"]]
+    if "origins" in provenance and "past_imputed_positions" in provenance:
+        rows = [(origin - length, positions) for origin, length, positions
+                in zip(provenance["origins"], lengths, provenance["past_imputed_positions"], strict=True)]
+    elif "origin" in provenance and "past_imputed_positions" in provenance:
+        rows = [(provenance["origin"] - length, provenance["past_imputed_positions"]) for length in lengths]
+    elif isinstance(provenance.get("series"), list) and all("past_imputed_offsets" in row for row in provenance["series"]):
+        rows = [(0, row["past_imputed_offsets"]) for row in provenance["series"]]
+    else:
+        return None
+    masks = []
+    for (start, positions), length in zip(rows, lengths, strict=True):
+        mask = [True] * length
+        for position in positions:
+            if not 0 <= position - start < length:
+                raise ValueError(f"{case['name']}: imputed position {position} is outside its history")
+            mask[position - start] = False
+        masks.append(mask)
+    return masks
+
+
+def seasonal_scale(past, seasonality, observed=None):
+    """Mean absolute lag-``seasonality`` difference in a history, and its pair count.
+
+    With ``observed``, only pairs whose two values were both recorded count, so
+    forward-filled runs cannot shrink the scale. Returns (None, 0) without pairs.
+    """
+    pairs = [abs(past[index] - past[index - seasonality]) for index in range(seasonality, len(past))
+             if observed is None or (observed[index] and observed[index - seasonality])]
+    return (sum(pairs) / len(pairs), len(pairs)) if pairs else (None, 0)
+
+
+def score_forecasts(case, values, *, scale="all"):
     """Score [N, 9, H] forecasts against observed future labels, using past only.
 
     MAE uses the median. MASE divides median MAE by mean absolute seasonal
-    differences in the supplied past (including documented causal fills).
-    SQL averages twice the pinball loss over all nine quantiles, divided by the
-    same scale. Aggregates are equal-weight means over eligible series. Undefined
-    scales are excluded explicitly, never converted to zero or JSON NaN.
+    differences in the supplied past. ``scale="all"`` (default) uses every pair,
+    including documented causal fills; ``scale="observed"`` uses only pairs whose
+    two values were recorded (see ``history_observed``). SQL averages twice the
+    pinball loss over all nine quantiles, divided by the same scale. Aggregates
+    are equal-weight means over eligible series. Undefined scales (zero, or no
+    usable pairs) are excluded explicitly, never converted to zero or JSON NaN.
     """
     import numpy as np
 
+    if scale not in SCALES:
+        raise ValueError(f"scale must be one of {SCALES}")
     validate_case(case)
+    masks = history_observed(case)
+    if scale == "observed" and masks is None:
+        raise ValueError(f"{case['name']}: observed-pair scaling needs recorded history imputation")
     inputs, evaluation = case["data"]["inputs"], case["evaluation"]
     horizon = case["data"]["parameters"]["prediction_length"]
     forecast = np.asarray(values, dtype=float)
@@ -254,22 +355,29 @@ def score_forecasts(case, values):
         truth = np.asarray([value if flag else 0.0 for value, flag in zip(evaluation["targets"][row], observed)], dtype=float)
         past = np.asarray(item["target"], dtype=float)
         seasonality = evaluation["seasonality"]
-        scale = float(np.abs(past[seasonality:] - past[:-seasonality]).mean()) if len(past) > seasonality else None
-        status = "insufficient_history" if scale is None else "zero" if scale == 0 else "valid"
+        differences = np.abs(past[seasonality:] - past[:-seasonality])
+        if scale == "observed":
+            recorded = np.asarray(masks[row], dtype=bool)
+            differences = differences[recorded[seasonality:] & recorded[:-seasonality]]
+        series_scale = float(differences.mean()) if differences.size else None
+        status = "insufficient_history" if series_scale is None else "zero" if series_scale == 0 else "valid"
         mae = mase = sql = None
         if observed.any():
             mae = float(np.abs(forecast[row, 4, observed] - truth[observed]).mean())
             if status == "valid":
                 errors = truth[None, observed] - forecast[row][:, observed]
                 quantiles = np.asarray(QUANTILES)[:, None]
-                mase = mae / scale
-                sql = float((2 * np.maximum(quantiles * errors, (quantiles - 1) * errors)).mean() / scale)
+                mase = mae / series_scale
+                sql = float((2 * np.maximum(quantiles * errors, (quantiles - 1) * errors)).mean() / series_scale)
         per_series.append({"item_id": item["item_id"], "MAE": mae, "MASE": mase, "SQL": sql,
-                           "seasonal_scale": scale, "scale_status": status, "observed_targets": int(observed.sum())})
+                           "seasonal_scale": series_scale, "scale_status": status,
+                           "scale_pairs": int(differences.size),
+                           "filled_history": None if masks is None else masks[row].count(False),
+                           "observed_targets": int(observed.sum())})
     def average(metric):
         eligible = [row[metric] for row in per_series if row[metric] is not None]
         return sum(eligible) / len(eligible) if eligible else None
-    result = {"MAE": average("MAE"), "MASE": average("MASE"), "SQL": average("SQL"),
+    result = {"MAE": average("MAE"), "MASE": average("MASE"), "SQL": average("SQL"), "scale": scale,
             "counts": {"series": len(inputs), "scored_series": sum(row["MAE"] is not None for row in per_series),
                        "observed_targets": sum(row["observed_targets"] for row in per_series),
                        "valid_scaled_series": sum(row["MASE"] is not None for row in per_series),
@@ -407,16 +515,34 @@ def main():
     prepare.add_argument("--output", type=Path, required=True, help="New JSON manifest (existing files are rejected)")
     prepare.add_argument("--fev", action="store_true", help="Also download and prepare the three pinned fev smoke tasks")
     prepare.add_argument("--cache-dir", type=Path, help="fev download/cache directory (default: beside output)")
+    signals = prepare.add_argument_group(
+        "AssetOps signals", "Cases from the named signals in benchmarks/assetops_sources.json. "
+        "These replace the default MetroPT fixture windows; --fev still adds its tasks.")
+    signals.add_argument("--assetops-signals", action="store_true", help="Use every pinned signal")
+    signals.add_argument("--signal", action="append", metavar="NAME",
+                         choices=sorted(prepare_data.SOURCES["signals"]), help="Use this signal (repeatable)")
+    signals.add_argument("--signal-context", type=int, default=512)
+    signals.add_argument("--signal-horizon", type=int, default=96)
+    signals.add_argument("--signal-windows", type=int, default=5, help="Rows (forecast origins) per signal")
     args = parser.parse_args()
     if args.output.exists():
         parser.error(f"Output already exists: {args.output}")
-    cases = assetops_cases(args.data_dir, count=5, batch_size=7)
+    names = args.signal or (list(prepare_data.SOURCES["signals"]) if args.assetops_signals else None)
+    if names is None:
+        cases = assetops_cases(args.data_dir, count=5, batch_size=7)
+    else:
+        cases = signal_cases(args.data_dir, names, context=args.signal_context,
+                             horizon=args.signal_horizon, windows=args.signal_windows)
     if args.fev:
         cases.extend(fev_cases(args.cache_dir or args.output.parent / "fev-cache"))
     manifest = {"cases": cases, "provenance": {
         "purpose": "Small real-data adapter quality checks, not a full benchmark or model ranking",
-        "quantile_levels": list(QUANTILES), "assetops_windows": 5, "fev_custom_smoke": args.fev,
+        "quantile_levels": list(QUANTILES), "fev_custom_smoke": args.fev,
         "metrics": "Median MAE/MASE; SQL averages twice pinball loss across nine quantiles; past-only seasonal scale",
+        **({"assetops_windows": 5} if names is None else {
+            "assetops_signals": names, "signal_context": args.signal_context,
+            "signal_horizon": args.signal_horizon, "signal_windows": args.signal_windows,
+            "sources_commit": prepare_data.COMMIT}),
     }}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x") as stream:
