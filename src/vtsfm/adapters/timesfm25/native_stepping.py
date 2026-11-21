@@ -50,12 +50,13 @@ class PagedTimesFMStepper(TimesFMStepper):
     """
 
     _arena_type = None
+    _patch_attention = True
 
     def __init__(self, runtime, *, max_sequences=2, max_tokens=284):
         if not all(hasattr(TimesFMStepper, method)
                    for method in ('_prefill_passes', '_advance_passes', '_store', '_block_decode_forward')):
             raise ValueError('Native proof requires the recorded optimized stepper and attention seam')
-        if getattr(runtime.model, '_vtsfm_paged_stepper_active', False):
+        if getattr(runtime.model, '_vtsfm_paged_stepper_mode', None) is not None:
             raise ValueError('TimesFM model is already owned by a paged stepper')
         super().__init__(runtime)
         attentions = [layer.attn for layer in self.model.stacked_xf]
@@ -72,7 +73,9 @@ class PagedTimesFMStepper(TimesFMStepper):
         self._counter = 0
         self._original = []
         self._closed = False
-        self.model._vtsfm_paged_stepper_active = True
+        self.model._vtsfm_paged_stepper_mode = 'patched' if self._patch_attention else 'explicit'
+        if not self._patch_attention:
+            return
         try:
             for index, attention in enumerate(attentions):
                 original = vars(attention).get('forward', _NO_FORWARD_OVERRIDE)
@@ -282,7 +285,7 @@ class PagedTimesFMStepper(TimesFMStepper):
             ))
         finally:
             self._restore_attention()
-            del self.model._vtsfm_paged_stepper_active
+            del self.model._vtsfm_paged_stepper_mode
             self._active = None
             self._closed = True
 

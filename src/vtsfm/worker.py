@@ -38,3 +38,19 @@ class ForecastWorker(Worker):
             raise ValueError('Forecast routing requires eager execution on one GPU')
         super().load_model(load_dummy_weights=load_dummy_weights)
         self.model_runner.get_model().set_request_order(lambda: slot_request_ids(self.model_runner))
+
+    def compile_or_warm_up_model(self):
+        times = super().compile_or_warm_up_model()
+        warm = getattr(self.model_runner.get_model(), 'warm_fixed_forecast', None)
+        if warm is not None:
+            warm()
+        return times
+
+    def shutdown(self):
+        model = getattr(getattr(self, 'model_runner', None), 'model', None)
+        close = getattr(model, 'close_fixed_forecast', None)
+        try:
+            if close is not None:
+                close()
+        finally:
+            super().shutdown()

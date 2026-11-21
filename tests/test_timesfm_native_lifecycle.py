@@ -100,6 +100,18 @@ def native_lifecycle(monkeypatch):
     return native.PagedTimesFMStepper, runtime, np.ones((2, 32)).view(Tensor), created
 
 
+@pytest.mark.parametrize('name,value', [
+    ('VTSFM_FORECAST_EXECUTION', 'compile'),
+    ('VTSFM_PRECISION', 'tf32'),
+])
+def test_fixed_forecast_runtime_rejects_compile_or_tf32_before_loading(native_lifecycle, monkeypatch, name, value):
+    _, runtime, _, _ = native_lifecycle
+    monkeypatch.setenv('VTSFM_TIMESFM_FORECAST_MODE', 'paged-graph')
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match='eager FP32'):
+        type(runtime)({})
+
+
 def test_failed_reservation_preserves_primary_error_and_releases_other_leases(native_lifecycle):
     paged, runtime, context, created = native_lifecycle
     with paged(runtime) as stepper:
