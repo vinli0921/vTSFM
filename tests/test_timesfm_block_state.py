@@ -91,6 +91,81 @@ def test_singleton_adopts_prefill_and_advances_owned_caches_in_place(runtimes, m
     assert state.tensor_bytes == 0 and state.passes == []
 
 
+@pytest.mark.parametrize('mixed_layout', [False, True], ids=['both-packed', 'large-peer-cloned'])
+def test_shared_prefill_stores_compact_private_cache_for_each_owner_and_flip(runtimes, monkeypatch, mixed_layout):
+    from torch.multiprocessing.reductions import StorageWeakRef
+
+    runtime, reference = runtimes
+    stepper = TimesFMStepper(runtime)
+    short = stepper.initialize(context((1, 33)), 129)
+    values = context((61,), 3)
+    long = stepper.initialize(values, 513)
+    if mixed_layout:
+        # The tiny model's short, two-row owner fits exactly; the longer peer doesn't.
+        short_bytes = 2 * runtime.model.x * short.rows * short.cache_capacity * runtime.model.h * runtime.model.hd * 4
+        monkeypatch.setattr('vtsfm.adapters.timesfm25.stepping._MAX_PACKED_PREFILL_KV_BYTES', short_bytes)
+    expected = reference.forecast(values, 513)
+    store = stepper._store
+
+    def check_store(states, stream, caches, stats, block, spread=None):
+        store(states, stream, caches, stats, block, spread)
+        if caches is None:
+            return
+        start = 0
+        for state in states:
+            rows = slice(start, start + state.rows)
+            for layer, shared in zip(state.passes[stream].caches, caches, strict=True):
+                for field in ('key', 'value'):
+                    torch.testing.assert_close(getattr(layer, field), getattr(shared, field)[rows, :state.cache_capacity],
+                                               rtol=0, atol=0)
+                for field in ('next_index', 'num_masked'):
+                    torch.testing.assert_close(getattr(layer, field), getattr(shared, field)[rows], rtol=0, atol=0)
+            start += state.rows
+
+    def cache_storages(state, packed):
+        storages = set()
+        for stream in state.passes:
+            for fields in (('key', 'value'), ('next_index',), ('num_masked',)):
+                views = [getattr(layer, field) for layer in stream.caches for field in fields]
+                # Each buffer contains only this request's rows and physical capacity.
+                backing = {StorageWeakRef(view.untyped_storage()): view.untyped_storage().nbytes() for view in views}
+                assert sum(backing.values()) == sum(view.numel() * view.element_size() for view in views)
+                assert len(backing) == (1 if packed else len(views))
+                assert storages.isdisjoint(backing)
+                storages.update(backing)
+        return storages
+
+    monkeypatch.setattr(stepper, '_store', check_store)
+    stepper.prefill([short, long])
+    short_buffers, long_buffers = cache_storages(short, True), cache_storages(long, not mixed_layout)
+    assert short_buffers.isdisjoint(long_buffers)
+    stepper.release(short)
+    assert all(buf.expired() for buf in short_buffers)
+    assert all(not buf.expired() for buf in long_buffers)
+    while not stepper.complete(long):
+        stepper.advance([long])
+    torch.testing.assert_close(stepper.finalize(long), expected, rtol=1e-4, atol=1e-4)
+    assert all(buf.expired() for buf in long_buffers)
+
+
+@pytest.mark.parametrize(('width', 'capacity', 'packed'), [(45, 44, True), (45, 45, False), (0, 44, True)])
+def test_prefill_cache_layout_at_w4_slab_limit_and_for_paged_placeholders(width, capacity, packed):
+    from types import SimpleNamespace
+
+    from torch.multiprocessing.reductions import StorageWeakRef
+    from vtsfm.adapters.timesfm25.stepping import _split_prefill_caches
+
+    # Exact 20-layer checkpoint geometry without allocating model weights or K/V data.
+    stepper = object.__new__(TimesFMStepper)
+    stepper.model = SimpleNamespace(x=20, h=16, hd=80)
+    shared = stepper._new_caches(4, width, 'meta')
+    caches = _split_prefill_caches(shared, slice(2, 4), capacity)
+    for layer in caches:
+        assert layer.key.shape == layer.value.shape == (2, min(capacity, width), 16, 80)
+    storages = {StorageWeakRef(t.untyped_storage()) for layer in caches for t in (layer.key, layer.value)}
+    assert len(storages) == (1 if packed else 40)
+
+
 def test_staggered_positions_reordering_and_retirement_preserve_native_outputs(runtimes):
     runtime, reference = runtimes
     cases = {'a': (context((97, 160), -1.5), 1024),
