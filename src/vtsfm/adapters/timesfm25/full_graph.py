@@ -42,6 +42,11 @@ class _FrozenArena(PagedCacheArena):
 
 
 class _DenseStepper(TimesFMStepper):
+    def _block_decode_forward(self, states, inputs, masks, cache_groups, positions):
+        # Keep eager and captured graph controls on the same historical KV path.
+        return block_decode_forward(self.model, inputs, masks, cache_groups, positions,
+                                    optimize_cache=False)
+
     def _prefill_forward(self, inputs, masks, caches):
         output, groups = block_decode_forward(self.model, inputs, masks, [caches], [0], prefill=True)
         return output, groups[0]
