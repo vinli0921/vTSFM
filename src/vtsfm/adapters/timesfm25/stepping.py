@@ -80,6 +80,22 @@ class TimesFMForecastState:
         return sum(tensor.numel() * tensor.element_size() for tensor in buffers if tensor is not None)
 
 
+def _pack_prefill_caches(caches, rows, capacity):
+    """Copy one owner's prefill rows into storage private to this flip."""
+    kv = [tensor[rows] for cache in caches for tensor in (cache.key, cache.value)]
+    if capacity < kv[0].shape[1]:
+        # Mixed horizons share the widest prefill cache. Retain only this owner's capacity.
+        kv = [tensor[:, :capacity] for tensor in kv]
+    # Each layer gets disjoint contiguous views. Native prefill can produce
+    # int64 mask counts while its write indices remain int32.
+    kv = torch.stack(kv).unbind()
+    next_indices = torch.stack([cache.next_index[rows] for cache in caches]).unbind()
+    mask_counts = torch.stack([cache.num_masked[rows] for cache in caches]).unbind()
+    return [DecodeCache(key=kv[2 * i], value=kv[2 * i + 1],
+                        next_index=next_indices[i], num_masked=mask_counts[i])
+            for i in range(len(caches))]
+
+
 class TimesFMStepper:
     """Advance original TimesFM algorithms one 128-point forecast block at a time.
 
@@ -170,13 +186,7 @@ class TimesFMStepper:
                 # exclusively to this request. Keep their storage in place.
                 target.caches = caches
             elif caches is not None:
-                # Split prefill once; no request may retain peer allocations.
-                target.caches = [DecodeCache(
-                    next_index=cache.next_index[section].clone(),
-                    num_masked=cache.num_masked[section].clone(),
-                    key=cache.key[section, :state.cache_capacity].clone(),
-                    value=cache.value[section, :state.cache_capacity].clone(),
-                ) for cache in caches]
+                target.caches = _pack_prefill_caches(caches, section, state.cache_capacity)
             target.last_n, target.last_mu, target.last_sigma = (value[section].clone() for value in stats)
             target.feedback = block[section, :, self.model.aridx].clone()
             target.block = block[section, :, 1:].clone()
@@ -212,7 +222,7 @@ class TimesFMStepper:
         for stream in range(2):
             half = slice(stream * rows, (stream + 1) * rows)
             # Row slices are views. A singleton request keeps both halves of its
-            # own allocation; shared cohorts are cloned per request by _store.
+            # own allocation; _store packs shared cohorts into per-request storage.
             stream_caches = [DecodeCache(
                 next_index=cache.next_index[half], num_masked=cache.num_masked[half],
                 key=cache.key[half], value=cache.value[half],

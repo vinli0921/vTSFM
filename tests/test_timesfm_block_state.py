@@ -91,6 +91,58 @@ def test_singleton_adopts_prefill_and_advances_owned_caches_in_place(runtimes, m
     assert state.tensor_bytes == 0 and state.passes == []
 
 
+def test_shared_prefill_stores_compact_private_cache_for_each_owner_and_flip(runtimes, monkeypatch):
+    from torch.multiprocessing.reductions import StorageWeakRef
+
+    runtime, reference = runtimes
+    stepper = TimesFMStepper(runtime)
+    short = stepper.initialize(context((1, 33)), 129)
+    values = context((61,), 3)
+    long = stepper.initialize(values, 513)
+    expected = reference.forecast(values, 513)
+    store = stepper._store
+
+    def check_store(states, stream, caches, stats, block, spread=None):
+        store(states, stream, caches, stats, block, spread)
+        if caches is None:
+            return
+        start = 0
+        for state in states:
+            rows = slice(start, start + state.rows)
+            for layer, shared in zip(state.passes[stream].caches, caches, strict=True):
+                for field in ('key', 'value'):
+                    torch.testing.assert_close(getattr(layer, field), getattr(shared, field)[rows, :state.cache_capacity],
+                                               rtol=0, atol=0)
+                for field in ('next_index', 'num_masked'):
+                    torch.testing.assert_close(getattr(layer, field), getattr(shared, field)[rows], rtol=0, atol=0)
+            start += state.rows
+
+    def packed_storages(state):
+        storages = set()
+        for stream in state.passes:
+            for fields in (('key', 'value'), ('next_index',), ('num_masked',)):
+                views = [getattr(layer, field) for layer in stream.caches for field in fields]
+                owned = views[0].untyped_storage()
+                # Each buffer contains only this request's rows and physical capacity.
+                assert owned.nbytes() == sum(view.numel() * view.element_size() for view in views)
+                assert all(view.untyped_storage().data_ptr() == owned.data_ptr() for view in views)
+                storages.add(StorageWeakRef(owned))
+        assert len(storages) == 6
+        return storages
+
+    monkeypatch.setattr(stepper, '_store', check_store)
+    stepper.prefill([short, long])
+    short_buffers, long_buffers = packed_storages(short), packed_storages(long)
+    assert short_buffers.isdisjoint(long_buffers)
+    stepper.release(short)
+    assert all(buf.expired() for buf in short_buffers)
+    assert all(not buf.expired() for buf in long_buffers)
+    while not stepper.complete(long):
+        stepper.advance([long])
+    torch.testing.assert_close(stepper.finalize(long), expected, rtol=1e-4, atol=1e-4)
+    assert all(buf.expired() for buf in long_buffers)
+
+
 def test_staggered_positions_reordering_and_retirement_preserve_native_outputs(runtimes):
     runtime, reference = runtimes
     cases = {'a': (context((97, 160), -1.5), 1024),
