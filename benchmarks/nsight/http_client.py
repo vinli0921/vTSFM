@@ -3,6 +3,7 @@
   --round 1      batch 1, context 2048, H96, window advances one patch per request (harness round 1)
   --round 0b     batch 64, context 2048, H96, fixed windows (harness round 0b)
   --round 0b16   as 0b with 16 rows: TimesFM's admission policy caps a request at 16 rows
+  --round 0b8    as 0b with 8 rows: Moirai's admission policy (#62) caps a request at 8 rows
   --round sat    benchmarks/continuous.py saturated case: B2/C512/H1024 MetroPT windows offered
                  1 ms apart, all N requests in flight
 Sequential rounds keep one request outstanding. All nine quantiles are requested.
@@ -60,7 +61,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--url', default='http://127.0.0.1:18516')
     ap.add_argument('--model-id', required=True)
-    ap.add_argument('--round', required=True, choices=['1', '0b', '0b16', 'sat'])
+    ap.add_argument('--round', required=True, choices=['1', '0b', '0b16', '0b8', 'sat'])
     ap.add_argument('--patch', type=int, default=32)
     ap.add_argument('--warm', type=int, default=5)
     ap.add_argument('--n', type=int, default=50)

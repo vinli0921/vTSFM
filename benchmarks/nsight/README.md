@@ -15,7 +15,7 @@ Python/framework time, for three paths per model:
 | `workload.py` | Harness data and windows (`profiling/harness.py` on `profiling-baseline`) |
 | `driver.py` | In-process native/runtime runs; NVTX `request/preprocess/forward/postprocess`; timed requests bracketed by `cudaProfilerStart/Stop` |
 | `launch_server.py` | Starts the server from `vtsfm.cli.build_vllm_command`, under `nsys launch` unless `--no-nsys` |
-| `http_client.py` | Sends rounds `1`, `0b`, `0b16` or `sat`; calls `nsys start/stop` around the timed requests |
+| `http_client.py` | Sends rounds `1`, `0b`, `0b16`, `0b8` or `sat`; calls `nsys start/stop` around the timed requests |
 | `nvtx_hook/sitecustomize.py` | With `VTSFM_NVTX=1`, wraps about 40 vLLM/vTSFM request-path functions in NVTX ranges. Done at import time; no source edits |
 | `analyze.py` | Per-request split from `nsys export --type sqlite` output |
 | `run.sh` | All runs (each traced, plus an untraced timing run), then `nsys stats` CSVs and `analysis.jsonl` |
@@ -40,7 +40,9 @@ Notes:
   CUDA API time on the compute thread.
 - CUDA tracing adds roughly 6–8 µs per kernel launch. Compare traced splits against the untraced
   timing runs, not against absolute traced wall times.
-- TimesFM admission caps a request at 16 rows, so its batched HTTP round is `0b16`.
+- `run.sh` runs each model's batched round at its HTTP request-row cap, in-process and over HTTP:
+  `0b16` for TimesFM and Toto, `0b8` for Moirai (caps from #62). The 64-row `0b` round remains
+  available in `driver.py`/`http_client.py` to reproduce the 2026-11-10 baseline.
 
 ## Compare TimesFM flip batching (issue #52)
 

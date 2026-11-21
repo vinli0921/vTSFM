@@ -19,6 +19,8 @@ export NVIDIA_TF32_OVERRIDE=0 OMP_NUM_THREADS=4 CUDA_VISIBLE_DEVICES="${CUDA_VIS
 declare -A model_id=([timesfm25]=google/timesfm-2.5-200m-pytorch [toto2]=Datadog/Toto-2.0-313m
                      [moirai2]=Salesforce/moirai-2.0-R-small)
 declare -A patch=([timesfm25]=32 [toto2]=32 [moirai2]=16)
+# Batched rounds use each adapter's HTTP request-row cap (TimesFM 16; Toto 16 and Moirai 8 from #62).
+declare -A batch_round=([timesfm25]=0b16 [toto2]=0b16 [moirai2]=0b8)
 
 log() { echo "[$(date -u +%FT%TZ)] $*" | tee -a "$out/logs/progress.log"; }
 failed=0
@@ -76,9 +78,9 @@ http() { http_once "$1" "$2" "$3" "$4" "${1}_http-${2}_r${3}" 1; http_once "$1" 
 
 for a in "${adapters[@]}"; do
   inproc "$a" native 1 50; inproc "$a" runtime 1 50
-  inproc "$a" native 0b 30; inproc "$a" runtime 0b 30
+  inproc "$a" native "${batch_round[$a]}" 30; inproc "$a" runtime "${batch_round[$a]}" 30
   http "$a" single 1 50
-  if [[ $a == timesfm25 ]]; then http "$a" single 0b16 30; else http "$a" single 0b 30; fi
+  http "$a" single "${batch_round[$a]}" 30
   if [[ $a == timesfm25 && -n "${METROPT_DATA:-}" ]]; then
     http "$a" continuous sat 50; http "$a" whole sat 50
   fi
