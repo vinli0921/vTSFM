@@ -19,9 +19,12 @@ is the standard TimesFM schema. A request with two finite, 512-value histories
 and a 1,024-point horizon qualifies, regardless of the requested quantile subset.
 Other shapes, including ragged histories, use the ordinary TimesFM forecast path.
 
-One V1 worker on one GPU handles one scheduled request at a time in this mode.
-Forecast-block scheduling and cross-request fusion require separate launch
-configurations. The worker builds and warms one fixed owner after model loading
+Use this mode for traffic dominated by B2/C512/H1024 requests. A single-GPU
+V1 worker uses one scheduling slot and disables cross-request fusion, so a
+burst of other shapes runs one eager forecast at a time. Launch a separate
+configuration for cross-request fusion or forecast-block scheduling.
+
+The worker builds and warms one fixed owner after model loading
 and before readiness. A startup check requires at least 512 MiB of device
 headroom for owner setup. This is separate from numerical transport admission
 and from vLLM's GPU memory utilization setting. Worker shutdown destroys the
@@ -65,12 +68,9 @@ time, worker setup and first-request latency are saved separately. The harness
 records Torch allocator counters and whole-device NVML memory throughout the
 steady-state measurements.
 
-The A100 lifecycle checks passed for dense and paged graphs before the
-batched sign-prefill merge. The tests
-disconnect a queued request and another request that has entered the worker,
-then verify the original owner still serves correctly. Both modes also handled
-an eager B16/C8192/H1024 fallback while retaining the graph. Peak Torch
-allocation during the fallback was 2,491 MiB for dense and 2,532 MiB for paged.
-The HTTP benchmark on the merged revision covers native parity and the small
-fallback. The lifecycle check covers client disconnects and maximum-shape
-capacity.
+On the A100 at `06b018a`, dense and paged graphs both served a new request
+after a queued disconnect and after a disconnect inside the worker. Each also
+served an eager B16/C8192/H1024 fallback with its graph resident, then reused
+the same graph. Peak Torch allocation during that fallback was **3,760 MiB**
+for dense and **3,801 MiB** for paged. The [lifecycle results](baselines/2026-11-17-timesfm-graph-http/README.md#disconnect-and-maximum-size-fallback)
+record the revision, replay counts and evidence archive.

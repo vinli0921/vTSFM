@@ -83,6 +83,24 @@ fallback, then return to the fixed shape. Each graph mode captured once per
 server startup and replayed 300 times in the timed samples. The eager modes
 each made 300 fixed-owner calls. Timed fallbacks and recaptures were zero.
 
+## Disconnect and maximum-size fallback
+
+A separate A100 lifecycle run at [`06b018a`](https://github.com/vinli0921/vTSFM/commit/06b018ab7e0e5a3d02a7ae5eb635a81f12d0a3d5)
+exercised both graph modes after the merge with `main`. Each mode recovered
+from a queued disconnect and a disconnect after the request entered the
+worker. It then served one eager B16/C8192/H1024 fallback with the fixed owner
+resident and replayed the original graph on the next matching request. Each
+server recorded one capture and five replays across the test. Both servers
+shut down and released the GPU.
+
+| Mode | Peak Torch allocation during maximum-size fallback |
+| --- | ---: |
+| Dense graph | 3,760 MiB |
+| Paged graph | 3,801 MiB |
+
+The worker reset Torch's peak counters immediately before the fallback. The
+steady-state HTTP table above measures B2/C512/H1024 on `66de90e`.
+
 ## Evidence
 
 The raw archives contain per-request timings, parity probes and responses,
@@ -94,13 +112,16 @@ measured source. They are stored under the ignored
 | --- | --- |
 | `http-four-arm-merged-evidence.tar.gz` | `3c45a85df58f1bb070fd9b54a2d19bd1b039a94812ed84182f215f7d700df6d9` |
 | `http-four-arm-first-evidence.tar.gz` | `a3f14a5b688cc65fde235206c4a3d2f9b918732be26779e63fecf4877ecaf99e` |
+| `lifecycle-pr70-06b018a-evidence.tar.gz` | `9de555684ac9bbaf67d3f3d75c9de4d796d65453e32efbb5fac786783a99193a` |
 
 ## Earlier serving revision
 
 The same protocol ran on clean `2f1394456ab6d86dd88af3a7d2b87a7f1595b189`
 before the merged sign-prefill changes. Those 1,600 requests form a separate
-baseline. Several merged changes affect timing, including prefill and HTTP
-input parsing.
+baseline. The earlier lifecycle check measured peak Torch allocation of
+2,491 MiB for dense and 2,532 MiB for paged during maximum-size fallback,
+before batched sign prefill. Several merged changes affect timing, including
+prefill and HTTP input parsing.
 
 | Mode | Mean ms | Pooled p95 ms | HTTP requests/s |
 | --- | ---: | ---: | ---: |
