@@ -54,6 +54,36 @@ def assert_append_only(state, before, position):
             torch.testing.assert_close(cache.num_masked, stream.caches[0].num_masked, rtol=0, atol=0)
 
 
+def test_crossing_correction_runs_once_per_completed_forecast(runtimes):
+    from torch.utils._python_dispatch import TorchDispatchMode
+
+    crossings = []
+
+    class RecordCrossings(TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            if func in (torch.ops.aten.cummin.default, torch.ops.aten.cummax.default):
+                crossings.append((func, tuple(args[0].shape)))
+            return func(*args, **(kwargs or {}))
+
+    runtime, reference = runtimes
+    stepper = TimesFMStepper(runtime)
+    short_values, long_values = context((33,), 2), context((49, 61), -1)
+    short = stepper.initialize(short_values, 96)
+    long = stepper.initialize(long_values, 129)
+    cancelled = stepper.initialize(context((57,)), 1024)
+    with RecordCrossings():
+        stepper.prefill([long, short, cancelled])
+        stepper.release(cancelled)
+        stepper.advance([long])
+
+    assert crossings == [(op, shape) for shape in [(1, 96, 5), (2, 129, 5)]
+                         for op in (torch.ops.aten.cummin.default, torch.ops.aten.cummax.default)]
+    for state, values in ((short, short_values), (long, long_values)):
+        torch.testing.assert_close(stepper.finalize(state), reference.forecast(values, state.horizon),
+                                   rtol=1e-4, atol=1e-4)
+        stepper.release(state)
+
+
 def test_singleton_adopts_prefill_and_advances_owned_caches_in_place(runtimes, monkeypatch):
     runtime, reference = runtimes
     values = context((17, 32, 33), -0.5)

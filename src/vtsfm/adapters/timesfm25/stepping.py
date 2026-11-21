@@ -30,12 +30,11 @@ class _PassState:
     last_sigma: object = None
     feedback: object = None
     spread: object = None
-    block: object = None
 
     def clear(self):
         self.caches.clear()
         self.last_n = self.last_mu = self.last_sigma = None
-        self.feedback = self.spread = self.block = None
+        self.feedback = self.spread = None
 
 
 @dataclass
@@ -79,7 +78,7 @@ class TimesFMForecastState:
         buffers = [self.normalized, self.padding, self.mean, self.std, self.positive, self.output]
         for stream in self.passes:
             buffers.extend((stream.last_n, stream.last_mu, stream.last_sigma,
-                            stream.feedback, stream.spread, stream.block))
+                            stream.feedback, stream.spread))
             for cache in stream.caches:
                 buffers.extend((cache.next_index, cache.num_masked, cache.key, cache.value))
         return sum(tensor.numel() * tensor.element_size() for tensor in buffers if tensor is not None)
@@ -203,9 +202,8 @@ class TimesFMStepper:
                 target.caches = _split_prefill_caches(caches, section, state.cache_capacity)
             target.last_n, target.last_mu, target.last_sigma = (value[section].clone() for value in stats)
             target.feedback = block[section, :, self.model.aridx].clone()
-            target.block = block[section, :, 1:].clone()
             if spread is not None:
-                target.spread = spread[section, :, 1:].clone()
+                target.spread = spread[section, :state.horizon, 1:].clone()
             cursor += state.rows
 
     def _prefill_passes(self, states):
@@ -283,21 +281,24 @@ class TimesFMStepper:
             start = state.blocks_done * self.model.o
             stop = min(start + self.model.o, state.horizon)
             length = stop - start
-            forecast = (first.block[:, :length] - flipped.block[:, :length].flip(-1)) / 2
-            spread = (first.spread[:, start:stop] - flipped.spread[:, start:stop].flip(-1)) / 2
-            median = forecast[..., 4:5]
+            # Each flip already owns its raw point-head median for the next AR
+            # step. Stage their difference in the unpublished output's median row.
+            torch.sub(first.feedback[:, :length], flipped.feedback[:, :length], out=state.output[:, 4, start:stop])
+            state.blocks_done += 1
+            state.normalized = state.padding = None
+            if not self.complete(state):
+                continue
+
+            median = state.output[:, 4, :].unsqueeze(-1) / 2
+            spread = (first.spread - flipped.spread.flip(-1)) / 2
+            for stream in state.passes:
+                stream.clear()
             continuous = spread - spread[..., 4:5] + median
             lower = torch.cat((median, continuous[..., :4].flip(-1)), dim=-1).cummin(-1).values[..., 1:].flip(-1)
             upper = torch.cat((median, continuous[..., 5:]), dim=-1).cummax(-1).values[..., 1:]
             quantiles = revin(torch.cat((lower, median, upper), -1), state.mean, state.std, reverse=True)
             quantiles = torch.where(state.positive, quantiles.clamp_min(0), quantiles)
-            state.output[:, :, start:stop] = quantiles.transpose(1, 2)
-            state.blocks_done += 1
-            state.normalized = state.padding = None
-            first.block = flipped.block = None
-            if self.complete(state):
-                for stream in state.passes:
-                    stream.clear()
+            state.output.copy_(quantiles.transpose(1, 2))
 
     @torch.inference_mode()
     def prefill(self, states):
