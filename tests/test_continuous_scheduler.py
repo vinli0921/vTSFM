@@ -27,7 +27,8 @@ class _ByteVector:
 def _request(identity, rows=1, context=32, horizon=1024):
     metadata = encode_metadata(identity, [f'{identity}-{row}' for row in range(rows)],
                                [context] * rows, horizon, [0.5])
-    return SimpleNamespace(request_id=identity, mm_features=[SimpleNamespace(
+    return SimpleNamespace(request_id=identity, num_tokens=(horizon + 127) // 128,
+        num_computed_tokens=0, mm_features=[SimpleNamespace(
         modality='timeseries', data={'request_metadata': SimpleNamespace(data=_ByteVector(metadata))})])
 
 
@@ -38,6 +39,7 @@ def scheduler_module(monkeypatch):
             self.vllm_config = config
             self.scheduler_config = config.scheduler_config
             self.running = []
+            self.waiting = []
             self.requests = {}
 
         def add_request(self, request):
@@ -125,6 +127,137 @@ def test_cancelled_oldest_waiter_does_not_leave_a_persistent_reservation(schedul
     assert scheduler._reserve_prefill_lookahead(_request('oldest', 4), 0, 8) == 0
     scheduler.schedule()  # Queue no longer contains the cancelled waiter.
     assert scheduler._reserve_prefill_lookahead(_request('small'), 0, 8) == 1
+
+
+def _grouping_backlog(scheduler_module, monkeypatch, steps=1, remaining=1):
+    monkeypatch.setenv('VTSFM_PREFILL_GROUP_STEPS', str(steps))
+    scheduler = scheduler_module.ForecastBlockScheduler(_config())
+    scheduler.running = [_request(f'active-{i}', rows=2, context=512) for i in range(3)]
+    for request in scheduler.running:
+        request.num_computed_tokens = 8 - remaining
+    scheduler.waiting = [_request(f'waiting-{i}', rows=2, context=512) for i in range(4)]
+    return scheduler
+
+
+def _decode_iteration(scheduler):
+    scheduler.schedule()
+    for request in scheduler.running:
+        assert scheduler._reserve_prefill_lookahead(
+            request, request.num_computed_tokens, request.num_tokens - request.num_computed_tokens) == 1
+
+
+def test_opt_in_holds_fragmented_prefill_until_nearby_decodes_finish(scheduler_module, monkeypatch):
+    scheduler = _grouping_backlog(scheduler_module, monkeypatch)
+    _decode_iteration(scheduler)
+    oldest, later = scheduler.waiting[:2]
+    assert scheduler._reserve_prefill_lookahead(oldest, 0, 8) == 0
+    assert scheduler._reserve_prefill_lookahead(later, 0, 8) == 0
+    scheduler.running.clear()  # Those scheduled final decode blocks completed.
+    scheduler.schedule()
+    for request in scheduler.waiting:
+        assert scheduler._reserve_prefill_lookahead(request, 0, 8) == 1
+        scheduler.running.append(request)
+    assert [request.request_id for request in scheduler.running] == [f'waiting-{i}' for i in range(4)]
+
+
+def test_grouping_budget_is_absolute_for_the_same_oldest_waiter(scheduler_module, monkeypatch):
+    scheduler = _grouping_backlog(scheduler_module, monkeypatch, steps=2, remaining=2)
+    oldest = scheduler.waiting[0]
+    # A non-progressing decode cannot reset/extend the oldest waiter's deadline.
+    for _ in range(2):
+        _decode_iteration(scheduler)
+        assert scheduler._reserve_prefill_lookahead(oldest, 0, 8) == 0
+        assert scheduler._reserve_prefill_lookahead(oldest, 0, 8) == 0
+    _decode_iteration(scheduler)
+    assert scheduler._reserve_prefill_lookahead(oldest, 0, 8) == 1
+
+
+@pytest.mark.parametrize('case', ['disabled', 'idle', 'lone', 'not-near', 'short-head',
+                                 'short-behind', 'different-context-short', 'incompatible',
+                                 'not-scheduled', 'capacity', 'fusion-cap', 'padded-work'])
+def test_grouping_never_waits_without_a_bounded_compatible_cohort(scheduler_module, monkeypatch, case):
+    scheduler = _grouping_backlog(scheduler_module, monkeypatch, steps=0 if case == 'disabled' else 1)
+    if case == 'idle':
+        scheduler.running.clear()
+    elif case == 'lone':
+        scheduler.waiting = scheduler.waiting[:1]
+    elif case == 'not-near':
+        for request in scheduler.running:
+            request.num_computed_tokens = 3
+    elif case == 'short-head':
+        scheduler.waiting[0] = _request('short', rows=2, context=512, horizon=96)
+    elif case == 'short-behind':
+        scheduler.waiting[1] = _request('short', rows=2, context=512, horizon=96)
+    elif case == 'different-context-short':
+        scheduler.waiting[2] = _request('short', rows=2, context=256, horizon=96)
+    elif case == 'incompatible':
+        scheduler.waiting[1] = _request('other-context', rows=2, context=256)
+    elif case == 'capacity':
+        scheduler.forecast_limits = replace(DEFAULT_LIMITS, max_execution_rows=8)
+        # Two queued requests could never form a larger cohort, even after all
+        # active requests finish: each independently consumes the entire row cap.
+        scheduler.running = [_request('active', context=512)]
+        scheduler.running[0].num_computed_tokens = 7
+        scheduler.waiting = [_request(f'wide-{i}', rows=7, context=512) for i in range(4)]
+    elif case == 'fusion-cap':
+        monkeypatch.setenv('VTSFM_FORECAST_BATCH_ROWS', '2')
+        scheduler = _grouping_backlog(scheduler_module, monkeypatch)
+    elif case == 'padded-work':
+        scheduler.forecast_limits = replace(DEFAULT_LIMITS, max_execution_work=11000)
+        scheduler.running = [_request(f'active-{i}', context=512, horizon=129) for i in range(3)]
+        for request in scheduler.running:
+            request.num_computed_tokens = 1
+        scheduler.waiting = [_request('long', rows=2, context=512),
+                             _request('shorter', rows=2, context=512, horizon=129)]
+    if case == 'not-scheduled':
+        scheduler.schedule()  # No running decode hook confirmed runnable work.
+    else:
+        _decode_iteration(scheduler)
+    oldest = scheduler.waiting[0]
+    assert scheduler._reserve_prefill_lookahead(oldest, 0, oldest.num_tokens) == 1
+
+
+def test_cancelled_grouping_waiter_releases_fifo_head_without_state_leak(scheduler_module, monkeypatch):
+    scheduler = _grouping_backlog(scheduler_module, monkeypatch)
+    _decode_iteration(scheduler)
+    assert scheduler._reserve_prefill_lookahead(scheduler.waiting[0], 0, 8) == 0
+    scheduler.waiting.pop(0)  # Upstream cancellation owns queue removal.
+    scheduler.waiting = scheduler.waiting[:1]
+    _decode_iteration(scheduler)
+    assert scheduler._reserve_prefill_lookahead(scheduler.waiting[0], 0, 8) == 1
+
+
+@pytest.mark.parametrize('value', ['-1', '3', 'true', '1.5'])
+def test_prefill_group_steps_requires_a_small_explicit_budget(scheduler_module, monkeypatch, value):
+    monkeypatch.setenv('VTSFM_PREFILL_GROUP_STEPS', value)
+    with pytest.raises(ValueError, match='VTSFM_PREFILL_GROUP_STEPS'):
+        scheduler_module.ForecastBlockScheduler(_config())
+
+
+def test_grouping_trace_reports_absolute_hold_and_one_admission_release(
+        scheduler_module, monkeypatch, tmp_path):
+    path = tmp_path / 'groups.jsonl'
+    monkeypatch.setenv('VTSFM_CONTINUOUS_TRACE', str(path))
+    base = scheduler_module.ForecastBlockScheduler.__mro__[2]
+    monkeypatch.setattr(base, 'schedule', lambda self, throttle_prefills=False:
+                        SimpleNamespace(num_scheduled_tokens={}))
+    scheduler = _grouping_backlog(scheduler_module, monkeypatch)
+    oldest = scheduler.waiting[0]
+    _decode_iteration(scheduler)
+    assert scheduler._reserve_prefill_lookahead(oldest, 0, 8) == 0
+    _decode_iteration(scheduler)
+    assert scheduler._reserve_prefill_lookahead(oldest, 0, 8) == 1
+    scheduler.waiting.clear()
+    scheduler.schedule()
+    events = [json.loads(line) for line in path.read_text().splitlines()]
+    holds = [event for event in events if event['event'] == 'prefill_group_hold']
+    releases = [event for event in events if event['event'] == 'prefill_group_release']
+    assert len(holds) == len(releases) == 1
+    assert holds[0]['request_ids'] == ['waiting-0']
+    assert holds[0]['step'] == 1 and holds[0]['deadline_step'] == 2
+    assert holds[0]['remaining_steps'] == {f'active-{i}': 1 for i in range(3)}
+    assert holds[0]['current_cohort'] == 1 and holds[0]['future_cohort'] == 4
+    assert releases[0]['reason'] == 'deadline'
 
 
 @pytest.mark.parametrize('field,value', [
