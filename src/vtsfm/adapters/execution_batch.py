@@ -69,7 +69,10 @@ def execute_scheduled(runtime, spec, requests, max_rows, trace_path=None, *, lim
                     for request in group:
                         yield single(by_id[request.request_id])
                     continue
-                for plan in plan_batches(group, max_rows=row_cap, max_requests=4):
+                # Rows and work bound each call. The scheduler already bounds the
+                # request count (max_num_seqs within max_scheduled_requests), so
+                # a fixed request cap here would only split one step's work (#75).
+                for plan in plan_batches(group, max_rows=row_cap, max_requests=len(requests)):
                     members = tuple(by_id[part.request_id] for part in plan.request_slices)
                     if len(members) == 1:
                         yield single(members[0])
