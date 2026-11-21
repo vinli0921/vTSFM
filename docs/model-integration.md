@@ -105,6 +105,8 @@ silently loosen it to obtain a pass. A native-reference comparison establishes
 parity for the tested settings. It does not independently establish forecast
 accuracy, safe new batching semantics, or throughput/latency improvements.
 
+Known FP32 sources of served-vs-native difference (#85, A6000 probe): vLLM builds models on CUDA, whose rotary `cos`/`sin` tables differ from the official CPU-built ones by up to one ulp. That alone moved Toto by 9.2e-5 and Moirai by 2.1e-4 on a ~1e4-scale signal; all adapters now rebuild those tables on CPU, and a single served request then matches native bit for bit. The remaining source is batch composition: the same row forecast alone or with neighbours differs by about 1e-4 (Toto) to 4e-4 (Moirai) in native and served alike, because FP32 CUDA kernels change with batch shape. Size any magnitude-aware floor (#71) from that batch effect, not from construction drift.
+
 The GPU fixture checks availability and owns cleanup of its reference and server
 processes. Ordinary adapter failures are logged and the runner attempts the
 remaining selected adapters; its final exit status is nonzero if any adapter or

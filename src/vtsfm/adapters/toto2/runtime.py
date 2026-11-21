@@ -23,7 +23,8 @@ class TotoRuntime:
 
             self._precision_handles = prepare_native_bf16(
                 self.model, RMSNorm, RotaryProjection, attention_type=SelfAttention)
-        elif self.precision == 'tf32':
+        else:
+            # FP32 and TF32: vLLM builds the model on CUDA, whose sin/cos can differ from the official CPU-built rotary tables by one ulp (#85).
             from toto2.model import RotaryProjection
             from .precision import prepare_native_tf32
 

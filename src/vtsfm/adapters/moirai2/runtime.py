@@ -34,7 +34,8 @@ class MoiraiRuntime:
             from .precision import prepare_native_bf16
 
             self._precision_handles = prepare_native_bf16(self.model)
-        elif self.precision == 'tf32':
+        else:
+            # FP32 and TF32: match the official CPU-built rotary tables (#85).
             from .precision import prepare_native_tf32
 
             prepare_native_tf32(self.model)
