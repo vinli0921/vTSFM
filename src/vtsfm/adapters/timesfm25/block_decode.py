@@ -15,9 +15,9 @@ initialization and identical per-layer updates. No counter is read back to CPU.
 Tokenizer, QKV, RoPE, normalization, output projection, MLP and forecast heads
 stay batched. Native masks and integer position/count metadata are built once
 per forward and reused across layers. Each request updates its own K/V in place.
-Equal-width caches use temporary per-layer K/V concatenation for one batched
-native attention call; different widths keep separate native calls. Temporary
-packs never replace the owned caches or require cache copyback.
+Equal-width CUDA FP32 caches use one copy-only append/gather dispatch per layer
+with call-local scratch; other paths retain temporary K/V concatenation or
+separate native calls. Packs never replace owned caches or require copyback.
 
 The caller owns inference mode and request lifetimes. This helper never changes
 model methods or weights. Prefill and whole-forecast calls keep the original
@@ -120,7 +120,8 @@ def _decode_metadata(inputs, masks, groups):
 
 
 def _attention_forward(attention, inputs_q, groups, layer_index, position, num_masked, attn_masks,
-                       batched_mask, attention_backend=None, attention_state=None):
+                       batched_mask, attention_backend=None, attention_state=None,
+                       cache_pack=None, defer_counters=False):
     # Follow pinned MultiHeadAttention.forward math through the scaled Q/K/V.
     b, n_patches, _ = inputs_q.shape
 
@@ -152,6 +153,9 @@ def _attention_forward(attention, inputs_q, groups, layer_index, position, num_m
         for section, caches, _ in groups:
             caches[layer_index].next_index += n_patches
             caches[layer_index].num_masked = num_masked[section].clone()
+    elif cache_pack is not None:
+        key, value = cache_pack.append_and_pack(layer_index, key, value)
+        x = attention.attention_fn(query, key, value, mask=batched_mask)
     else:
         for section, caches, start in groups:
             cache = caches[layer_index]
@@ -160,8 +164,9 @@ def _attention_forward(attention, inputs_q, groups, layer_index, position, num_m
             # CUDA-scalar slice-bound synchronization as well as full-cache copies.
             cache.key[:, start:stop].copy_(key[section])
             cache.value[:, start:stop].copy_(value[section])
-            cache.next_index += n_patches
-            cache.num_masked = num_masked[section].clone()
+            if not defer_counters:
+                cache.next_index += n_patches
+                cache.num_masked = num_masked[section].clone()
 
         if batched_mask is not None:
             # Full native widths and per-row masks are unchanged. Only these
@@ -180,11 +185,13 @@ def _attention_forward(attention, inputs_q, groups, layer_index, position, num_m
 
 
 def _transformer_forward(layer, input_embeddings, groups, layer_index, position, num_masked, attn_masks,
-                         batched_mask, attention_backend=None, attention_state=None):
+                         batched_mask, attention_backend=None, attention_state=None,
+                         cache_pack=None, defer_counters=False):
     # Preserve Transformer.forward's norm, residual and feedforward expressions.
     attn_output = _attention_forward(
         layer.attn, layer.pre_attn_ln(input_embeddings), groups, layer_index,
         position, num_masked, attn_masks, batched_mask, attention_backend, attention_state,
+        cache_pack, defer_counters,
     )
     attn_output = layer.post_attn_ln(attn_output) + input_embeddings
     output_embeddings = (
@@ -195,7 +202,7 @@ def _transformer_forward(layer, input_embeddings, groups, layer_index, position,
 
 
 def block_decode_forward(model, inputs, masks, cache_groups, positions, *, attention_backend=None,
-                         prefill=False):
+                         prefill=False, optimize_cache=True):
     """Batch neural layers while native attention updates each owned cache.
 
     Return the native ``((input_embeddings, output_embeddings, point, spread),
@@ -204,6 +211,9 @@ def block_decode_forward(model, inputs, masks, cache_groups, positions, *, atten
     ``prefill=True`` accepts any positive static patch count, using the same
     neural expressions and CPU-known cache slices to support graph capture.
     Normal serving retains the upstream prefill path.
+
+    ``optimize_cache=False`` preserves the historical append/pack and counter
+    path for matched CUDA-graph controls and targeted diagnostic comparisons.
 
     ``attention_backend`` is an experimental cache/attention boundary. Its
     ``prepare(model, inputs, masks, cache_groups, positions)`` validates geometry
@@ -215,6 +225,11 @@ def block_decode_forward(model, inputs, masks, cache_groups, positions, *, atten
     attended tensor of the same shape. It must not mutate the supplied counters;
     this shared helper advances them. Normal serving omits the argument.
     """
+    cache_pack = None
+    # Captured graphs and experimental backends keep their existing counter
+    # storage/update behavior. Ordinary AR counters are layer invariant.
+    defer_counters = (optimize_cache and attention_backend is None and not prefill
+                      and (inputs.device.type != 'cuda' or not torch.cuda.is_current_stream_capturing()))
     if attention_backend is None:
         groups = _decode_groups(model, inputs, masks, cache_groups, positions, prefill=prefill)
         position, num_masked, attn_masks = _decode_metadata(inputs, masks, groups)
@@ -223,6 +238,10 @@ def block_decode_forward(model, inputs, masks, cache_groups, positions, *, atten
             caches[0].key.shape[1] == capacity for _, caches, _ in groups
         ) else None)
         attention_state = None
+        if defer_counters and batched_mask is not None:
+            from .decode_cache import prepare_decode_cache_pack
+
+            cache_pack = prepare_decode_cache_pack(groups, inputs)
     else:
         groups, position, num_masked, attention_state = attention_backend.prepare(
             model, inputs, masks, cache_groups, positions)
@@ -234,9 +253,18 @@ def block_decode_forward(model, inputs, masks, cache_groups, positions, *, atten
     for i, layer in enumerate(model.stacked_xf):
         output_embeddings = _transformer_forward(
             layer, output_embeddings, groups, i, position, num_masked, attn_masks, batched_mask,
-            attention_backend, attention_state,
+            attention_backend, attention_state, cache_pack, defer_counters,
         )
     output_ts = model.output_projection_point(output_embeddings)
     output_quantile_spread = model.output_projection_quantiles(output_embeddings)
+
+    if defer_counters:
+        for section, caches, _ in groups:
+            # One batched update per owner, with disjoint layer slices. Native
+            # fallbacks may still increment layer counters independently in place.
+            next_index = caches[0].next_index.expand(len(caches), -1) + inputs.shape[1]
+            masked = num_masked[section].repeat(len(caches), 1)
+            for layer, cache in enumerate(caches):
+                cache.next_index, cache.num_masked = next_index[layer], masked[layer]
 
     return (input_embeddings, output_embeddings, output_ts, output_quantile_spread), cache_groups

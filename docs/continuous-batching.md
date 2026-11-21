@@ -34,8 +34,8 @@ Each request owns its normalization, masks, positivity flag, independent normal
 and flipped streams, running statistics, median feedback, quantile spread,
 output buffer and KV caches. Feedback stays separate between flip streams.
 Quantiles, crossing correction and de-normalization preserve pinned semantics.
-Prefill keeps separate flip-pass calls. AR combines normal and flipped rows in
-one neural call while retaining each stream's own statistics and feedback.
+Prefill and autoregressive (AR) decode batch the normal and sign-flipped rows
+in one neural call per phase. Each stream retains its own statistics and feedback.
 
 Prefill calls can share a padded context width. AR calls can also combine
 requests at different physical cache positions. The pinned upstream attention
@@ -50,10 +50,18 @@ width. Singleton AR also combines its two flip streams. Class-source guards
 require revalidation before changing the pinned implementation; model methods
 and weights are not replaced.
 
-Each request retains its own persistent cache allocations. AR calls update those
-exact buffers in place; temporary per-layer attention packs do not replace them
-and require no cache copyback. Allocations and existing
-prefixes persist when requests have different capacities or are reordered.
+During eager CUDA FP32 decode, equal-capacity groups with dense cache rows use
+one Triton copy kernel per layer. It writes the four new patches into the
+request-owned K/V buffers and gathers the full-width K/V for native attention.
+The forward stages a pointer table once and reuses a single pair of scratch
+buffers across layers. With different capacities, each group still uses native
+attention over its own cache. Ordinary decode also batches the layer counter
+updates per owner, with a separate slice for each layer. The fixed-shape CUDA
+graph experiment selects its original implementation for both controls.
+The [H1024 A100 benchmark](baselines/2026-11-20-timesfm-decode-kv/README.md)
+compares HTTP throughput, cache operations and peak memory for this change.
+
+Cache allocations and existing prefixes persist when requests are reordered.
 Initial shared prefill splits its cache once, so retiring a request cannot
 retain a peer's backing allocation.
 Completion packs the final response and releases state.
@@ -127,6 +135,25 @@ request count is bounded separately by the API queue cap.
 
 ## Checks and reproduction
 
+### Experimental prefill grouping
+
+Set `VTSFM_PREFILL_GROUP_STEPS=1` when starting a TimesFM continuous server
+to let an already running decode finish a block before admitting the oldest
+waiting request. The scheduler considers a hold only when this can form a
+larger group of compatible queued prefills within the slot, row and work
+limits. With four configured slots it examines at most the first four
+requests in the FIFO queue. A one-block forecast in the
+examined prefix bypasses the hold. An idle worker starts immediately.
+
+The default is `0`. A value of `2` allows up to two scheduler iterations.
+The deadline belongs to the oldest waiter and cannot renew while it stays at
+the head. The bound applies to the extra grouping hold. Normal waits for
+busy slots or numerical capacity can last longer. The
+[A100 prefill grouping experiment](baselines/2026-11-20-timesfm-prefill-grouping/README.md)
+compares the one-step policy with PR #80 on long bursts and short requests.
+
+### GPU checks
+
 Run separately on an idle Linux GPU: the first command owns a native CUDA model.
 
 ```bash
@@ -134,6 +161,8 @@ CUDA_VISIBLE_DEVICES=0 VTSFM_RUN_TIMESFM_STEPPING=1 PYTHONPATH=src:tests:. \
   .venv-timesfm25/bin/python -m pytest tests/test_timesfm_stepping.py -q -s
 CUDA_VISIBLE_DEVICES=0 VTSFM_RUN_TIMESFM_CONTINUOUS=1 PYTHONPATH=src:tests:. \
   .venv-timesfm25/bin/python -m pytest tests/test_timesfm_continuous.py -q -s
+CUDA_VISIBLE_DEVICES=0 VTSFM_RUN_TIMESFM_PREFILL_HOLD=1 PYTHONPATH=src:tests:. \
+  .venv-timesfm25/bin/python -m pytest tests/test_timesfm_prefill_hold.py -q -s
 CUDA_VISIBLE_DEVICES=0 VTSFM_TEST_ADAPTER=timesfm25 \
   VTSFM_TEST_OUTPUT=results/timesfm-block-integration-NEW PYTHONPATH=src:tests:. \
   .venv-timesfm25/bin/python -m pytest tests/test_timesfm_block_integration.py -q -s

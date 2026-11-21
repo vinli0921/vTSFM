@@ -7,6 +7,7 @@ from typing import Protocol, Sequence
 
 CONTINUOUS_ENV = 'VTSFM_CONTINUOUS_BATCHING'
 CONTINUOUS_TRACE_ENV = 'VTSFM_CONTINUOUS_TRACE'
+PREFILL_GROUP_STEPS_ENV = 'VTSFM_PREFILL_GROUP_STEPS'
 
 
 def validate_block_configuration(config):

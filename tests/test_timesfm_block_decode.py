@@ -369,6 +369,48 @@ def test_grouped_helper_never_extracts_tensor_counter_to_host(model, capacities)
 
 
 @torch.inference_mode()
+def test_decode_counters_advance_once_per_owner_without_layerwise_writes(model):
+    from torch.utils._python_dispatch import TorchDispatchMode
+
+    groups, inputs, masks = _heterogeneous_prefills(model, (18, 18, 18))
+    counter_ptrs = {cache.next_index.data_ptr() for group in groups for cache in group}
+    writes = []
+
+    class CounterWrites(TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            if func is torch.ops.aten.add_.Tensor and args[0].data_ptr() in counter_ptrs:
+                writes.append(args[0].data_ptr())
+            return func(*args, **(kwargs or {}))
+
+    expected, serial = _serial_forward(model, inputs, masks, groups)
+    with CounterWrites():
+        actual, returned = block_decode_forward(model, inputs, masks, groups, [3, 7, 1])
+    assert writes == []  # Counter advancement does not dispatch for every layer.
+    for value, reference in zip(actual, expected, strict=True):
+        torch.testing.assert_close(value, reference, rtol=1e-5, atol=1e-6)
+    for owner, reference in zip(returned, serial, strict=True):
+        for cache, saved in zip(owner, reference, strict=True):
+            torch.testing.assert_close(cache.next_index, saved.next_index, rtol=0, atol=0)
+            torch.testing.assert_close(cache.num_masked, saved.num_masked, rtol=0, atol=0)
+
+
+@torch.inference_mode()
+def test_returned_decode_counters_can_continue_through_native_forward(model):
+    groups, inputs, masks = _heterogeneous_prefills(model, (22, 22, 22))
+    block_decode_forward(model, inputs, masks, groups, [3, 7, 1])
+    # A graph/experimental/native fallback may update each layer in place.
+    # Cross-layer aliases would increment later layers' counters prematurely.
+    followup = -inputs[:1]
+    expected, expected_caches = model(followup, masks[:1], _clone_caches(groups[0]))
+    actual, actual_caches = model(followup, masks[:1], groups[0])
+    for value, reference in zip(actual, expected, strict=True):
+        torch.testing.assert_close(value, reference, rtol=1e-5, atol=1e-6)
+    for cache, reference in zip(actual_caches, expected_caches, strict=True):
+        torch.testing.assert_close(cache.next_index, reference.next_index, rtol=0, atol=0)
+        torch.testing.assert_close(cache.num_masked, reference.num_masked, rtol=0, atol=0)
+
+
+@torch.inference_mode()
 def test_native_model_parameters_methods_and_whole_decode_unchanged(model):
     source_methods = (type(model).forward, type(model.stacked_xf[0]).forward,
                       type(model.stacked_xf[0].attn).forward)

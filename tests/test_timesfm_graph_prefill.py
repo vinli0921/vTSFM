@@ -100,3 +100,31 @@ def test_paged_graph_freezes_one_prefill_plan_for_both_signs(monkeypatch):
         assert all('forward' not in vars(layer.attn) for layer in model.stacked_xf)
     assert not stepper.arena.allocations
     assert not hasattr(model, '_vtsfm_paged_stepper_active')
+
+
+@torch.inference_mode()
+def test_dense_graph_control_preserves_historical_layerwise_counter_updates(model):
+    from types import SimpleNamespace
+    from torch.utils._python_dispatch import TorchDispatchMode
+    from vtsfm.adapters.timesfm25.full_graph import _DenseStepper
+
+    stepper = _DenseStepper(SimpleNamespace(model=model))
+    state = stepper.initialize(torch.linspace(-1, 1, 64).reshape(1, 64), 257)
+    stepper.prefill([state])
+    counter_ptrs = {cache.next_index.data_ptr() for stream in state.passes for cache in stream.caches}
+    writes = []
+
+    class CounterWrites(TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            if func is torch.ops.aten.add_.Tensor and args[0].data_ptr() in counter_ptrs:
+                writes.append(args[0].data_ptr())
+            return func(*args, **(kwargs or {}))
+
+    with CounterWrites():
+        stepper.advance([state])
+    # Both eager and graph controls must retain the matched historical path.
+    assert len(writes) == 2 * model.x
+    for stream in state.passes:
+        for cache in stream.caches:
+            torch.testing.assert_close(cache.next_index, torch.tensor([6], dtype=torch.int32))
+    stepper.release(state)
