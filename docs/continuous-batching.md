@@ -34,8 +34,8 @@ Each request owns its normalization, masks, positivity flag, independent normal
 and flipped streams, running statistics, median feedback, quantile spread,
 output buffer and KV caches. Feedback stays separate between flip streams.
 Quantiles, crossing correction and de-normalization preserve pinned semantics.
-Prefill keeps separate flip-pass calls. AR combines normal and flipped rows in
-one neural call while retaining each stream's own statistics and feedback.
+Prefill and autoregressive (AR) decode batch the normal and sign-flipped rows
+in one neural call per phase. Each stream retains its own statistics and feedback.
 
 Prefill calls can share a padded context width. AR calls can also combine
 requests at different physical cache positions. The pinned upstream attention
@@ -50,10 +50,18 @@ width. Singleton AR also combines its two flip streams. Class-source guards
 require revalidation before changing the pinned implementation; model methods
 and weights are not replaced.
 
-Each request retains its own persistent cache allocations. AR calls update those
-exact buffers in place; temporary per-layer attention packs do not replace them
-and require no cache copyback. Allocations and existing
-prefixes persist when requests have different capacities or are reordered.
+During eager CUDA FP32 decode, equal-capacity groups with dense cache rows use
+one Triton copy kernel per layer. It writes the four new patches into the
+request-owned K/V buffers and gathers the full-width K/V for native attention.
+The forward stages a pointer table once and reuses a single pair of scratch
+buffers across layers. With different capacities, each group still uses native
+attention over its own cache. Ordinary decode also batches the layer counter
+updates per owner, with a separate slice for each layer. The fixed-shape CUDA
+graph experiment selects its original implementation for both controls.
+The [H1024 A100 benchmark](baselines/2026-11-20-timesfm-decode-kv/README.md)
+compares HTTP throughput, cache operations and peak memory for this change.
+
+Cache allocations and existing prefixes persist when requests are reordered.
 Initial shared prefill splits its cache once, so retiring a request cannot
 retain a peer's backing allocation.
 Completion packs the final response and releases state.
