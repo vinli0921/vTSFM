@@ -142,6 +142,8 @@ class MoiraiRuntime:
             self._cached_runner = (key, runner)
         else:
             runner = cached[1]
+            if self.model.training:
+                runner.eval()
         # Upstream returns [rows, 9 quantiles, horizon] for univariate targets.
         quantiles = runner(past_target=target.unsqueeze(-1), past_observed_target=observed.unsqueeze(-1),
                            past_is_pad=padding)

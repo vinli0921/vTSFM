@@ -125,6 +125,9 @@ def test_reuse_forecast_runner_preserves_request_values_and_shape(monkeypatch):
     model.forecast(context, 64)
     model.forecast(context[:, :17], 64)
     torch.testing.assert_close(model.forecast(context, 65), first)
+    model.model.train()
+    torch.testing.assert_close(model.forecast(context, 65), first)
+    assert not model.model.training
     # Replacing a runtime's module also invalidates the runner even at the
     # same shape and device. Reference predictions must follow the new weights.
     from copy import deepcopy
