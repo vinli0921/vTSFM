@@ -47,6 +47,8 @@ class MoiraiRuntime:
             install_univariate_attention(self.model)
         if mode == 'compile':
             compile_model(self.model)
+        # Publish both cache entries together: (primary key, runner, previous).
+        # The previous entry is just (key, runner), so retention ends at two.
         self._cached_runner = None
 
     @torch.inference_mode()
@@ -129,21 +131,14 @@ class MoiraiRuntime:
         # Zero matches what upstream gives an isolated history's partial patch,
         # and keeps NaN out of the scaler, where NaN * False would still be NaN.
         target = context.masked_fill(~observed, 0)
-        # The upstream runner owns fixed shape hyperparameters, but its forward
-        # creates request tensors locally. Reuse one runner for repeated shapes
-        # to avoid walking every model submodule in .to() and .eval() each call.
         key = (context.shape[-1], horizon, context.device)
         cached = self._cached_runner
-        if cached is None or cached[0] != key or cached[1].module is not self.model:
-            runner = _InferenceMoiraiForecast(
-                module=self.model, prediction_length=horizon, context_length=context.shape[-1],
-                target_dim=1, feat_dynamic_real_dim=0, past_feat_dynamic_real_dim=0,
-            ).to(context.device).eval()
-            self._cached_runner = (key, runner)
-        else:
+        if cached is not None and cached[0] == key and cached[1].module is self.model:
             runner = cached[1]
-            if self.model.training:
-                runner.eval()
+        else:
+            runner = self._forecast_runner(key, cached)
+        if self.model.training:
+            runner.eval()
         # Upstream returns [rows, 9 quantiles, horizon] for univariate targets.
         quantiles = runner(past_target=target.unsqueeze(-1), past_observed_target=observed.unsqueeze(-1),
                            past_is_pad=padding)
@@ -151,6 +146,25 @@ class MoiraiRuntime:
         # quantile grid; longer crops may retain patch-rounded predictions.
         # Own exactly the public bytes used by shared resident accounting.
         return quantiles.clone(memory_format=torch.contiguous_format)
+
+    def _forecast_runner(self, key, cached):
+        """On a primary miss, promote the previous shape or build a new runner."""
+        width, horizon, device = key
+        previous = None
+        if cached is not None and cached[0][2] == device and cached[1].module is self.model:
+            previous = (cached[0], cached[1])
+            secondary = cached[2]
+            if secondary is not None and secondary[0] == key:
+                runner = secondary[1]
+                self._cached_runner = (key, runner, previous)
+                return runner
+
+        runner = _InferenceMoiraiForecast(
+            module=self.model, prediction_length=horizon, context_length=width,
+            target_dim=1, feat_dynamic_real_dim=0, past_feat_dynamic_real_dim=0,
+        ).to(device).eval()
+        self._cached_runner = (key, runner, previous)
+        return runner
 
 
 def compile_model(model):

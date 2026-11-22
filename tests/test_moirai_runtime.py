@@ -108,32 +108,79 @@ def test_reuse_forecast_runner_preserves_request_values_and_shape(monkeypatch):
     model = adapter.MoiraiRuntime(dict(d_model=64, d_ff=128, num_layers=1, patch_size=16,
         num_predict_token=4, max_seq_len=64, attn_dropout_p=0.0, dropout_p=0.0, scaling=True))
     created = []
+    runner_refs = []
     runner_type = adapter._InferenceMoiraiForecast
 
     def make_runner(**kwargs):
+        runner = runner_type(**kwargs)
         created.append((kwargs['context_length'], kwargs['prediction_length']))
-        return runner_type(**kwargs)
+        runner_refs.append(weakref.ref(runner))
+        return runner
 
     monkeypatch.setattr(adapter, '_InferenceMoiraiForecast', make_runner)
-    context = torch.arange(32, dtype=torch.float32).unsqueeze(0)
-    first = model.forecast(context, 65)
-    # Row count and values belong to the request; only width and horizon belong
-    # to the runner. A different batch can share it without altering prior IO.
-    changed = model.forecast(torch.cat([context + 10, context + 20]), 65)
+    a = torch.arange(32, dtype=torch.float32).unsqueeze(0)
+    b = a[:, :31]
+    first = model.forecast(a, 65)
+    # The most recent shape takes the direct lookup, including eval restoration.
+    with monkeypatch.context() as fast_path:
+        def unexpected_miss(*args):
+            pytest.fail('A repeated forecast shape entered the cache-miss path')
+        fast_path.setattr(model, '_forecast_runner', unexpected_miss)
+        model.model.train()
+        torch.testing.assert_close(model.forecast(a, 65), first)
+        assert not model.model.training
+    second = model.forecast(b, 65)
+    # Alternate two exact widths with different input values and row counts.
+    batch = torch.cat([a + 10, a + 20])
+    batch_ref = weakref.ref(batch)
+    gc_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        changed = model.forecast(batch, 65)
+        del batch
+        assert batch_ref() is None
+    finally:
+        if gc_enabled:
+            gc.enable()
     assert changed.shape == (2, 9, 65)
     assert not torch.equal(changed[0], first[0])
-    model.forecast(context, 64)
-    model.forecast(context[:, :17], 64)
-    torch.testing.assert_close(model.forecast(context, 65), first)
+    torch.testing.assert_close(model.forecast(b, 65), second)
+    assert created == [(32, 65), (31, 65)]
+
+    # A hit refreshes recency. A different horizon evicts B; A still hits.
     model.model.train()
-    torch.testing.assert_close(model.forecast(context, 65), first)
+    torch.testing.assert_close(model.forecast(a, 65), first)
     assert not model.model.training
-    # Replacing a runtime's module also invalidates the runner even at the
-    # same shape and device. Reference predictions must follow the new weights.
+    model.forecast(a, 64)
+    torch.testing.assert_close(model.forecast(a, 65), first)
+    assert created == [(32, 65), (31, 65), (32, 64)]
+    gc.collect()
+    assert runner_refs[1]() is None
+    torch.testing.assert_close(model.forecast(b, 65), second)
+    assert created[-1] == (31, 65)
+
+    # Replacing the model or moving it to another device invalidates both
+    # wrappers even if the requested shape was cached.
     from copy import deepcopy
+    old_model = weakref.ref(model.model)
     model.model = deepcopy(model.model)
-    torch.testing.assert_close(model.forecast(torch.cat([context + 10, context + 20]), 65), changed)
-    assert created == [(32, 65), (32, 64), (17, 64), (32, 65), (32, 65)]
+    torch.testing.assert_close(model.forecast(a, 65), first)
+    gc.collect()
+    assert old_model() is None
+    assert all(ref() is None for ref in runner_refs[:-1])
+    torch.testing.assert_close(model.forecast(b, 65), second)
+    assert created[-3:] == [(31, 65), (32, 65), (31, 65)]
+
+    # A meta device exercises relocation in a CPU-only test without running a
+    # forecast on unmaterialized weights. Recursive CUDA parity runs separately.
+    model.model.to('meta')
+    def meta_forecast(runner, past_target, **kwargs):
+        return torch.empty((past_target.shape[0], 9, runner.hparams.prediction_length), device=runner.device)
+
+    monkeypatch.setattr(runner_type, 'forward', meta_forecast)
+    assert model.forecast(b.to('meta'), 65).device == torch.device('meta')
+    gc.collect()
+    assert all(ref() is None for ref in runner_refs[:-1])
 
 
 # ---------------------------------------------------------------------------
