@@ -26,10 +26,12 @@ round differently (observed max abs difference 1.9e-6 at 16 rows, #74).
 """
 
 import contextlib
+from contextvars import ContextVar
 import hashlib
 import importlib
 import inspect
 import logging
+from threading import Lock
 
 import torch
 
@@ -42,12 +44,13 @@ PINNED_SCALE_SOURCES = {
     'unit_scaling.scale': 'f7fd58748a2a7fdaf379f066b8c96c23f86543ac89e25aaf61747f283c8b8b09',
 }
 
-_active = 0  # Nesting depth of fast_unit_scaling(); shims read it at call time.
+_active = ContextVar('vtsfm_toto_fast_scaling', default=False)
+_install_lock = Lock()
 _installed = {}  # module name -> (attribute, original object)
 
 
 def _fast(input, fwd_scale, bwd_scale):
-    if _active and not torch.is_grad_enabled():
+    if _active.get() and not torch.is_grad_enabled():
         return input if fwd_scale == 1.0 else fwd_scale * input
     return None
 
@@ -88,33 +91,36 @@ def install():
                            'wrappers there. Revalidate the #74 fast path before updating the pin.',
                            name, digest)
             continue
-        original = getattr(module, attribute)
-        if attribute == '_ScaledGrad':
-            _InferenceScaledGrad.original = original
-            replacement = _InferenceScaledGrad
-        else:
-            replacement = _make_scale(original)
-        setattr(module, attribute, replacement)
-        _installed[name] = (attribute, original)
-    return tuple(_installed)
+        # Importing and hashing may overlap another constructor. Capture each
+        # upstream object exactly once so the fallback never calls our own shim.
+        with _install_lock:
+            if name in _installed:
+                continue
+            original = getattr(module, attribute)
+            if attribute == '_ScaledGrad':
+                _InferenceScaledGrad.original = original
+                replacement = _InferenceScaledGrad
+            else:
+                replacement = _make_scale(original)
+            setattr(module, attribute, replacement)
+            _installed[name] = (attribute, original)
+    with _install_lock:
+        return tuple(_installed)
 
 
 def uninstall():
     """Restore the original objects (tests and A/B measurements)."""
-    for name, (attribute, original) in _installed.items():
-        setattr(importlib.import_module(name), attribute, original)
-    _installed.clear()
+    with _install_lock:
+        for name, (attribute, original) in _installed.items():
+            setattr(importlib.import_module(name), attribute, original)
+        _installed.clear()
 
 
 @contextlib.contextmanager
 def fast_unit_scaling(enabled=True):
     """Use the shims for calls made in this block when grad is disabled."""
-    global _active
-    if not enabled:
-        yield
-        return
-    _active += 1
+    token = _active.set(enabled)
     try:
         yield
     finally:
-        _active -= 1
+        _active.reset(token)
