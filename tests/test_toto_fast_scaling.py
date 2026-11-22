@@ -116,6 +116,7 @@ def test_opt_out_and_source_change_keep_native_wrappers(monkeypatch, caplog):
     from vtsfm.adapters.toto2 import fast_scaling
     from vtsfm.adapters.toto2.runtime import TotoRuntime
 
+    fast_scaling.uninstall()  # Another test may already have created a runtime.
     original = dd_scale._ScaledGrad
     monkeypatch.setenv('VTSFM_FORECAST_EXECUTION', 'eager')
     monkeypatch.setenv('VTSFM_TOTO_FAST_UNIT_SCALING', '0')
@@ -166,6 +167,7 @@ def test_concurrent_install_preserves_both_original_objects(monkeypatch):
 
     from vtsfm.adapters.toto2 import fast_scaling
 
+    fast_scaling.uninstall()  # Exercise fresh installations even after other runtime tests.
     originals = dd_scale._ScaledGrad, gc_scale._scale
     barrier = Barrier(2)
     digest = fast_scaling.source_digest
