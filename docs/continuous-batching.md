@@ -33,7 +33,12 @@ algorithm; it does not approximate it with repeated shorter-horizon forecasts.
 Each request owns its normalization, masks, positivity flag, independent normal
 and flipped streams, running statistics, median feedback, quantile spread,
 output buffer and KV caches. Feedback stays separate between flip streams.
-Quantiles, crossing correction and de-normalization preserve pinned semantics.
+After each block, the stepper writes the difference between the two median
+forecasts into the request's output buffer. When the request finishes, it
+combines that history with the two prefill spreads to assemble all nine
+quantiles, correct crossings, reverse normalization and apply positivity once.
+A request canceled between blocks releases its buffers before that final work.
+The [A100 quantile assembly benchmark](baselines/2026-11-20-timesfm-quantile-assembly/README.md) compares it with both whole-forecast and the previous block epilogue.
 Prefill and autoregressive (AR) decode batch the normal and sign-flipped rows
 in one neural call per phase. Each stream retains its own statistics and feedback.
 
