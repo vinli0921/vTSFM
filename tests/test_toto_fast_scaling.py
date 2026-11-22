@@ -130,3 +130,60 @@ def test_opt_out_and_source_change_keep_native_wrappers(monkeypatch, caplog):
         assert 'dd_unit_scaling.scale source changed' in caplog.text
     finally:
         fast_scaling.uninstall()
+
+
+def test_active_forecast_isolated_from_concurrent_native_and_nested_opt_out(toto):
+    from concurrent.futures import ThreadPoolExecutor
+
+    import torch
+    from dd_unit_scaling.scale import scale_bwd
+
+    from vtsfm.adapters.toto2.fast_scaling import fast_unit_scaling
+
+    x = torch.ones(1)
+
+    @torch.inference_mode()
+    def aliases_input():
+        # The pinned backward-scaling forward allocates 1.0 * x; the fast path returns x.
+        return scale_bwd(x, 2.0) is x
+
+    with ThreadPoolExecutor(max_workers=1) as pool, fast_unit_scaling():
+        assert aliases_input()
+        assert not pool.submit(aliases_input).result()
+        with fast_unit_scaling(enabled=False):
+            assert not aliases_input()
+        assert aliases_input()
+    assert not aliases_input()
+
+
+def test_concurrent_install_preserves_both_original_objects(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    pytest.importorskip('toto2')
+    import dd_unit_scaling.scale as dd_scale
+    import unit_scaling.scale as gc_scale
+
+    from vtsfm.adapters.toto2 import fast_scaling
+
+    originals = dd_scale._ScaledGrad, gc_scale._scale
+    barrier = Barrier(2)
+    digest = fast_scaling.source_digest
+
+    def overlapping_digest(module):
+        value = digest(module)
+        barrier.wait(timeout=10)
+        return value
+
+    monkeypatch.setattr(fast_scaling, 'source_digest', overlapping_digest)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            jobs = [pool.submit(fast_scaling.install) for _ in range(2)]
+            for job in jobs:
+                assert set(job.result()) == set(fast_scaling.PINNED_SCALE_SOURCES)
+        assert fast_scaling._InferenceScaledGrad.original is originals[0]
+        assert gc_scale._scale.__wrapped__ is originals[1]
+    finally:
+        fast_scaling.uninstall()
+        # Restore even if a faulty installation captured one of its own shims.
+        dd_scale._ScaledGrad, gc_scale._scale = originals
