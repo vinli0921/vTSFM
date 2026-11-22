@@ -121,6 +121,14 @@ def test_reuse_forecast_runner_preserves_request_values_and_shape(monkeypatch):
     a = torch.arange(32, dtype=torch.float32).unsqueeze(0)
     b = a[:, :31]
     first = model.forecast(a, 65)
+    # The most recent shape takes the direct lookup, including eval restoration.
+    with monkeypatch.context() as fast_path:
+        def unexpected_miss(*args):
+            pytest.fail('A repeated forecast shape entered the cache-miss path')
+        fast_path.setattr(model, '_forecast_runner', unexpected_miss)
+        model.model.train()
+        torch.testing.assert_close(model.forecast(a, 65), first)
+        assert not model.model.training
     second = model.forecast(b, 65)
     # Alternate two exact widths with different input values and row counts.
     batch = torch.cat([a + 10, a + 20])
@@ -166,8 +174,11 @@ def test_reuse_forecast_runner_preserves_request_values_and_shape(monkeypatch):
     # A meta device exercises relocation in a CPU-only test without running a
     # forecast on unmaterialized weights. Recursive CUDA parity runs separately.
     model.model.to('meta')
-    runner = model._forecast_runner(32, 65, torch.device('meta'))
-    assert runner.device == torch.device('meta')
+    def meta_forecast(runner, past_target, **kwargs):
+        return torch.empty((past_target.shape[0], 9, runner.hparams.prediction_length), device=runner.device)
+
+    monkeypatch.setattr(runner_type, 'forward', meta_forecast)
+    assert model.forecast(b.to('meta'), 65).device == torch.device('meta')
     gc.collect()
     assert all(ref() is None for ref in runner_refs[:-1])
 
