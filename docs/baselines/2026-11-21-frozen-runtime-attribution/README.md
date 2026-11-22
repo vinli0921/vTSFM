@@ -82,7 +82,15 @@ The runs used the same A100-SXM4-40GB as the three trials in #33, eager FP32, TF
 
 ## Traces and verification
 
-Download an archive, extract it, decompress a JSON trace and open it in a Perfetto or Chrome trace viewer. Each archive includes both releases, the K1 and K4 request timelines and the corresponding CUDA capture with kernel, copy and host API events. Request numbers and timestamps are local to each exported trace. [Toto traces](https://github.com/vinli0921/vTSFM/releases/download/profiling-frozen-runtime-a100-issue34-2026-11-21/toto2-timelines.zip) · [Moirai traces](https://github.com/vinli0921/vTSFM/releases/download/profiling-frozen-runtime-a100-issue34-2026-11-21/moirai2-timelines.zip) · [TimesFM traces](https://github.com/vinli0921/vTSFM/releases/download/profiling-frozen-runtime-a100-issue34-2026-11-21/timesfm25-timelines.zip)
+The three viewable trace archives are on the team A100. From a machine with team SSH access, retrieve the model of interest with one of these commands.
+
+```bash
+scp hpml:vtsfm-issue34-20261121/team-traces/toto2-timelines.zip .
+scp hpml:vtsfm-issue34-20261121/team-traces/moirai2-timelines.zip .
+scp hpml:vtsfm-issue34-20261121/team-traces/timesfm25-timelines.zip .
+```
+
+Extract the ZIP, decompress a JSON trace and open it in a Perfetto or Chrome trace viewer. Each model archive includes both releases, the K1 and K4 request timelines, and the corresponding CUDA capture with kernels, copies and host API events. Request numbers and timestamps are local to each export. The [request-stage table](cpu-stages.csv) and [CUDA activity table](cuda-activity.csv) are available directly in this repository.
 
 All **10,000 untraced timed operations** succeeded: 5,200 native/adapter calls and native HTTP requests, 4,000 vTSFM scheduler requests and 800 Toto encoder HTTP requests. Separate parity checks used the archived #33 forecasts; maximum absolute difference was `1.91e-6` at `atol=rtol=1e-4`. All 288 diagnostic HTTP responses matched their own release’s archived forecast exactly. Accepted runs passed GPU process-ownership and cleanup checks. Runs interrupted by another workload or with ambiguous process ownership were excluded.
 
