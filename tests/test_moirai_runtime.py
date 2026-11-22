@@ -100,6 +100,39 @@ def test_workload_counts_recursive_blocks_and_input_patches(horizon, blocks):
     assert work.input_patches == 3 * -(-100 // PATCH)
 
 
+def test_reuse_forecast_runner_preserves_request_values_and_shape(monkeypatch):
+    torch = pytest.importorskip('torch')
+    pytest.importorskip('uni2ts')
+    from vtsfm.adapters.moirai2 import runtime as adapter
+
+    model = adapter.MoiraiRuntime(dict(d_model=64, d_ff=128, num_layers=1, patch_size=16,
+        num_predict_token=4, max_seq_len=64, attn_dropout_p=0.0, dropout_p=0.0, scaling=True))
+    created = []
+    runner_type = adapter._InferenceMoiraiForecast
+
+    def make_runner(**kwargs):
+        created.append((kwargs['context_length'], kwargs['prediction_length']))
+        return runner_type(**kwargs)
+
+    monkeypatch.setattr(adapter, '_InferenceMoiraiForecast', make_runner)
+    context = torch.arange(32, dtype=torch.float32).unsqueeze(0)
+    first = model.forecast(context, 65)
+    # Row count and values belong to the request; only width and horizon belong
+    # to the runner. A different batch can share it without altering prior IO.
+    changed = model.forecast(torch.cat([context + 10, context + 20]), 65)
+    assert changed.shape == (2, 9, 65)
+    assert not torch.equal(changed[0], first[0])
+    model.forecast(context, 64)
+    model.forecast(context[:, :17], 64)
+    torch.testing.assert_close(model.forecast(context, 65), first)
+    # Replacing a runtime's module also invalidates the runner even at the
+    # same shape and device. Reference predictions must follow the new weights.
+    from copy import deepcopy
+    model.model = deepcopy(model.model)
+    torch.testing.assert_close(model.forecast(torch.cat([context + 10, context + 20]), 65), changed)
+    assert created == [(32, 65), (32, 64), (17, 64), (32, 65), (32, 65)]
+
+
 # ---------------------------------------------------------------------------
 # GPU helpers
 # ---------------------------------------------------------------------------
