@@ -66,6 +66,10 @@ one series, 512 observations, four clients). A 200-request repeat with the
 stack order reversed measured 151.2 versus 154.4 ms (+2.1%). Both
 measurements are retained because the tail varied between runs.
 
+The [three-trial A100 reproduction](baselines/2026-11-21-frozen-runtime-pairs/README.md)
+repeats the 24 workload points with both release orders and reports the
+variation in each paired comparison.
+
 Forcing asynchronous scheduling on vLLM 0.33.0 reduced throughput by
 1.4–4.4% and raised p95 by 2.9–6.3% across the four-client points per model.
 Giving Toto three scheduler slots reduced throughput by 1.2% and raised p95
