@@ -87,6 +87,81 @@ residual matrix and interval bounds exactly at the original tolerance.
 Instrumented forecast API calls were 1,844 serial and 143 batched. The
 whole-recipe comparison measures the runtime cost of the resulting execution.
 
+## Capped calibration horizon (#19)
+
+sktime forecasts from every calibration origin to the end of the history. On
+the Chiller6 recipe the first origin (204) asks for 1,844 steps. That exceeds
+the TimesFM catalog card's 128-point output head, and the long Moirai decode ran
+out of memory on a 40 GB A100 in the original profiling round.
+
+The intervals read only a short prefix of each origin's forecast. Residual row
+`origin` comes from a fit on `y.iloc[:origin]`, so its first column is lead 1.
+sktime 1.2.0 reads `np.diagonal(residuals, offset=k)` for relative step `k`,
+which is lead `k + 1`. Intervals for `fh = 1..96` therefore read leads 2–97.
+Lead 1 and every lead after 97 are computed but never read, by any of
+the four interval methods.
+
+`cap_calibration_horizon=True` makes each origin forecast only `max(fh) + 1`
+steps, or the shorter remaining suffix near the end. It works with or without
+a batch callback.
+
+```python
+factory = partial(BatchedConformalIntervals, cap_calibration_horizon=True)
+result = run_recipe(store, series, recipe, conformal_factory=factory)
+```
+
+The interval residuals are unchanged only if a model's first 97 forecast
+values don't depend on the requested length. The opt-in checkpoint test below
+checks this per model at `atol=rtol=1e-4`. Residual-matrix entries beyond the
+cap stay NaN.
+
+The cap applies only when the horizon is known and positive. These cases keep
+sktime's uncapped loop:
+
+- covariates
+- origin sampling (`sample_frac`)
+- explicit `n_jobs`
+- multi-index series
+
+These cases are rejected instead of reading missing residuals:
+
+- an interval request that needs a lead beyond the cap
+- `update(update_params=True)` after a capped fit
+
+Refit with the new horizon in either case.
+
+Per model, through the AssetOps catalog cards:
+
+- **TimesFM 2.5: the test compares 97 against 128 steps, not 1,024.**
+  - The checkpoint's `horizon_length` is 128, and it sets the shape of the
+    point output head, so this card cannot forecast 1,024 steps. The test checks
+    that sktime rejects a 1,024-step request.
+  - The sktime wrapper runs one forward pass for any request up to 128 and
+    indexes the steps it needs.
+  - The 97-step capped request fits the unmodified card. The uncapped recipe's
+    1,844-step request never can.
+- **Moirai 2.0 (interim card, pending a team decision):** the test and VM
+  runbook use the AssetOps-style card with `"use_source_package": True`, which
+  differs from the round 4 card.
+  - Round 4's default card uses sktime's vendored `Moirai2Forecast`. That class
+    returns `(preds,), None, None`, but gluonts 0.14.3 (pinned by
+    `uni2ts==2.0.0`) calls `.cpu()` on the forward output. In `.venv-moirai2`
+    every forecast fails with `AttributeError: 'tuple' object has no attribute
+    'cpu'`.
+  - With `use_source_package=True`, sktime 1.2.0 builds uni2ts 2.0.0's own
+    `Moirai2Forecast` from `Moirai2Module.from_pretrained(checkpoint_path)` for
+    `Salesforce/...` checkpoints. That path skips the `.to(map_location)` call.
+  - In both paths sktime calls `create_predictor(batch_size)` without a device.
+    gluonts resolves `"auto"` to CUDA when it's available, so the predict device
+    follows CUDA availability, not `map_location`.
+  - The requested length sets the recursive decode length, so prefix equality
+    must be measured.
+- **Toto 2:** the recipe runs it natively without a horizon limit, and it runs
+  only on the team VM with #58's documented recipe install. The cap also
+  shortens Toto's calibration forecasts, but it changes the shapes
+  `TotoCalibrationBatcher` groups, so the batched timing above does not carry
+  over.
+
 ## Checks
 
 Run the recipe tests in an environment with the `recipes` extra. The
@@ -106,6 +181,106 @@ The native CPU tests use tiny random-weight Toto models with the real sktime
 forecaster. They cover growing contexts, differing horizons, decode blocks
 `None`, 4 and 8, native fallbacks and seed order. Residual and interval
 comparisons use `atol=rtol=1e-5`.
+
+`tests/test_conformal_horizon_cap.py` checks the cap on CPU with deterministic
+stand-in forecasters, with and without a callback:
+
+- intervals match uncapped sktime for every interval method; Range, Datetime
+  and Period indexes; and contiguous, gapped and suffix-exceeding horizons
+- the read residual diagonals are equal, and each origin's requested length
+  equals the cap
+- an off-by-one cap (`max(fh)`) changes the intervals
+- the fallbacks and rejections listed above
+
+`tests/test_assetops_calibration.py` also runs the pinned recipe in capped and
+capped-batched modes.
+
+### Checkpoint checks for the cap
+
+`tests/test_conformal_horizon_models.py` is opt-in and loads one AssetOps
+catalog card per run. The harness's `recipe_estimator` cards are used, with the
+device configurable; Moirai uses the interim card above. It runs two checks:
+
+- **Prefix match:** at cutoffs 204, 1,000 and 2,048 of the Chiller6 training
+  history, the first 97 values of a 97-step forecast must match a 1,024-step
+  forecast (128 for TimesFM) at `atol=rtol=1e-4`.
+- **Recipe labels:** the capped Chiller6 recipe runs through `run_recipe`. Its
+  labels are compared with the uncapped recipe where that run is feasible: always
+  for Toto, and for Moirai only with `VTSFM_RECIPE_COMPARE_UNCAPPED=1` (long, may
+  run out of memory). TimesFM can't run the uncapped recipe.
+
+The fixture path is chosen in this order:
+
+1. `VTSFM_CHILLER6_JSON`
+2. `data/AssetOpsBench/src/couchdb/scenarios_data/shared/iot/chiller_6.json`
+3. the same file in the `VTSFM_ASSETOPS_ROOT` checkout
+
+The loader checks both recorded SHA256 values.
+
+Each run writes `results/issue19/<model>.json`, which is git-ignored.
+`VTSFM_RECIPE_COMPARE_UNCAPPED=1` writes `<model>-uncapped.json` instead. Each
+file records:
+
+- the card and its deviation note
+- per-cutoff prefix lengths, maximum absolute and relative differences, and
+  pass/fail
+- capped and uncapped anomaly indexes where run
+- package versions, device and GPU
+- git commit, dirty state and a diff hash
+- wall times, which include model load
+
+Failures are recorded too. `VTSFM_RECIPE_CUTOFFS` selects a subset of cutoffs,
+and `VTSFM_RECIPE_RESULTS` changes the directory. If a model misses the 1e-4
+prefix tolerance, keep the cap off for that model rather than loosening it.
+Times are recorded, not a speedup claim.
+
+### VM runbook for the checkpoint checks
+
+On a fresh Linux VM with an idle CUDA 13 GPU, copy
+`issue19-conformal-cap.patch` to the home directory, then run:
+
+```bash
+# 1. Code: draft #58's head (ec491d2) plus the #19 patch.
+git clone https://github.com/vinli0921/vTSFM.git && cd vTSFM
+git fetch origin pull/58/head:pr58 && git checkout pr58
+git apply ~/issue19-conformal-cap.patch
+
+# 2. Environments. Toto uses #58's documented recipe install, which also
+#    provides sktime 1.2.0 for TimesFM. Moirai adds only sktime.
+./scripts/setup.sh --adapter toto2
+./scripts/setup.sh --adapter moirai2
+UV=.tools/uv/uv; [ -x "$UV" ] || UV=uv
+"$UV" pip install --python .venv-toto2/bin/python -e '.[recipes,toto2]' \
+  'toto-models==1.0.0' 'skpro==2.14.0' 'torch==2.14.0'
+"$UV" pip install --dry-run --python .venv-moirai2/bin/python 'sktime==1.2.0'  # expect additions only
+"$UV" pip install --python .venv-moirai2/bin/python 'sktime==1.2.0'
+
+# 3. Pinned AssetOpsBench. The tests patch a temporary copy; the checkout
+#    also provides the Chiller6 fixture.
+git clone https://github.com/IBM/AssetOpsBench.git ../AssetOpsBench
+git -C ../AssetOpsBench checkout e844f6468c6c68b328022e7ca8e31da140842cc7
+export VTSFM_ASSETOPS_ROOT=$(realpath ../AssetOpsBench)
+
+# 4. CPU recipe tests, then one checkpoint run per model on the idle GPU.
+PYTHONPATH=src:tests .venv-toto2/bin/python -m pytest -q tests/test_conformal_horizon_cap.py \
+  tests/test_conformal_batching.py tests/test_assetops_patch.py tests/test_assetops_calibration.py
+nvidia-smi --query-gpu=name,memory.used,utilization.gpu --format=csv
+VTSFM_RECIPE_MODEL_TEST=timesfm2 PYTHONPATH=src:tests \
+  .venv-toto2/bin/python -m pytest -q -s tests/test_conformal_horizon_models.py
+VTSFM_RECIPE_MODEL_TEST=toto2 PYTHONPATH=src:tests \
+  .venv-toto2/bin/python -m pytest -q -s tests/test_conformal_horizon_models.py
+VTSFM_RECIPE_MODEL_TEST=moirai2 PYTHONPATH=src:tests \
+  .venv-moirai2/bin/python -m pytest -q -s tests/test_conformal_horizon_models.py
+# Optional, long, may run out of memory: Moirai's uncapped recipe labels.
+VTSFM_RECIPE_MODEL_TEST=moirai2 VTSFM_RECIPE_COMPARE_UNCAPPED=1 PYTHONPATH=src:tests \
+  .venv-moirai2/bin/python -m pytest -q -s tests/test_conformal_horizon_models.py -k labels
+
+# 5. Bring these back for the PR.
+ls results/issue19/   # timesfm2.json toto2.json moirai2.json [moirai2-uncapped.json]
+```
+
+The Toto run includes an uncapped recipe for the label comparison. #58
+measured that run at 287 s. TimesFM records capped labels only.
 
 ## Whole-recipe timing
 

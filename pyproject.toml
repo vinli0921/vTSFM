@@ -40,6 +40,14 @@ benchmark = [
 dev = ["pytest==8.4.2", "build>=1.2,<2", "ruff==0.14.0"]
 evaluation = ["fev==0.10.0"]
 recipes = ["numpy==2.2.6", "pandas==2.3.3", "sktime==1.2.0"]
+# AssetOps Moirai catalog card (sktime's vendored Moirai2Forecast) for the #19
+# recipe checks. Kept apart from moirai2: uni2ts pins gluonts~=0.14.3, which
+# cannot consume the vendored forecaster's tuple output. No uni2ts here.
+recipes-moirai2 = [
+  "numpy==2.2.6", "pandas==2.3.3", "sktime==1.2.0", "torch==2.14.0",
+  "gluonts==0.17.0", "einops==0.8.2", "huggingface-hub==2.4.0", "hf-xet==1.8.0",
+  "lightning==2.6.6", "hydra-core==1.3.8", "safetensors==0.8.0",
+]
 timesfm25 = [
   "timesfm @ git+https://github.com/google-research/timesfm.git@e51928e27119cb17bebc005be2696b75e0a9e688",
 ]
