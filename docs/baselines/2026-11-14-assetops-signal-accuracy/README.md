@@ -6,7 +6,7 @@
 > harness now selects every non-overlapping window (24/24/11/11/17 at C512/H96), adds a mean-of-history
 > baseline, ratio-of-means and geometric-mean aggregates, per-window ranks, paired-bootstrap intervals and
 > off-state/unforecastable flags; see [the accuracy profile](../../model-integration.md#assetops-signals).
-> A rerun with that harness replaces these comparisons. The commands below used the then-default five
+> The [November 23 baseline](../2026-11-23-assetops-signal-accuracy-nonoverlap/README.md) replaces these comparisons. The commands below used the then-default five
 > evenly spaced origins; reproduce them with `--signal-windows 5`. This baseline's history-mean column
 > averages all 512 inputs, including forward-filled slots; the new baseline uses recorded values only.
 

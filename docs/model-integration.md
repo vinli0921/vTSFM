@@ -288,14 +288,15 @@ paired comparison. Reduced-precision runs for
 manifest and table generator as the FP32 run they are compared with.
 
 An accuracy run scores every usable case before exiting with a nonzero status
-for any parity failure. The table marks affected signals. On the reference A100,
-Toto and Moirai fail the `rtol=atol=1e-4` gate only on condenser water flow.
-Forecasts near zero in a series reaching about 10,000 differ from native by a
-few FP32 rounding steps. With more windows this will recur on condenser flow
-until the CPU-built rotary-table fix ([#90](https://github.com/vinli0921/vTSFM/pull/90))
-merges; the table reports native scores, so the failure does not change the
-accuracy numbers. See the
-[November 14 baseline](baselines/2026-11-14-assetops-signal-accuracy/README.md).
+for any parity failure. The table marks affected signals. On the reference A100
+with non-overlapping windows, all three adapters fail the `rtol=atol=1e-4` gate
+on 3 of 13 cases, all on condenser water flow: forecasts near zero in a series
+reaching about 10,000 differ from native by a few FP32 rounding steps. The
+CPU-built rotary-table fix ([#90](https://github.com/vinli0921/vTSFM/pull/90))
+addresses Toto and Moirai only; TimesFM's failure needs the magnitude-aware floor
+in [#71](https://github.com/vinli0921/vTSFM/issues/71). The table reports native
+scores, so the failures do not change the accuracy numbers. See the
+[November 23 baseline](baselines/2026-11-23-assetops-signal-accuracy-nonoverlap/README.md).
 
 ## Performance profile
 
