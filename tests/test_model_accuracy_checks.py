@@ -61,6 +61,9 @@ def test_matching_cases_pass_without_failure(tmp_path):
     accuracy.test_observed_forecast_quality_preserves_native(run)
     assert [check["status"] for check in run["metadata"]["checks"]] == ["passed"] * 3
     assert all(check["compared_values"] == 18 for check in run["metadata"]["checks"])
+    saved = json.loads((tmp_path / "accuracy.json").read_text())["cases"]
+    assert all(entry["mean_history"]["per_series"][0]["item_id"] == entry["native"]["per_series"][0]["item_id"]
+               for entry in saved)
 
 
 def test_interrupts_still_stop_the_run(tmp_path):

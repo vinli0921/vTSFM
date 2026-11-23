@@ -20,6 +20,7 @@ from benchmarks.model_evaluation import (
     _causal_fill,
     assetops_cases,
     load_cases,
+    mean_history_forecasts,
     score_forecasts,
     seasonal_naive_forecasts,
     validate_case,
@@ -257,6 +258,21 @@ def test_seasonal_naive_repeats_last_season_and_alignment_matters():
     permuted["evaluation"]["targets"].reverse()
     permuted["evaluation"]["observed"].reverse()
     assert score_forecasts(permuted, forecasts[::-1])["MAE"] == 0.
+
+
+def test_mean_history_baseline_uses_only_recorded_history_values():
+    case = case_for_scores(pasts=[[1., 2., 2., 7.], [10., 20., 30., 40.]],
+                           targets=[[3., 4., 3.], [30., 40., 30.]], seasonality=2)
+    case["provenance"] = {"origins": [4, 104], "past_imputed_positions": [[2], []]}
+    forecasts = mean_history_forecasts(case)
+    assert forecasts.shape == (2, 9, 3)
+    # Row 0 slot 2 was forward-filled: the mean covers 1, 2 and 7 only.
+    assert np.all(forecasts[0] == 10 / 3) and np.all(forecasts[1] == 25.)
+    unrecorded = deepcopy(case)
+    unrecorded["provenance"] = {"fixture": "no imputation record"}
+    assert np.all(mean_history_forecasts(unrecorded)[0] == 3.)  # Whole history without provenance.
+    scores = score_forecasts(case, forecasts)
+    assert scores["per_series"][0]["MASE"] == pytest.approx(scores["per_series"][0]["SQL"])
 
 
 @pytest.mark.parametrize("bad", [np.zeros((2, 2, 9)), np.full((2, 9, 2), np.nan)])

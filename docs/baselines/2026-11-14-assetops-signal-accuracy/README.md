@@ -1,5 +1,15 @@
 # Forecast accuracy on more AssetOpsBench signals — November 14, 2026
 
+> **Superseded for ranking claims ([#84](https://github.com/vinli0921/vTSFM/issues/84)).** This baseline
+> scores five correlated windows per signal with the mean of per-window MASE ratios, which one tiny-scale
+> window can dominate. Do not read per-signal winners or "models differ by 16–44%" from it. The accuracy
+> harness now selects every non-overlapping window (24/24/11/11/17 at C512/H96), adds a mean-of-history
+> baseline, ratio-of-means and geometric-mean aggregates, per-window ranks, paired-bootstrap intervals and
+> off-state/unforecastable flags; see [the accuracy profile](../../model-integration.md#assetops-signals).
+> A rerun with that harness replaces these comparisons. The commands below used the then-default five
+> evenly spaced origins; reproduce them with `--signal-windows 5`. This baseline's history-mean column
+> averages all 512 inputs, including forward-filled slots; the new baseline uses recorded values only.
+
 The [accuracy harness](../../model-integration.md#assetops-signals) evaluates five signals for [issue #23](https://github.com/vinli0921/vTSFM/issues/23). The [CSV](summary.csv) contains one row per model and signal.
 
 A100-SXM4-40GB, driver 595.91.07. vLLM 0.33.0 V1, Torch 2.14.0+cu130, Transformers 5.20.2, eager FP32,
@@ -21,12 +31,13 @@ Scaled quantile loss (SQL) summarizes all nine quantiles.
 ```bash
 .venv/bin/python -m benchmarks.prepare_data --output data --assetops-signals
 .venv/bin/python -m benchmarks.model_evaluation prepare --data-dir data \
-  --assetops-signals --output data/accuracy-signals.json
+  --assetops-signals --signal-windows 5 --output data/accuracy-signals.json
 ./scripts/test-models.sh --adapter all --profile accuracy \
   --cases data/accuracy-signals.json --output results/issue23/fp32-run2
 ```
 
-To regenerate the published CSV from a completed run directory with this PR's table generator:
+To regenerate the published CSV from a completed run directory with this PR's table generator
+(`benchmarks/accuracy_table.py` at `467f2ff`; later generators append columns and window/comparison CSVs):
 
 ```bash
 run=results/issue23/fp32-run2
