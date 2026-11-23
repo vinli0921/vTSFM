@@ -13,6 +13,7 @@ Usage: scripts/test-models.sh [--adapter all|timesfm25|toto2|moirai2]
                             [--backend-order native,vtsfm]
                             [--forecast-precision fp32|tf32|bf16]
                             [--forecast-execution eager|compile]
+                            [--payload json|b64]
 
 Run model integration checks sequentially on an idle Linux NVIDIA GPU.
 Defaults: all three adapters, GPU 0, port 18001, and a new UTC/commit directory
@@ -23,6 +24,8 @@ Accuracy scores observed labels; --cases selects a prepared manifest (fev slice
 or AssetOps signals). Accuracy runs end by writing accuracy_table.md/.csv.
 Performance compares native HTTP and vLLM with matching request boundaries.
 --forecast-execution selects the vTSFM neural core; native references stay eager.
+--payload b64 sends equal-length HTTP requests as compact inputs_b64 to both
+servers; ragged cases stay JSON lists. Native references are unchanged.
 EOF
 }
 
@@ -47,10 +50,11 @@ horizon=96
 backend_order=native,vtsfm
 forecast_precision="${VTSFM_TEST_PRECISION:-}"
 forecast_execution="${VTSFM_TEST_EXECUTION:-eager}"
+payload=json
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
-    --adapter|--profile|--gpu|--port|--output|--data-dir|--cases|--requests|--warmups|--batches|--contexts|--clients|--horizon|--backend-order|--forecast-precision|--forecast-execution)
+    --adapter|--profile|--gpu|--port|--output|--data-dir|--cases|--requests|--warmups|--batches|--contexts|--clients|--horizon|--backend-order|--forecast-precision|--forecast-execution|--payload)
       [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || fail "Missing value for $1"
       case "$1" in
         --adapter) adapter="$2" ;;
@@ -69,6 +73,7 @@ while [[ $# -gt 0 ]]; do
         --backend-order) backend_order="$2" ;;
         --forecast-precision) forecast_precision="$2" ;;
         --forecast-execution) forecast_execution="$2" ;;
+        --payload) payload="$2" ;;
       esac
       shift 2 ;;
     *) fail "Unknown argument: $1" ;;
@@ -87,6 +92,10 @@ esac
 case "$forecast_execution" in
   eager|compile) ;;
   *) fail '--forecast-execution must be eager or compile' ;;
+esac
+case "$payload" in
+  json|b64) ;;
+  *) fail '--payload must be json or b64' ;;
 esac
 [[ -z "$cases" || "$profile" == accuracy ]] || fail '--cases requires --profile accuracy'
 case "$forecast_precision" in
@@ -160,7 +169,7 @@ printf 'adapter\tpytest_exit_code\tlog_exit_code\n' > "$summary"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$gpu"
 export VTSFM_TEST_GPU_INDEX="$gpu" VTSFM_TEST_PORT="$port"
 export VTSFM_TEST_PROFILE="$profile" VTSFM_TEST_DATA="$data_dir" VTSFM_TEST_CASES="$cases"
-export VTSFM_TEST_EXECUTION="$forecast_execution"
+export VTSFM_TEST_EXECUTION="$forecast_execution" VTSFM_TEST_PAYLOAD="$payload"
 if [[ "$forecast_execution" == compile ]]; then export TRITON_DEFAULT_FP_FUSION=0; fi
 export VTSFM_PERF_REQUESTS="$requests" VTSFM_PERF_WARMUPS="$warmups"
 export VTSFM_PERF_BATCHES="$batches" VTSFM_PERF_CONTEXTS="$contexts"

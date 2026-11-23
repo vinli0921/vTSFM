@@ -57,6 +57,44 @@ def test_synthetic_cases_cover_ragged_block_decode_and_repeat(adapter, horizon):
     assert cases == integration_cases(adapter)
 
 
+@pytest.mark.parametrize('adapter', ['timesfm25', 'toto2', 'moirai2'])
+def test_b64_wire_form_parses_like_each_case_or_falls_back_for_ragged(adapter):
+    from model_integration_support import integration_cases, wire_data
+    from vtsfm.adapters.forecast import parse_request
+
+    settings = importlib.import_module(f'vtsfm.adapters.{adapter}.spec').FORECAST_SETTINGS
+    forms = []
+    for case in integration_cases(adapter):
+        original = deepcopy(case['data'])
+        data, form = wire_data(case['data'], 'b64')
+        assert case['data'] == original
+        forms.append(form)
+        expected, observed = parse_request(case['data'], settings), parse_request(data, settings)
+        assert observed[1:] == expected[1:]
+        for got, want in zip(observed[0], expected[0], strict=True):
+            assert got.get('item_id') == want.get('item_id')
+            assert got['target'].tolist() == want['target'].tolist()
+    # The ragged case keeps JSON lists; every equal-length case is compact.
+    assert forms == ['b64', 'json', 'b64', 'b64']
+    assert wire_data(integration_cases(adapter)[0]['data'], 'json')[1] == 'json'
+
+
+def test_b64_wire_form_keeps_json_for_partial_item_ids_and_rejects_unknown_forms(monkeypatch):
+    from model_integration_support import payload_form, wire_data
+
+    data = {'inputs': [{'item_id': 'a', 'target': [1, 2]}, {'target': [3, 4]}]}
+    assert wire_data(data, 'b64') == (data, 'json')
+    with pytest.raises(ValueError):
+        wire_data(data, 'base64')
+    monkeypatch.delenv('VTSFM_TEST_PAYLOAD', raising=False)
+    assert payload_form() == 'json'
+    monkeypatch.setenv('VTSFM_TEST_PAYLOAD', 'b64')
+    assert payload_form() == 'b64'
+    monkeypatch.setenv('VTSFM_TEST_PAYLOAD', 'msgpack')
+    with pytest.raises(ValueError):
+        payload_form()
+
+
 def test_response_comparison_selects_sparse_canonical_quantiles_and_reports_errors():
     from model_integration_support import compare_response
 

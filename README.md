@@ -114,6 +114,27 @@ the requested quantiles and item IDs, without a synthetic `mean` field. Covariat
 cross-learning, and multivariate targets are rejected. Context limits are 8192 for
 TimesFM/Toto and 7168 for Moirai, reserving room for the prediction horizon.
 
+Equal-length series can instead be sent in one optional compact field, which
+avoids building one Python float per observation while the request is parsed
+([#73](https://github.com/vinli0921/vTSFM/issues/73)). JSON lists remain the
+default; send either `inputs` or `inputs_b64`, not both:
+
+```python
+import base64
+import numpy as np
+
+targets = np.asarray([[1.0, 2.5, 3.0], [4.0, 5.0, 6.0]], dtype='<f4')  # [rows, width]
+data = {'inputs_b64': {'data': base64.b64encode(targets.tobytes()).decode('ascii'),
+                       'shape': list(targets.shape), 'item_ids': ['a', 'b']},  # item_ids optional
+        'parameters': {'prediction_length': 96}}
+```
+
+`data` holds little-endian FP32 values in row-major order. Values must be finite
+(there is no missing-value encoding, as with JSON lists), and the same context,
+admission and error rules apply. Ragged series stay on JSON lists. Responses are
+unchanged. `vtsfm.adapters.forecast.encode_inputs_b64` builds this object from
+lists using the server's own FP32 cast.
+
 TimesFM keeps histories and forecast tensors on the model device and uses the
 pinned upstream decoder. It preserves the reference normalization, continuous
 quantile head, flip invariance, positivity, and crossing correction.

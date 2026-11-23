@@ -54,6 +54,7 @@ record = {{'adapter': {adapter!r}, 'args': sys.argv[1:], 'cwd': os.getcwd(),
           'profile': os.environ.get('VTSFM_TEST_PROFILE'),
           'precision': os.environ.get('VTSFM_TEST_PRECISION'),
           'execution': os.environ.get('VTSFM_TEST_EXECUTION'),
+          'payload': os.environ.get('VTSFM_TEST_PAYLOAD'),
           'fp_fusion': os.environ.get('TRITON_DEFAULT_FP_FUSION'),
           'data_dir': os.environ.get('VTSFM_TEST_DATA'), 'cases': os.environ.get('VTSFM_TEST_CASES'),
           'performance': {{key: os.environ.get('VTSFM_PERF_' + key) for key in
@@ -180,7 +181,7 @@ def test_compile_selection_reaches_profiles_and_integration_adds_retained_shape_
 @pytest.mark.parametrize('arguments', [('--profile','unknown'), ('--requests','0'),
     ('--warmups','-1'), ('--batches','0,4'), ('--clients','one'), ('--horizon','1025'),
     ('--backend-order','native,native'), ('--cases','anything.json'),
-    ('--forecast-execution', 'unknown')])
+    ('--forecast-execution', 'unknown'), ('--payload', 'base64'), ('--payload',)])
 def test_invalid_profile_settings_do_not_start_model_processes(checkout, arguments):
     root, env = checkout
     install_environments(root)
@@ -188,6 +189,19 @@ def test_invalid_profile_settings_do_not_start_model_processes(checkout, argumen
     assert result.returncode != 0
     assert calls(env) == []
     assert not (root / 'results').exists()
+
+
+@pytest.mark.parametrize('profile', ['integration', 'accuracy', 'performance'])
+@pytest.mark.parametrize('payload', [None, 'json', 'b64'])
+def test_payload_form_is_forwarded_to_every_profile(checkout, profile, payload):
+    root, env = checkout
+    install_environments(root)
+    arguments = ['--profile', profile, '--adapter', 'toto2']
+    if payload is not None:
+        arguments += ['--payload', payload]
+    result = run(root, env, *arguments)
+    assert result.returncode == 0, result.stderr
+    assert calls(env)[0]['payload'] == (payload or 'json')
 
 
 def test_all_models_continue_after_failure_and_preserve_logs_and_exit_codes(checkout):

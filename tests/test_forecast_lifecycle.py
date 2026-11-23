@@ -126,6 +126,41 @@ def test_preprocess_left_pads_ragged_fp32_context():
         torch.testing.assert_close(context, expected, equal_nan=True)
 
 
+def test_b64_inputs_stage_the_same_context_and_metadata_as_json_lists():
+    import torch
+    from vtsfm.adapters.forecast import encode_inputs_b64
+    from vtsfm.adapters.transport import decode_metadata
+
+    processor = _processor()
+    targets = [[1, 2.5, 3, -4e5], [5, 6, 7.25, 8]]
+    parameters = {'prediction_length': 2, 'quantile_levels': [0.1, 0.9]}
+    json_data = {'inputs': [{'item_id': f'电机-{row}', 'target': target}
+                            for row, target in enumerate(targets)], 'parameters': parameters}
+    b64_data = {'inputs_b64': encode_inputs_b64(targets, ['电机-0', '电机-1']), 'parameters': parameters}
+    prompts = [processor.pre_process(processor.parse_data(data)) for data in (json_data, b64_data)]
+    contexts = [prompt['multi_modal_data']['timeseries']['context'][0] for prompt in prompts]
+    torch.testing.assert_close(contexts[1], contexts[0], rtol=0, atol=0)
+    assert contexts[1].dtype == torch.float32
+    metadata = [decode_metadata(prompt['multi_modal_data']['timeseries']['request_metadata'][0])
+                for prompt in prompts]
+    for record in metadata:
+        record.pop('request_id')  # A fresh invocation ID for every request.
+    assert metadata[1] == metadata[0]
+    assert prompts[1]['prompt_token_ids'] == prompts[0]['prompt_token_ids']
+
+
+def test_over_budget_b64_request_is_rejected_by_the_same_row_limit(monkeypatch):
+    from vtsfm.adapters.forecast import encode_inputs_b64
+
+    monkeypatch.setenv('VTSFM_FORECAST_LIMITS', '{"max_request_rows":1}')
+    processor = _processor()
+    with pytest.raises(ValueError, match='rows') as json_error:
+        processor.parse_data({'inputs': [{'target': [1, 2]}, {'target': [3, 4]}]})
+    with pytest.raises(ValueError, match='rows') as b64_error:
+        processor.parse_data({'inputs_b64': encode_inputs_b64([[1, 2], [3, 4]])})
+    assert str(b64_error.value) == str(json_error.value)
+
+
 def test_over_budget_offline_preprocessing_allocates_no_context(monkeypatch):
     import numpy as np
     import torch

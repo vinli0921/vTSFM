@@ -2,7 +2,7 @@
 
 import pytest
 
-from model_integration_support import compare_response
+from model_integration_support import compare_response, payload_form, wire_data
 from model_serving_support import INTEGRATION_CASES, record_check, save_json
 
 
@@ -15,8 +15,9 @@ def test_http_forecast_matches_native(served_model, index):
     run = served_model
     entry = run['cases'][index]
     case = entry['case']
-    payload = {'model': run['spec'].model_id, 'task': 'plugin', 'data': case['data']}
-    record = {'case': case['name'], 'status': 'failed'}
+    data, form = wire_data(case['data'], payload_form())
+    payload = {'model': run['spec'].model_id, 'task': 'plugin', 'data': data}
+    record = {'case': case['name'], 'payload_form': form, 'status': 'failed'}
     try:
         save_json(run['output'] / f'{index}-request.json', payload)
         response = run['session'].post(run['url'] + '/pooling', json=payload,

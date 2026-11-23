@@ -8,7 +8,7 @@ import os
 import pytest
 
 from benchmarks.model_performance import measure_requests
-from model_integration_support import compare_response
+from model_integration_support import compare_response, payload_form, wire_data
 from model_serving_support import record_check, save_json
 
 
@@ -22,17 +22,23 @@ def test_matched_http_performance(model_run):
     order = os.environ.get('VTSFM_PERF_ORDER', 'native,vtsfm').split(',')
     if sorted(order) != ['native', 'vtsfm']:
         raise ValueError('Backend order must contain native and vtsfm exactly once')
+    form = payload_form()
     points = []
     run['metadata']['performance'] = {'requests_per_point': requests, 'warmups': warmups,
-                                    'backend_order': order, 'clients': run['clients']}
+                                    'backend_order': order, 'clients': run['clients'],
+                                    'payload_form': form}
     for backend in order:
         with run['backend'](backend) as server:
             for entry in run['cases']:
                 case = entry['case']
-                payload = {'model': run['spec'].model_id, 'task': 'plugin', 'data': case['data']}
+                # Encoding happens here, outside the timed samples; both backends
+                # receive identical bytes.
+                data, sent_form = wire_data(case['data'], form)
+                payload = {'model': run['spec'].model_id, 'task': 'plugin', 'data': data}
                 encoded = json.dumps(payload, separators=(',', ':'), allow_nan=False).encode()
                 for clients in run['clients']:
-                    check = {'case': case['name'], 'backend': backend, 'clients': clients, 'status': 'failed'}
+                    check = {'case': case['name'], 'backend': backend, 'clients': clients,
+                             'payload_form': sent_form, 'status': 'failed'}
                     try:
                         # Validate a concurrent burst separately; accuracy checks and
                         # payload construction never enter the performance samples.
@@ -62,6 +68,7 @@ def test_matched_http_performance(model_run):
                                      forecast_execution=run['metadata']['forecast_execution'][backend],
                                      context_lengths=[len(item['target']) for item in case['data']['inputs']],
                                      horizon=case['data']['parameters']['prediction_length'],
+                                     payload_form=sent_form, payload_bytes=len(encoded),
                                      payload_sha256=hashlib.sha256(encoded).hexdigest(), parity=parity)
                         points.append(point)
                         save_json(run['output'] / 'performance.json', {'points': points,
