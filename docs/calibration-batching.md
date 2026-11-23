@@ -140,20 +140,16 @@ Per model, through the AssetOps catalog cards:
     indexes the steps it needs.
   - The 97-step capped request fits the unmodified card. The uncapped recipe's
     1,844-step request never can.
-- **Moirai 2.0 (interim card, pending a team decision):** the test and VM
-  runbook use the AssetOps-style card with `"use_source_package": True`, which
-  differs from the round 4 card.
-  - Round 4's default card uses sktime's vendored `Moirai2Forecast`. That class
-    returns `(preds,), None, None`, but gluonts 0.14.3 (pinned by
-    `uni2ts==2.0.0`) calls `.cpu()` on the forward output. In `.venv-moirai2`
-    every forecast fails with `AttributeError: 'tuple' object has no attribute
-    'cpu'`.
-  - With `use_source_package=True`, sktime 1.2.0 builds uni2ts 2.0.0's own
-    `Moirai2Forecast` from `Moirai2Module.from_pretrained(checkpoint_path)` for
-    `Salesforce/...` checkpoints. That path skips the `.to(map_location)` call.
-  - In both paths sktime calls `create_predictor(batch_size)` without a device.
-    gluonts resolves `"auto"` to CUDA when it's available, so the predict device
-    follows CUDA availability, not `map_location`.
+- **Moirai 2.0:** the round 4 card (sktime's vendored `Moirai2Forecast`) runs in
+  its own environment, `.venv-recipes-moirai2`. Build it with
+  `scripts/setup.sh --recipes moirai2` from the `recipes-moirai2` extra.
+  - It can't share `.venv-moirai2`. The vendored class returns
+    `(preds,), None, None`, and gluonts 0.14.3 (pinned by `uni2ts==2.0.0`)
+    calls `.cpu()` on that output. The recipe environment uses gluonts 0.17.0
+    and no uni2ts.
+  - sktime calls `create_predictor(batch_size)` without a device. gluonts
+    resolves `"auto"` to CUDA when it's available, so the predict device follows
+    CUDA availability, not `map_location`.
   - The requested length sets the recursive decode length, so prefix equality
     must be measured.
 - **Toto 2:** the recipe runs it natively without a horizon limit, and it runs
@@ -199,7 +195,7 @@ capped-batched modes.
 
 `tests/test_conformal_horizon_models.py` is opt-in and loads one AssetOps
 catalog card per run. The harness's `recipe_estimator` cards are used, with the
-device configurable; Moirai uses the interim card above. It runs two checks:
+device configurable. It runs two checks:
 
 - **Prefix match:** at cutoffs 204, 1,000 and 2,048 of the Chiller6 training
   history, the first 97 values of a 97-step forecast must match a 1,024-step
@@ -221,7 +217,7 @@ Each run writes `results/issue19/<model>.json`, which is git-ignored.
 `VTSFM_RECIPE_COMPARE_UNCAPPED=1` writes `<model>-uncapped.json` instead. Each
 file records:
 
-- the card and its deviation note
+- the card
 - per-cutoff prefix lengths, maximum absolute and relative differences, and
   pass/fail
 - capped and uncapped anomaly indexes where run
@@ -245,15 +241,14 @@ git clone https://github.com/vinli0921/vTSFM.git && cd vTSFM
 git fetch origin pull/58/head:pr58 && git checkout pr58
 git apply ~/issue19-conformal-cap.patch
 
-# 2. Environments. Toto uses #58's documented recipe install, which also
-#    provides sktime 1.2.0 for TimesFM. Moirai adds only sktime.
+# 2. Environments. .venv-toto2 runs Toto and TimesFM, with #58's documented
+#    recipe install (it also provides sktime 1.2.0). .venv-recipes-moirai2
+#    runs Moirai's catalog card.
 ./scripts/setup.sh --adapter toto2
-./scripts/setup.sh --adapter moirai2
+./scripts/setup.sh --recipes moirai2
 UV=.tools/uv/uv; [ -x "$UV" ] || UV=uv
 "$UV" pip install --python .venv-toto2/bin/python -e '.[recipes,toto2]' \
   'toto-models==1.0.0' 'skpro==2.14.0' 'torch==2.14.0'
-"$UV" pip install --dry-run --python .venv-moirai2/bin/python 'sktime==1.2.0'  # expect additions only
-"$UV" pip install --python .venv-moirai2/bin/python 'sktime==1.2.0'
 
 # 3. Pinned AssetOpsBench. The tests patch a temporary copy; the checkout
 #    also provides the Chiller6 fixture.
@@ -270,10 +265,10 @@ VTSFM_RECIPE_MODEL_TEST=timesfm2 PYTHONPATH=src:tests \
 VTSFM_RECIPE_MODEL_TEST=toto2 PYTHONPATH=src:tests \
   .venv-toto2/bin/python -m pytest -q -s tests/test_conformal_horizon_models.py
 VTSFM_RECIPE_MODEL_TEST=moirai2 PYTHONPATH=src:tests \
-  .venv-moirai2/bin/python -m pytest -q -s tests/test_conformal_horizon_models.py
+  .venv-recipes-moirai2/bin/python -m pytest -q -s tests/test_conformal_horizon_models.py
 # Optional, long, may run out of memory: Moirai's uncapped recipe labels.
 VTSFM_RECIPE_MODEL_TEST=moirai2 VTSFM_RECIPE_COMPARE_UNCAPPED=1 PYTHONPATH=src:tests \
-  .venv-moirai2/bin/python -m pytest -q -s tests/test_conformal_horizon_models.py -k labels
+  .venv-recipes-moirai2/bin/python -m pytest -q -s tests/test_conformal_horizon_models.py -k labels
 
 # 5. Bring these back for the PR.
 ls results/issue19/   # timesfm2.json toto2.json moirai2.json [moirai2-uncapped.json]
