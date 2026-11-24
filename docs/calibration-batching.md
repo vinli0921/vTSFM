@@ -91,8 +91,11 @@ whole-recipe comparison measures the runtime cost of the resulting execution.
 
 sktime forecasts from every calibration origin to the end of the history. On
 the Chiller6 recipe the first origin (204) asks for 1,844 steps. That exceeds
-the TimesFM catalog card's 128-point output head, and the long Moirai decode ran
-out of memory on a 40 GB A100 in the original profiling round.
+the TimesFM catalog card's 128-point output head. Moirai ran out of memory on a
+40 GB A100 in the original profiling round for a different reason: sktime's
+Moirai 2 wrapper loads a fresh model copy on every fit, and `ConformalIntervals`
+keeps every fitted origin forecaster in `forecasters_` for later updates, so
+about 1,844 copies pile up on the GPU.
 
 The intervals read only a short prefix of each origin's forecast. Residual row
 `origin` comes from a fit on `y.iloc[:origin]`, so its first column is lead 1.
@@ -128,7 +131,11 @@ These cases are rejected instead of reading missing residuals:
 - an interval request that needs a lead beyond the cap
 - `update(update_params=True)` after a capped fit
 
-Refit with the new horizon in either case.
+Refit with the new horizon in either case. Because capped fits reject updates,
+they keep no origin forecasters in `forecasters_`, so a wrapper that loads a model
+per fit holds one copy at a time per calibration chunk, not one per origin. On
+CPU with sktime's Moirai 2 wrapper and 8 origins, 9 model copies stayed alive
+after an uncapped fit and 1 after a capped fit.
 
 Per model, through the AssetOps catalog cards:
 
@@ -140,6 +147,8 @@ Per model, through the AssetOps catalog cards:
     indexes the steps it needs.
   - The 97-step capped request fits the unmodified card. The uncapped recipe's
     1,844-step request never can.
+  - The card loads with `device_map`, which needs `accelerate`; the `recipes`
+    extra pins `accelerate==1.16.0`.
 - **Moirai 2.0:** the round 4 card (sktime's vendored `Moirai2Forecast`) runs in
   its own environment, `.venv-recipes-moirai2`. Build it with
   `scripts/setup.sh --recipes moirai2` from the `recipes-moirai2` extra.

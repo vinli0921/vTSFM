@@ -70,7 +70,8 @@ class BatchedConformalIntervals(ConformalIntervals):
 
     With no callback and no cap, or with covariates, origin sampling, explicit
     ``n_jobs``, updates or a multi-index series, sktime's original uncapped
-    implementation runs. ``update`` after a capped fit is rejected. Existing
+    implementation runs. ``update`` after a capped fit is rejected, so a capped
+    fit keeps no per-origin forecasters in ``forecasters_``. Existing
     constructor arguments retain their original order and defaults.
     """
 
@@ -154,8 +155,11 @@ class BatchedConformalIntervals(ConformalIntervals):
                     else:
                         difference = target.to_numpy(dtype=float) - values
                     residuals.loc[y.index[origin], target.index] = difference
-                # Native sktime updates reuse these fitted origin forecasters.
-                self.forecasters_.append({'id': str(y.index[origin]), 'forecaster': fitted})
+                # Native sktime updates reuse these fitted origin forecasters. Capped fits
+                # reject updates, so they keep none: wrappers that load a model on every
+                # fit (sktime's Moirai 2) would otherwise hold one GPU copy per origin.
+                if horizon is None:
+                    self.forecasters_.append({'id': str(y.index[origin]), 'forecaster': fitted})
         return residuals
 
     def _update(self, y, X=None, update_params=True):

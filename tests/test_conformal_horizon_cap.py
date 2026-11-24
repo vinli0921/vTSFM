@@ -16,16 +16,28 @@ INDEXES = [
 HORIZONS = [[1], [1, 2, 3], [1, 2, 3, 5], list(range(1, 13))]
 
 
+class FitRecorder(ContextForecaster):
+    """Logs (history length, horizon length) for every fit; clones share the log."""
+
+    fits = []
+
+    def _fit(self, y, X=None, fh=None):
+        FitRecorder.fits.append((len(y), None if fh is None else len(fh)))
+        return super()._fit(y, X, fh)
+
+
 def _pair(y, fh, method='empirical', callback=None, **options):
     original = ConformalIntervals(ContextForecaster(), initial_window=5, method=method, **options)
-    capped = BatchedConformalIntervals(ContextForecaster(), initial_window=5, method=method,
+    FitRecorder.fits.clear()
+    capped = BatchedConformalIntervals(FitRecorder(), initial_window=5, method=method,
                                        batch_predict=callback, batch_size=7,
                                        cap_calibration_horizon=True, **options)
     return original.fit(y, fh=fh), capped.fit(y, fh=fh)
 
 
-def _requested_lengths(intervals):
-    return [len(row['forecaster'].fh) for row in intervals.forecasters_]
+def _requested_lengths(series_length):
+    """Horizon lengths of calibration-origin fits (the final fit uses the whole series)."""
+    return [steps for history, steps in FitRecorder.fits if history < series_length]
 
 
 @pytest.mark.parametrize('index', INDEXES)
@@ -39,7 +51,7 @@ def test_capped_calibration_keeps_read_residuals_and_intervals(index, method, fh
     lead = max(fh) + 1
     assert capped.calibration_horizon_ == lead
     # Every origin asks for the cap, or the shorter remaining suffix at the end.
-    assert _requested_lengths(capped) == [min(lead, 37 - origin) for origin in range(5, 37)]
+    assert _requested_lengths(len(y)) == [min(lead, 37 - origin) for origin in range(5, 37)]
     if with_callback:
         assert max(len(target) for call in callback.calls for _, target in call) == lead
     full, short = original.residuals_matrix_.to_numpy(), capped.residuals_matrix_.to_numpy()
@@ -111,17 +123,31 @@ def test_unsupported_callback_still_caps_serially():
     y = pd.Series(np.arange(30, dtype=float) ** 1.1, name='sensor')
     original, capped = _pair(y, [1, 2], callback=callback)
     assert callback.calls == []
-    assert max(_requested_lengths(capped)) == 3
+    assert max(_requested_lengths(len(y))) == 3
     pd.testing.assert_frame_equal(capped.predict_interval(), original.predict_interval())
 
 
 def test_cap_is_opt_in_and_cloned():
     y = pd.Series(np.arange(30, dtype=float), name='sensor')
-    default = BatchedConformalIntervals(ContextForecaster(), initial_window=5,
+    FitRecorder.fits.clear()
+    default = BatchedConformalIntervals(FitRecorder(), initial_window=5,
                                         batch_predict=RecordingBatch()).fit(y, fh=[1])
     assert default.calibration_horizon_ is None
-    assert max(_requested_lengths(default)) == 25
+    assert max(_requested_lengths(len(y))) == 25
     assert BatchedConformalIntervals(ContextForecaster(), cap_calibration_horizon=True).clone(
     ).get_params()['cap_calibration_horizon'] is True
     with pytest.raises(TypeError, match='cap_calibration_horizon'):
         BatchedConformalIntervals(ContextForecaster(), cap_calibration_horizon=1)
+
+
+@pytest.mark.parametrize('with_callback', [False, True])
+def test_capped_fit_keeps_no_origin_forecasters(with_callback):
+    """Each origin fit can hold its own model copy (sktime's Moirai 2 loads one per
+    fit), so capped calibration must not retain them; only updates would use them."""
+    y = pd.Series(np.arange(30, dtype=float) ** 1.1, name='sensor')
+    callback = RecordingBatch() if with_callback else None
+    _, capped = _pair(y, [1, 2], callback=callback)
+    assert capped.forecasters_ == []
+    uncapped = BatchedConformalIntervals(ContextForecaster(), initial_window=5,
+                                         batch_predict=RecordingBatch()).fit(y, fh=[1, 2])
+    assert len(uncapped.forecasters_) == 25
