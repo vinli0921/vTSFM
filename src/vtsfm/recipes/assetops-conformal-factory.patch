@@ -1,0 +1,29 @@
+--- a/src/servers/tsfm/engine/composition.py
++++ b/src/servers/tsfm/engine/composition.py
+@@ -260,2 +260,3 @@
+     scenario_id: Optional[str] = None,
++    conformal_factory=None,
+ ) -> dict:
+@@ -272,2 +273,3 @@
+             scenario_id=scenario_id,
++            conformal_factory=conformal_factory,
+         )
+@@ -613,3 +615,4 @@
+ def _conformal_ad(
+-    store, y, recipe: dict, *, asset_id, parent_run_id, scenario_id
++    store, y, recipe: dict, *, asset_id, parent_run_id, scenario_id,
++    conformal_factory=None,
+ ) -> dict:
+@@ -645,2 +648,3 @@
+-    ci = ConformalIntervals(R.resolve(merged))
++    factory = ConformalIntervals if conformal_factory is None else conformal_factory
++    ci = factory(R.resolve(merged))
+     ci.fit(y_train, fh=fh)
+@@ -697,2 +701,3 @@
+     scenario_id: Optional[str] = None,
++    conformal_factory=None,
+ ) -> dict:
+@@ -709,2 +714,3 @@
+             scenario_id=scenario_id,
++            conformal_factory=conformal_factory,
+         )

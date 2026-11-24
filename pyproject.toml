@@ -39,6 +39,7 @@ benchmark = [
 ]
 dev = ["pytest==8.4.2", "build>=1.2,<2", "ruff==0.14.0"]
 evaluation = ["fev==0.10.0"]
+recipes = ["numpy==2.2.6", "pandas==2.3.3", "sktime==1.2.0"]
 timesfm25 = [
   "timesfm @ git+https://github.com/google-research/timesfm.git@e51928e27119cb17bebc005be2696b75e0a9e688",
 ]
