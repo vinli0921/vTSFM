@@ -137,14 +137,15 @@ for supported inputs, concurrent serving, cancellation, and the manual TimesFM
 lifecycle suite. Response metadata travels with each result; IO keeps no pending
 request map.
 
-TimesFM now enforces a measured numerical envelope: at most 16 series per
-request, context 8192, horizon 1024, and four scheduled requests. The worker
-splits compatible work within execution budgets. Use `--forecast-limits FILE`
-to tighten the policy; see [numerical admission](docs/numerical-admission.md) for
-defaults, errors, memory measurements, and the manual GPU suite. Toto and Moirai
-also have model-specific policies and bounded whole-forecast batching, qualified
-on the reference A100. Request caps are 16 series for Toto and eight for Moirai,
-with at most four scheduled requests. These finite probes establish the tested
+The TimesFM numerical envelope allows up to 16 series per request, context
+8192, horizon 1024, and a four-slot default ceiling. The worker splits
+compatible work within execution budgets. The wider whole-forecast profile,
+memory measurements and manual GPU suite are in the
+[numerical admission guide](docs/numerical-admission.md).
+
+Toto and Moirai also have model-specific policies and bounded whole-forecast
+batching, qualified on the reference A100. Request caps are 16 series for Toto
+and eight for Moirai, with a default ceiling of four scheduled requests. These finite probes establish the tested
 envelope; they do not establish a throughput speedup.
 
 TimesFM also supports experimental forecast-block continuous batching:

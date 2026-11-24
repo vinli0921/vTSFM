@@ -80,7 +80,7 @@ work or row limit can also reject a request within the context and horizon limit
 
 ## Wider eager FP32 profile
 
-Use the following `--forecast-limits` file for Toto on the reference A100:
+Use this `--forecast-limits` file for TimesFM or Toto on the reference A100.
 
 ```json
 {"max_scheduled_requests": 16, "max_forward_bytes": 88081408}
@@ -103,9 +103,10 @@ For Moirai:
   --max-num-seqs 16 --forecast-batch-rows 16
 ```
 
-Use `--adapter moirai2` with the Moirai file. Toto still admits up to 16 rows
-per request and Moirai up to eight. Both can fuse 16 rows from compatible
-requests in one call. The same Moirai profile bounds upstream and univariate
+Use `--adapter timesfm25` with the first file for TimesFM whole forecasts
+and `--adapter moirai2` with the Moirai file. TimesFM and Toto admit up to 16
+rows per request and Moirai up to eight. All three can fuse 16 compatible
+rows in one call. The same Moirai profile bounds upstream and univariate
 attention. The tests below describe the measured A100 envelope.
 
 To qualify the same profile with the admission suite, set
@@ -485,3 +486,67 @@ routing passed at the existing tolerances.
 The benchmark sources, raw samples, GPU and package metadata, request
 traces and cleanup records were retained under `results/issue86/` on the
 reference A100 host.
+
+### TimesFM whole-forecast slot qualification — November 24, 2026
+
+[#89](https://github.com/vinli0921/vTSFM/pull/89) removed the planner's
+four-request split. [#75](https://github.com/vinli0921/vTSFM/issues/75) tested
+four, eight and sixteen scheduler slots on the same idle A100-SXM4-40GB,
+driver 595.91.07. The serving source was `f78d688` with temporary slot and
+resident-byte ceilings for the wider probes. All modes used the same pinned
+TimesFM checkpoint, vLLM 0.33.0 V1, Torch 2.14.0+cu130, eager FP32 with TF32
+disabled, a fusion cap of 16 rows and a queue cap of 128.
+
+A traced queued wave of B1/C2048/H96 requests produced one 8-row call at
+eight slots and one 16-row call at sixteen slots. Both waves matched
+independent native forecasts across all nine quantiles at `rtol=atol=1e-4`.
+Both settings passed a queued disconnect, drained request state and returned
+a native-matching forecast afterward.
+
+The table shows absolute memory peaks for waves with every slot holding
+B16/C8192/H1024. Each wave ran in one worker forward, with one 16-row model
+call per request. The four-slot row is from the existing admission suite.
+Eight and sixteen slots each ran three waves with stable post-wave allocation.
+The allocator cache was emptied and Torch peaks were reset before each wave.
+NVML sampled the whole device every 20 ms.
+
+| Slots | Peak Torch allocated (GiB) | Peak Torch reserved (GiB) | Peak NVML used (GiB) |
+| ---: | ---: | ---: | ---: |
+| 4 | 3.667 | 4.158 | 5.184 |
+| 8 | 3.671 | 4.162 | 5.188 |
+| 16 | 3.680 | 4.166 | 5.192 |
+
+The timed replay used B1/C2048/H96 and all nine quantiles on the pinned
+Chiller 6 supply-temperature series. Each offered rate used 100 Poisson
+arrivals in each of three repeats. A fresh fixed-seed trace was generated for
+each repeat and replayed identically across slot settings. Server order
+rotated through all three positions. Startup, ten warmups per server, and
+native parity checks were outside timing. Latency starts at scheduled arrival
+and ends at JSON decode. Served rate includes the final queue drain.
+
+| Slots | Offered req/s | Mean served req/s | Worst repeat p99 (ms) | Completions | All repeats ≤500 ms |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 4 | 20 | 20.55 | 261.5 | 300/300 | Yes |
+| 4 | 40 | 39.13 | 364.5 | 300/300 | Yes |
+| 4 | 60 | 42.66 | 891.0 | 300/300 | No |
+| 4 | 80 | 43.05 | 1205.4 | 300/300 | No |
+| 8 | 20 | 20.56 | 256.6 | 300/300 | Yes |
+| 8 | 40 | 39.77 | 255.4 | 300/300 | Yes |
+| 8 | 60 | 56.85 | 494.9 | 300/300 | Yes |
+| 8 | 80 | 71.51 | 326.1 | 300/300 | Yes |
+| 16 | 20 | 20.62 | 192.5 | 300/300 | Yes |
+| 16 | 40 | 40.08 | 194.0 | 300/300 | Yes |
+| 16 | 60 | 57.60 | 205.7 | 300/300 | Yes |
+| 16 | 80 | 75.75 | 246.7 | 300/300 | Yes |
+
+All 3,600 requests completed and their forecasts matched the native reference.
+Four slots met p99 ≤ 500 ms in every repeat through 40 req/s offered. Both wider
+settings met it through 80 req/s, the highest tested rate. At 80 req/s, sixteen
+slots served 75.75 req/s with a worst repeat p99 of 246.7 ms. Eight slots served
+71.51 req/s with a worst p99 of 326.1 ms. The documented opt-in allows up to
+sixteen scheduler slots for eager FP32 whole forecasts. The existing TimesFM
+batching and admission suite passed, including the maximum-shape test at
+sixteen slots.
+
+Raw arrival schedules, samples, traces, and allocator and cleanup records are
+under `results/issue75/` on the reference A100 host.

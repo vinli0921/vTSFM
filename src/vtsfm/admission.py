@@ -13,6 +13,7 @@ from typing import Iterable
 
 from vtsfm.compilation import EXECUTION_ENV
 from vtsfm.precision import PRECISION_ENV, TF32_OVERRIDE_ENV
+from vtsfm.stepping import CONTINUOUS_ENV
 
 FORECAST_LIMITS_ENV = 'VTSFM_FORECAST_LIMITS'
 
@@ -180,7 +181,8 @@ def resolve_adapter_limits(spec, environment) -> ForecastLimits | None:
     ceiling = None
     if (environment.get(PRECISION_ENV) == 'fp32'
             and environment.get(EXECUTION_ENV, 'eager') == 'eager'
-            and environment.get(TF32_OVERRIDE_ENV, '0') == '0'):
+            and environment.get(TF32_OVERRIDE_ENV, '0') == '0'
+            and environment.get(CONTINUOUS_ENV) != '1'):
         ceiling = spec.eager_fp32_admission_ceiling
     return resolve_limits(spec.admission_limits, environment.get(FORECAST_LIMITS_ENV),
                           ceiling=ceiling)
