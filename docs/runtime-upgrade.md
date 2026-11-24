@@ -76,6 +76,8 @@ Giving Toto three scheduler slots reduced throughput by 1.2% and raised p95
 by 2.9%. The launcher keeps the upstream pooling scheduler default and
 one request slot.
 
+The [frozen-stack attribution study](baselines/2026-11-21-frozen-runtime-attribution/README.md) compares direct forecasts and HTTP serving, tests both V1 scheduler modes and isolates the response encoder. It includes request and CUDA traces for all three models.
+
 ## Why V1
 
 Stock V2 in the published wheel rejects the `plugin` pooling task. The V1
