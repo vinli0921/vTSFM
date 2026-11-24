@@ -2,6 +2,7 @@
 
 import os
 from types import SimpleNamespace
+import weakref
 
 import numpy as np
 import pytest
@@ -107,15 +108,28 @@ def test_cached_model_loading_retains_the_native_seed_order(model, monkeypatch):
     assert draws == [wanted]
 
 
-def test_bad_toto_batch_shape_retries_native_origins(model, monkeypatch):
+@pytest.mark.parametrize('failure', ['bad-output', 'oom', 'linear-shape', 'unrelated-error'])
+def test_toto_batch_failure_retries_only_recoverable_errors(model, monkeypatch, failure):
     sizes = []
     native_forecast = model.forecast
+    batch_target = None
 
     def forecast(inputs, **options):
+        nonlocal batch_target
         rows = inputs['target'].shape[0]
         sizes.append(rows)
-        outputs = native_forecast(inputs, **options)
-        return outputs[:, :-1] if rows > 1 else outputs
+        if rows == 1:
+            assert batch_target() is None
+            return native_forecast(inputs, **options)
+        batch_target = weakref.ref(inputs['target'])
+        if failure == 'oom':
+            raise torch.OutOfMemoryError('simulated batch OOM')
+        if failure == 'linear-shape':
+            torch.nn.functional.linear(torch.zeros(3, 4), torch.zeros(1, 4))
+            pytest.fail('Expected the origin shape guard to raise')
+        if failure == 'unrelated-error':
+            raise ValueError('simulated unrelated model error')
+        return native_forecast(inputs, **options)[:, :-1]
 
     y = pd.Series(np.sin(np.arange(20) / 3), name='sensor')
     forecasters = [Toto2Forecaster(device='cpu', seed=42).fit(y.iloc[:origin])
@@ -124,6 +138,11 @@ def test_bad_toto_batch_shape_retries_native_origins(model, monkeypatch):
     expected = [fc.predict(ForecastingHorizon(index, is_relative=False))
                 for fc, index in zip(forecasters, targets)]
     monkeypatch.setattr(model, 'forecast', forecast)
+    if failure == 'unrelated-error':
+        with pytest.raises(ValueError, match='unrelated model error'):
+            TotoCalibrationBatcher()(forecasters, targets)
+        assert sizes == [2]
+        return
     forecasts = TotoCalibrationBatcher()(forecasters, targets)
     assert sizes == [2, 1, 1]
     for actual, wanted in zip(forecasts, expected):

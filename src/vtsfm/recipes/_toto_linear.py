@@ -9,6 +9,10 @@ import torch.nn.functional as F
 from torch.overrides import TorchFunctionMode
 
 
+class _OriginLinearShapeError(ValueError):
+    """A projection cannot be split into independent origins."""
+
+
 class _OriginLinearMode(TorchFunctionMode):
     """Keep each origin's contiguous linear input without changing the model.
 
@@ -32,7 +36,7 @@ class _OriginLinearMode(TorchFunctionMode):
         inputs = args[0] if args else kwargs['input']
         if (inputs.ndim < 2 or inputs.shape[0] == 0
                 or inputs.shape[0] % self.num_origins):
-            raise ValueError('Linear inputs must preserve independent origin groups')
+            raise _OriginLinearShapeError('Linear inputs must preserve independent origin groups')
         outputs = []
         for part in inputs.split(inputs.shape[0] // self.num_origins, dim=0):
             # Calls inside this handler forward to the next mode, not this one.

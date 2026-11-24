@@ -72,7 +72,9 @@ The Toto callback reuses sktime's cached model and exact context alignment.
 Origins batch when their aligned context width, padding and missing-value path,
 seed, decode block size and number of forecast patches match. The aligned
 targets, masks and series IDs concatenate along the independent batch dimension.
-Incompatible or individually oversized origins run serially.
+Incompatible or individually oversized origins run serially. A batch that runs
+out of memory or trips the linear origin-shape guard retries those origins
+with their native serial forecasts.
 
 Batched FP32 projections can round differently from single-origin projections.
 A thread-local Torch operation scope runs eligible projections with their

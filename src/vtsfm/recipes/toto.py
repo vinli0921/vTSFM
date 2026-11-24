@@ -79,32 +79,38 @@ class TotoCalibrationBatcher:
         return tuple(outputs)
 
     def _predict(self, entries, targets, outputs):
-        if len(entries) == 1:
-            index, fc, *_ = entries[0]
-            outputs[index] = self._serial(fc, targets[index])
+        if len(entries) > 1 and self._predict_batch(entries, targets, outputs):
             return
+        for index, fc, *_ in entries:
+            outputs[index] = self._serial(fc, targets[index])
+
+    @staticmethod
+    def _predict_batch(entries, targets, outputs):
         import torch
-        from ._toto_linear import _OriginLinearMode
+        from ._toto_linear import _OriginLinearMode, _OriginLinearShapeError
 
         first = entries[0][1]
         model = entries[0][4]
         torch.manual_seed(first._seed)
         horizon = max(len(targets[row[0]]) for row in entries)
-        values = torch.cat([row[2] for row in entries], dim=0)
-        masks = torch.cat([row[3] for row in entries], dim=0)
-        ids = torch.cat([row[1]._inputs_['series_ids'] for row in entries], dim=0)
-        with torch.no_grad(), _OriginLinearMode(len(entries)):
-            predictions = model.forecast({'target': values, 'target_mask': masks, 'series_ids': ids},
-                horizon=horizon, decode_block_size=first.decode_block_size,
-                has_missing_values=entries[0][2].shape[-1] != first._inputs_['target'].shape[-1])
-        array = predictions.detach().cpu().numpy()
+        try:
+            values = torch.cat([row[2] for row in entries], dim=0)
+            masks = torch.cat([row[3] for row in entries], dim=0)
+            ids = torch.cat([row[1]._inputs_['series_ids'] for row in entries], dim=0)
+            with torch.no_grad(), _OriginLinearMode(len(entries)):
+                predictions = model.forecast({'target': values, 'target_mask': masks, 'series_ids': ids},
+                    horizon=horizon, decode_block_size=first.decode_block_size,
+                    has_missing_values=entries[0][2].shape[-1] != first._inputs_['target'].shape[-1])
+            array = predictions.detach().cpu().numpy()
+        except (torch.OutOfMemoryError, _OriginLinearShapeError):
+            # Release the failed batch's tensors before the caller retries serially.
+            return False
         knots = model.output_head.knots
         if (array.ndim != 4 or array.shape[:3] != (len(knots), len(entries), 1)
                 or array.shape[-1] < horizon or 0.5 not in knots):
-            for index, fc, *_ in entries:
-                outputs[index] = self._serial(fc, targets[index])
-            return
+            return False
         median = knots.index(0.5)
         for row, (index, fc, *_) in enumerate(entries):
             outputs[index] = pd.Series(array[median, row, 0, :len(targets[index])],
                                        index=targets[index], name=fc._cur_y.columns[0])
+        return True
