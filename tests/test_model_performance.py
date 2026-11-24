@@ -60,16 +60,18 @@ def test_matched_http_performance(model_run):
                             pool.shutdown(wait=True, cancel_futures=True)
                         parity = [compare_response(body, case, entry['expected']) for body in bodies]
                         assert len({body['request_id'] for body in bodies}) == clients
+                        # Payload fields go into the first points/ write, so even an
+                        # interrupted point records which payload it timed.
                         point = measure_requests(server['url'], encoded, len(case['data']['inputs']),
                             requests=requests, clients=clients, warmups=warmups, monitor=run['monitor'],
                             cancel=server['stop'], record_path=run['output'] / 'points' /
-                            f'{backend}-{case["name"]}-clients{clients}.json')
+                            f'{backend}-{case["name"]}-clients{clients}.json',
+                            metadata={'payload_form': sent_form, 'payload_bytes': len(encoded),
+                                      'payload_sha256': hashlib.sha256(encoded).hexdigest()})
                         point.update(backend=backend, case=case['name'],
                                      forecast_execution=run['metadata']['forecast_execution'][backend],
                                      context_lengths=[len(item['target']) for item in case['data']['inputs']],
-                                     horizon=case['data']['parameters']['prediction_length'],
-                                     payload_form=sent_form, payload_bytes=len(encoded),
-                                     payload_sha256=hashlib.sha256(encoded).hexdigest(), parity=parity)
+                                     horizon=case['data']['parameters']['prediction_length'], parity=parity)
                         points.append(point)
                         save_json(run['output'] / 'performance.json', {'points': points,
                             'source_commit': run['metadata']['commit'], 'precision': run['metadata']['precision'],

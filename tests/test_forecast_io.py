@@ -183,3 +183,39 @@ def test_b64_still_validates_parameters():
 def test_b64_client_helper_rejects_ragged_series():
     with pytest.raises(ValueError, match='equal-length'):
         encode_inputs_b64([[1, 2], [3]])
+
+
+def test_b64_row_limit_is_checked_before_decoding():
+    """#96 review: an oversized compact request fails on its declared shape alone."""
+    from vtsfm.adapters.timesfm25.admission import DEFAULT_LIMITS
+
+    limit = DEFAULT_LIMITS.max_request_rows
+    oversized = {'inputs_b64': {'data': '!not base64!', 'shape': [limit + 1, 4]}}
+    # The undecodable data proves nothing was decoded: the row check runs first,
+    # with the same message as the JSON path's admission check.
+    with pytest.raises(ValueError, match=f'Forecast request rows {limit + 1} exceeds limit {limit}'):
+        parse_request(oversized, SETTINGS, DEFAULT_LIMITS)
+    with pytest.raises(ValueError, match='inputs_b64.data'):
+        parse_request(oversized, SETTINGS)  # Without limits, the caller's admission check bounds rows.
+    rows = [[float(row)] * 4 for row in range(limit)]
+    inputs, _, _ = parse_request(_b64(rows), SETTINGS, DEFAULT_LIMITS)
+    assert len(inputs) == limit
+
+
+@pytest.mark.parametrize('row', [
+    [1.0, True], [1.0, '1.5'], [1.0, None], [1.0, {}], [np.bool_(True), 1.0], '12',
+])
+def test_b64_client_helper_checks_element_types_before_conversion(row):
+    """#96 review: the helper applies the JSON path's element checks before NumPy
+    could coerce booleans or numeric strings into valid-looking floats."""
+    with pytest.raises(ValueError, match='target must'):
+        encode_inputs_b64([[1.0, 2.0], row])
+
+
+def test_b64_client_helper_accepts_what_json_lists_accept():
+    rows = [[1, 2.5, np.float32(3.0)], [np.int64(4), 5, 6.0]]
+    expected = np.asarray(rows, dtype=np.float64).astype(np.float32)
+    inputs, _, _ = parse_request({'inputs_b64': encode_inputs_b64(rows)}, SETTINGS)
+    np.testing.assert_array_equal(np.stack([item['target'] for item in inputs]), expected)
+    with pytest.raises(ValueError, match=r'\[rows, width\]'):
+        encode_inputs_b64([1.0, 2.0])

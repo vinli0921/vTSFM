@@ -10,20 +10,34 @@ import time
 from .common import percentile
 
 
+# Fields measure_requests writes itself; caller metadata may not overwrite them.
+_RESULT_KEYS = frozenset({
+    'status', 'error', 'cleanup_error', 'interrupted', 'requests', 'clients', 'series_per_request',
+    'warmups', 'completed', 'failed', 'cancelled', 'elapsed_wall_s', 'request_per_s', 'series_per_s',
+    'mean_ms', 'p50_ms', 'p95_ms', 'samples', 'warmed_resident_gpu_bytes', 'peak_resident_gpu_bytes',
+    'nvml_samples', 'memory_method', 'timing_boundary', 'smoke_only'})
+
+
 def measure_requests(url, encoded, series, *, requests=100, clients=1, warmups=5,
-                     monitor=None, request=None, cancel=None, record_path=None):
+                     monitor=None, request=None, cancel=None, record_path=None, metadata=None):
     """Measure pre-encoded request -> decoded response; warmups precede sampling.
 
     Throughput uses completed requests / elapsed wall time under concurrency.
     Numerical parity is checked separately, outside these measurement regions.
     Any failure invalidates the point; queued requests stop after the first error.
+    ``metadata`` (JSON fields such as the payload form and size) is part of the
+    result and of every ``record_path`` write, including an interrupted point's.
     """
+    metadata = dict(metadata or {})
     if any(type(x) is not int or x <= 0 for x in (requests, clients, series)):
         raise ValueError('requests, clients, and series must be positive integers')
     if type(warmups) is not int or warmups < 0:
         raise ValueError('warmups must be a nonnegative integer')
     if requests < clients:
         raise ValueError('requests must be at least the requested client concurrency')
+    reserved = set(metadata) & _RESULT_KEYS
+    if reserved:
+        raise ValueError(f'metadata cannot replace measured fields: {sorted(reserved)}')
     local = threading.local()
     sessions = []
     lock = threading.Lock()
@@ -105,7 +119,7 @@ def measure_requests(url, encoded, series, *, requests=100, clients=1, warmups=5
                     completed.append(future.result())
             path = Path(record_path)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({'status': 'failed', 'error': repr(error),
+            path.write_text(json.dumps({**metadata, 'status': 'failed', 'error': repr(error),
                 'cleanup_error': cleanup_error, 'interrupted': isinstance(error, (KeyboardInterrupt, SystemExit)),
                 'requests': requests, 'clients': clients, 'elapsed_wall_s': elapsed,
                 'request_per_s': None, 'series_per_s': None, 'samples': completed}, indent=2) + '\n')
@@ -113,7 +127,7 @@ def measure_requests(url, encoded, series, *, requests=100, clients=1, warmups=5
     failed = sum(row['status'] == 'failed' for row in samples)
     cancelled = sum(row['status'] == 'cancelled' for row in samples)
     valid = not failed and not cancelled and len(latencies) == requests
-    result = {'status': 'passed' if valid else 'failed', 'requests': requests, 'clients': clients,
+    result = {**metadata, 'status': 'passed' if valid else 'failed', 'requests': requests, 'clients': clients,
             'series_per_request': series, 'warmups': warmups, 'completed': len(latencies),
             'failed': failed, 'cancelled': cancelled, 'elapsed_wall_s': elapsed,
             'request_per_s': len(latencies) / elapsed if valid else None,

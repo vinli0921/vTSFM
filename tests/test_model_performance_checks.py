@@ -80,3 +80,35 @@ def test_invalid_measurement_settings_fail_before_requests(change):
     settings = {'series': 1, 'requests': 2, 'clients': 1, 'warmups': 0, **change}
     with pytest.raises(ValueError):
         measure_requests('unused', b'{}', **settings, request=lambda _: pytest.fail('no request expected'))
+
+
+PAYLOAD = {'payload_form': 'b64', 'payload_bytes': 175785, 'payload_sha256': 'f' * 64}
+
+
+def test_point_records_carry_payload_metadata_when_first_written(tmp_path):
+    """#96 review: the points/ file already names the payload it timed."""
+    path = tmp_path / 'point.json'
+    result = measure_requests('unused', b'{}', 1, requests=2, clients=1, warmups=0,
+                              request=lambda _: {'data': {'predictions': [{}]}},
+                              record_path=path, metadata=PAYLOAD)
+    saved = json.loads(path.read_text())
+    assert {key: saved[key] for key in PAYLOAD} == PAYLOAD
+    assert {key: result[key] for key in PAYLOAD} == PAYLOAD
+    assert saved['status'] == 'passed'
+
+
+def test_interrupted_point_record_keeps_payload_metadata(tmp_path):
+    def request(_):
+        raise KeyboardInterrupt()
+    path = tmp_path / 'partial.json'
+    with pytest.raises(KeyboardInterrupt):
+        measure_requests('unused', b'{}', 1, requests=2, clients=1, warmups=0,
+                         request=request, record_path=path, metadata=PAYLOAD)
+    saved = json.loads(path.read_text())
+    assert saved['interrupted'] and {key: saved[key] for key in PAYLOAD} == PAYLOAD
+
+
+def test_metadata_cannot_replace_measured_fields():
+    with pytest.raises(ValueError, match='p50_ms'):
+        measure_requests('unused', b'{}', 1, requests=1, warmups=0, metadata={'p50_ms': 1.0},
+                         request=lambda _: pytest.fail('no request expected'))

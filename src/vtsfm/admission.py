@@ -101,8 +101,8 @@ class ForecastLimits:
         """Reject before submission, including requests too big to run alone."""
         if not isinstance(cost, ForecastCost):
             raise ValueError('Request admission requires a ForecastCost')
+        self.validate_request_rows(cost.rows)
         checks = (
-            ('request rows', cost.rows, self.max_request_rows),
             ('context', cost.context, self.max_context),
             ('horizon', cost.horizon, self.max_horizon),
             ('execution rows', cost.rows, self.max_execution_rows),
@@ -111,6 +111,11 @@ class ForecastLimits:
         for name, actual, maximum in checks:
             if actual > maximum:
                 raise ValueError(f'Forecast {name} {actual} exceeds limit {maximum}')
+
+    def validate_request_rows(self, rows: int) -> None:
+        """Reject a request's row count on its own, e.g. before its values are decoded."""
+        if rows > self.max_request_rows:
+            raise ValueError(f'Forecast request rows {rows} exceeds limit {self.max_request_rows}')
 
     def execution_row_cap(self, work_per_row: int) -> int:
         """Rows that fit one compatible call; zero means no row fits."""
