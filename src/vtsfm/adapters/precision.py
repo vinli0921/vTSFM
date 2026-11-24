@@ -2,12 +2,13 @@
 
 
 def prepare_rotary_tables(module):
-    """Preserve upstream CPU-built FP32 tables for BF16 and TF32 forecasts.
+    """Preserve upstream CPU-built FP32 rotary tables for every precision.
 
     The official loaders construct these buffer-only projections on CPU.
     vLLM constructs on the target device; CUDA sin/cos can differ by one FP32
     ulp, enough to change a later BF16 rounding and recursive prediction.
     Call only before the first forecast, preserving theta and table length.
+    In FP32 it was the whole served-vs-native drift for Toto and Moirai (#85).
     """
     device = next(module.buffers()).device
     if device.type == 'cpu':

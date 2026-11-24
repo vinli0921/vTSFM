@@ -3,8 +3,8 @@
 from vtsfm.adapters.precision import prepare_bf16, prepare_rotary_tables
 
 
-def prepare_native_tf32(model, rotary_type):
-    """Match the official CPU-built tables without changing model dtypes."""
+def prepare_native_rotary_tables(model, rotary_type):
+    """Use the official CPU-built rotary tables in FP32/TF32 without changing model dtypes."""
     for module in model.modules():
         if isinstance(module, rotary_type):
             prepare_rotary_tables(module)

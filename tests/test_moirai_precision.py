@@ -172,7 +172,7 @@ def test_native_and_serving_checkpoint_orders_keep_exact_fp32_norms():
 
 
 @pytest.mark.gpu
-@pytest.mark.parametrize('precision', ['bf16', 'tf32'])
+@pytest.mark.parametrize('precision', ['fp32', 'bf16', 'tf32'])
 def test_moirai_native_precision_rotary_tables_match_cpu_construction_on_cuda(precision, monkeypatch):
     torch = pytest.importorskip('torch')
     pytest.importorskip('uni2ts')
@@ -183,8 +183,11 @@ def test_moirai_native_precision_rotary_tables_match_cpu_construction_on_cuda(pr
     from vtsfm.adapters.moirai2.precision import prepare_native_bf16
     from vtsfm.adapters.moirai2.runtime import MoiraiRuntime
 
-    monkeypatch.setenv('VTSFM_PRECISION', precision)
-    monkeypatch.setenv('NVIDIA_TF32_OVERRIDE', '0' if precision == 'bf16' else '1')
+    if precision == 'fp32':
+        monkeypatch.delenv('VTSFM_PRECISION', raising=False)
+    else:
+        monkeypatch.setenv('VTSFM_PRECISION', precision)
+    monkeypatch.setenv('NVIDIA_TF32_OVERRIDE', '1' if precision == 'tf32' else '0')
     monkeypatch.setenv('VTSFM_FORECAST_EXECUTION', 'eager')
 
     config = dict(d_model=64, d_ff=128, num_layers=1, patch_size=16,
