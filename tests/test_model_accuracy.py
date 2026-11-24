@@ -2,7 +2,7 @@
 
 import pytest
 
-from benchmarks.model_evaluation import mean_history_forecasts, score_forecasts, seasonal_naive_forecasts
+from benchmarks.model_evaluation import score_forecasts, score_mean_history, seasonal_naive_forecasts
 from model_integration_support import QUANTILES, compare_response
 from model_serving_support import record_check, save_json
 
@@ -39,7 +39,7 @@ def test_observed_forecast_quality_preserves_native(served_model):
             native = score_forecasts(case, entry['expected'])
             served = score_forecasts(case, values)
             naive = score_forecasts(case, seasonal_naive_forecasts(case))
-            history_mean = score_forecasts(case, mean_history_forecasts(case))
+            history_mean = score_mean_history(case)
             assert served['counts']['observed_targets'] > 0, 'No observed labels were scored'
             delta = {name: (served[name] - native[name] if native[name] is not None else None)
                      for name in ('MAE', 'MASE', 'SQL')}

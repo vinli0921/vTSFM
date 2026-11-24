@@ -260,13 +260,20 @@ three models and both baselines within each window by median MAE, then gives
 (`--resamples`, default 2000; `--seed`, default 0): each resample draws windows
 with replacement and scores every competitor on the same draw. A competitor is
 "higher than lowest" only when its interval for the ratio to the lowest ratio of
-means lies wholly above 1; otherwise it is "not distinguishable". Windows from
-one asset are correlated, so these intervals are approximate, and signals with
-fewer than five windows get no claim.
+means lies wholly above 1; otherwise it is "not distinguishable", or "undefined"
+when no interval exists (no resamples, or the lowest scores exactly zero). The
+lowest claims "every other competitor higher" only when every other competitor
+is higher. P(lowest) is the share of resamples a competitor wins, with ties
+splitting the win. Windows from one asset are correlated, so these intervals are
+approximate. A signal needs at least five windows with a usable seasonal scale
+(the windows the ratio of means scores) before any claim is made.
 
 A window is flagged off-state when at least half of its observed future labels
 are exactly zero (an asset switched off, e.g. condenser flow); the comparison is
-repeated without those windows. Chiller 6 supply temperature is noise-like
+repeated without those windows, even if only one remains. A series that recurs
+across cases (fev cutoffs) is paired per case. A window whose history has no
+recorded value gets no mean-of-history score and drops out of the paired
+comparison; its other scores remain. Chiller 6 supply temperature is noise-like
 (lag-1 autocorrelation −0.01 to 0.12; the history mean scores within the models'
 range), so it is shown as unforecastable and excluded from ranking claims.
 `--scale observed` re-expresses MASE and SQL over seasonal pairs whose two

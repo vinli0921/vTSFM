@@ -327,7 +327,9 @@ def mean_history_forecasts(case):
     Causally forward-filled slots (see :func:`history_observed`) are excluded, so
     the baseline uses only readings that were actually recorded. Every step and
     quantile gets the same value: a point baseline whose SQL equals its MASE.
-    Cases without imputation provenance use their whole history.
+    Cases without imputation provenance use their whole history. A row with no
+    recorded history (e.g. the first reading after a long gap) has no baseline:
+    its forecasts are NaN, and :func:`score_mean_history` marks it unavailable.
     """
     import numpy as np
 
@@ -338,10 +340,22 @@ def mean_history_forecasts(case):
     for row, item in enumerate(case["data"]["inputs"]):
         past = np.asarray(item["target"], dtype=float)
         recorded = past if masks is None else past[np.asarray(masks[row], dtype=bool)]
-        if not recorded.size:
-            raise ValueError(f"{case['name']}: row {row} has no recorded history for the mean baseline")
-        rows.append(np.full((len(QUANTILES), horizon), recorded.mean()))
+        rows.append(np.full((len(QUANTILES), horizon), recorded.mean() if recorded.size else np.nan))
     return np.asarray(rows, dtype=float)
+
+
+def score_mean_history(case, *, scale="all"):
+    """Score the mean-of-history baseline, leaving rows without recorded history unscored.
+
+    Those rows get ``MAE``/``MASE``/``SQL`` of None and ``forecast_status``
+    ``"no_recorded_history"``; every other row, and every other source's
+    scores for the case, are unaffected.
+    """
+    import numpy as np
+
+    forecasts = mean_history_forecasts(case)
+    missing = [row for row in range(len(forecasts)) if np.isnan(forecasts[row]).all()]
+    return score_forecasts(case, np.nan_to_num(forecasts), scale=scale, unavailable_rows=missing)
 
 
 SCALES = ("all", "observed")
@@ -388,7 +402,7 @@ def seasonal_scale(past, seasonality, observed=None):
     return (sum(pairs) / len(pairs), len(pairs)) if pairs else (None, 0)
 
 
-def score_forecasts(case, values, *, scale="all"):
+def score_forecasts(case, values, *, scale="all", unavailable_rows=()):
     """Score [N, 9, H] forecasts against observed future labels, using past only.
 
     MAE uses the median. MASE divides median MAE by mean absolute seasonal
@@ -398,6 +412,8 @@ def score_forecasts(case, values, *, scale="all"):
     pinball loss over all nine quantiles, divided by the same scale. Aggregates
     are equal-weight means over eligible series. Undefined scales (zero, or no
     usable pairs) are excluded explicitly, never converted to zero or JSON NaN.
+    Rows in ``unavailable_rows`` had no forecast; they are left unscored and
+    counted, and their placeholder values are ignored.
     """
     import numpy as np
 
@@ -412,6 +428,9 @@ def score_forecasts(case, values, *, scale="all"):
     forecast = np.asarray(values, dtype=float)
     if forecast.shape != (len(inputs), 9, horizon) or not np.isfinite(forecast).all():
         raise ValueError(f"Forecasts must be finite with shape {(len(inputs), 9, horizon)}")
+    unavailable = set(unavailable_rows)
+    if not unavailable <= set(range(len(inputs))):
+        raise ValueError("unavailable_rows must index the case's series")
     per_series = []
     for row, item in enumerate(inputs):
         observed = np.asarray(evaluation["observed"][row], dtype=bool)
@@ -425,7 +444,8 @@ def score_forecasts(case, values, *, scale="all"):
         series_scale = float(differences.mean()) if differences.size else None
         status = "insufficient_history" if series_scale is None else "zero" if series_scale == 0 else "valid"
         mae = mase = sql = None
-        if observed.any():
+        available = row not in unavailable
+        if available and observed.any():
             mae = float(np.abs(forecast[row, 4, observed] - truth[observed]).mean())
             if status == "valid":
                 errors = truth[None, observed] - forecast[row][:, observed]
@@ -436,7 +456,8 @@ def score_forecasts(case, values, *, scale="all"):
                            "seasonal_scale": series_scale, "scale_status": status,
                            "scale_pairs": int(differences.size),
                            "filled_history": None if masks is None else masks[row].count(False),
-                           "observed_targets": int(observed.sum())})
+                           "observed_targets": int(observed.sum()),
+                           **({} if available else {"forecast_status": "no_recorded_history"})})
     def average(metric):
         eligible = [row[metric] for row in per_series if row[metric] is not None]
         return sum(eligible) / len(eligible) if eligible else None
@@ -446,7 +467,8 @@ def score_forecasts(case, values, *, scale="all"):
                        "valid_scaled_series": sum(row["MASE"] is not None for row in per_series),
                        "zero_scale_series": sum(row["scale_status"] == "zero" for row in per_series),
                        "insufficient_history_series": sum(row["scale_status"] == "insufficient_history" for row in per_series),
-                       "unobserved_series": sum(row["observed_targets"] == 0 for row in per_series)},
+                       "unobserved_series": sum(row["observed_targets"] == 0 for row in per_series),
+                       "unavailable_series": len(unavailable)},
             "per_series": per_series}
     # Extreme but finite inputs can still overflow arithmetic. Do not serialize
     # nonfinite scores or let an infinite denominator silently report success.

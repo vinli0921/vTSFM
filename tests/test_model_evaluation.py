@@ -234,7 +234,8 @@ def test_zero_scale_and_unobserved_series_are_explicit_json_null():
     assert scores["MASE"] is None and scores["SQL"] is None
     assert scores["counts"] == {"series": 2, "scored_series": 1, "observed_targets": 2,
                                  "valid_scaled_series": 0, "zero_scale_series": 1,
-                                 "insufficient_history_series": 0, "unobserved_series": 1}
+                                 "insufficient_history_series": 0, "unobserved_series": 1,
+                                 "unavailable_series": 0}
     json.dumps(scores, allow_nan=False)
 
 
@@ -369,3 +370,20 @@ def test_history_masks_read_signal_fixture_and_fev_provenance(prepared_data):
     fev["provenance"] = {"series": [{"past_imputed_offsets": [1]}]}
     assert history_observed(fev) == [[True, False, True]]
     assert history_observed(case_for_scores()) is None
+
+
+def test_mean_history_without_recorded_history_leaves_only_that_row_unscored():
+    """#97 review item 6: the first reading after a long gap has a fully filled history."""
+    from benchmarks.model_evaluation import score_mean_history
+
+    case = case_for_scores(pasts=[[5., 5., 5., 5.], [10., 20., 30., 40.]],
+                           targets=[[3., 4., 3.], [30., 40., 30.]], seasonality=2)
+    case["provenance"] = {"origins": [4, 104], "past_imputed_positions": [[0, 1, 2, 3], []]}
+    assert np.isnan(mean_history_forecasts(case)[0]).all()
+    scores = score_mean_history(case)
+    unscored, scored = scores["per_series"]
+    assert unscored["MAE"] is None and unscored["forecast_status"] == "no_recorded_history"
+    assert scored["MAE"] == pytest.approx(score_forecasts(case, mean_history_forecasts(case)[[1, 1]])["per_series"][1]["MAE"])
+    assert scores["counts"]["unavailable_series"] == 1 and scores["counts"]["scored_series"] == 1
+    # The other sources still score the whole case.
+    assert score_forecasts(case, seasonal_naive_forecasts(case))["counts"]["scored_series"] == 2

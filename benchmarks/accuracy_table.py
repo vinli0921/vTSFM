@@ -96,9 +96,20 @@ def _signal(case_name: str, item_id: str) -> str:
     return re.sub(r"-window-\d+$", "", case_name)
 
 
-def _origin(item_id: str):
-    tail = item_id.rsplit("/origin-", 1)[-1] if "/origin-" in item_id else ""
-    return int(tail) if tail.isdigit() else None
+def _origin(source, row, item_id: str):
+    """The window's recorded forecast origin: per-row for signal cases, shared for the
+    MetroPT fixture, per-series for fev; else parsed from ``.../origin-<slot>[/...]``."""
+    provenance = (source or {}).get("provenance") or {}
+    if row is not None:
+        if isinstance(provenance.get("origins"), list):
+            return provenance["origins"][row]
+        if isinstance(provenance.get("series"), list) and row < len(provenance["series"]):
+            if provenance["series"][row].get("origin") is not None:
+                return provenance["series"][row]["origin"]
+    if provenance.get("origin") is not None:
+        return provenance["origin"]
+    match = re.search(r"/origin-(\d+)(?:/|$)", item_id)
+    return int(match.group(1)) if match else None
 
 
 def _mean(values):
@@ -126,9 +137,9 @@ def _future_zero_share(source, row):
 
 def _mean_history_rows(source, scale):
     """Score the mean-of-history baseline for an older run that did not record it."""
-    from benchmarks.model_evaluation import mean_history_forecasts, score_forecasts
+    from benchmarks.model_evaluation import score_mean_history
 
-    return score_forecasts(source, mean_history_forecasts(source), scale=scale)["per_series"]
+    return score_mean_history(source, scale=scale)["per_series"]
 
 
 def collect_windows(run_dirs, scale="all") -> list[dict]:
@@ -185,7 +196,7 @@ def collect_windows(run_dirs, scale="all") -> list[dict]:
                     zero_share = _future_zero_share(source, row)
                     windows.append({
                         "model": folder.name, "dtype": dtype, "signal": signal, "case": case["case"],
-                        "item_id": native["item_id"], "origin": _origin(native["item_id"]), "scale": scale,
+                        "item_id": native["item_id"], "origin": _origin(source, row, native["item_id"]), "scale": scale,
                         "seasonal_scale": native.get("seasonal_scale"), "scale_status": native.get("scale_status"),
                         "observed_targets": native.get("observed_targets"), "future_zero_share": zero_share,
                         "off_state": None if zero_share is None else zero_share >= OFF_STATE_ZERO_SHARE,
@@ -291,6 +302,16 @@ def _statistics(names, errors, scales, draw):
     return ratio, geometric, len(usable)
 
 
+def _ratio_to_lowest(value, lowest):
+    """Competitor score over the lowest score; undefined when the lowest is zero,
+    except that a competitor also at zero is tied with it."""
+    if value is None or lowest is None:
+        return None
+    if lowest == 0:
+        return 1.0 if value == 0 else None
+    return value / lowest
+
+
 def compare(windows, *, resamples=RESAMPLES, seed=SEED) -> list[dict]:
     """Paired comparison of native models and both baselines per dtype and signal.
 
@@ -302,7 +323,12 @@ def compare(windows, *, resamples=RESAMPLES, seed=SEED) -> list[dict]:
     """
     groups = {}
     for window in windows:
-        groups.setdefault((window["dtype"], window["signal"]), {}).setdefault(window["model"], {})[window["item_id"]] = window
+        # A series can recur across cases (fev cutoffs), so the case is part of the pairing key.
+        key = (window["case"], window["item_id"])
+        models = groups.setdefault((window["dtype"], window["signal"]), {}).setdefault(window["model"], {})
+        if key in models:
+            raise ValueError(f"Duplicate window {key} for {window['model']} {window['dtype']}")
+        models[key] = window
     order = {model: index for index, model in enumerate(MODELS)}
     results = []
     for (dtype, signal), by_model in sorted(groups.items(), key=lambda item: (
@@ -316,7 +342,7 @@ def compare(windows, *, resamples=RESAMPLES, seed=SEED) -> list[dict]:
         items.sort(key=lambda item: (first[item]["origin"] is None, first[item]["origin"] or 0, item))
         subsets = [("all", items)]
         on_state = [item for item in items if first[item]["off_state"] is not True]
-        if len(on_state) < len(items) and len(on_state) >= 2:
+        if on_state and len(on_state) < len(items):
             subsets.append(("excluding_off_state", on_state))
         for subset, chosen in subsets:
             if not chosen:
@@ -328,13 +354,16 @@ def compare(windows, *, resamples=RESAMPLES, seed=SEED) -> list[dict]:
             scales = [first[item]["seasonal_scale"] if first[item]["native"]["MASE"] is not None else None
                       for item in chosen]
             everything = list(range(len(chosen)))
+            # Ratio-of-means only uses windows with a positive seasonal scale.
+            scored_windows = sum(1 for scale in scales if scale)
             ratio, geometric, geometric_windows = _statistics(names, errors, scales, everything)
             ranks = [_ranks([errors[name][window] for name in names]) for window in everything]
             mean_rank = {name: sum(rank[position] for rank in ranks) / len(ranks) for position, name in enumerate(names)}
             # One generator per signal/dtype/subset keeps results independent of input order.
             generator = random.Random(f"{seed}:{dtype}:{signal}:{subset}")
             samples = {name: {"ratio": [], "geometric": []} for name in names}
-            lowest_counts = dict.fromkeys(names, 0)
+            lowest_counts = dict.fromkeys(names, 0.0)
+            decided = 0  # Draws with a defined winner.
             ratio_samples = {name: [] for name in names}
             scored = [name for name in names if ratio[name] is not None]
             lowest = min(scored, key=lambda name: ratio[name]) if scored else None
@@ -348,10 +377,14 @@ def compare(windows, *, resamples=RESAMPLES, seed=SEED) -> list[dict]:
                         samples[name]["geometric"].append(draw_geometric[name])
                 defined = [name for name in names if draw_ratio[name] is not None]
                 if defined:
-                    lowest_counts[min(defined, key=lambda name: draw_ratio[name])] += 1
-                if lowest is not None and draw_ratio[lowest] is not None:
+                    best = min(draw_ratio[name] for name in defined)
+                    winners = [name for name in defined if draw_ratio[name] == best]
+                    for name in winners:
+                        lowest_counts[name] += 1 / len(winners)
+                    decided += 1
+                if lowest is not None and draw_ratio[lowest]:
                     for name in names:
-                        if draw_ratio[name]:
+                        if draw_ratio[name] is not None:
                             ratio_samples[name].append(draw_ratio[name] / draw_ratio[lowest])
 
             def interval(values):
@@ -361,12 +394,12 @@ def compare(windows, *, resamples=RESAMPLES, seed=SEED) -> list[dict]:
             for name in names:
                 ratio_low, ratio_high = interval(samples[name]["ratio"])
                 geometric_low, geometric_high = interval(samples[name]["geometric"])
-                relative = None if lowest is None or not ratio[name] or ratio[lowest] is None else ratio[name] / ratio[lowest]
+                relative = _ratio_to_lowest(ratio[name], None if lowest is None else ratio[lowest])
                 relative_low, relative_high = interval(ratio_samples[name]) if name != lowest else (1.0, 1.0)
                 if signal in UNFORECASTABLE:
                     claim = "no claim: unforecastable signal"
-                elif len(chosen) < MIN_CLAIM_WINDOWS:
-                    claim = f"no claim: fewer than {MIN_CLAIM_WINDOWS} windows"
+                elif scored_windows < MIN_CLAIM_WINDOWS:
+                    claim = f"no claim: fewer than {MIN_CLAIM_WINDOWS} scored windows"
                 elif name == lowest:
                     claim = "lowest"
                 elif relative_low is None:
@@ -381,15 +414,20 @@ def compare(windows, *, resamples=RESAMPLES, seed=SEED) -> list[dict]:
                     "MASE_ratio_of_means_high": ratio_high, "MASE_geometric_mean": geometric[name],
                     "MASE_geometric_mean_low": geometric_low, "MASE_geometric_mean_high": geometric_high,
                     "geometric_mean_windows": geometric_windows, "mean_rank": mean_rank[name],
-                    "probability_lowest": lowest_counts[name] / resamples if resamples else None,
+                    "probability_lowest": lowest_counts[name] / decided if decided else None,
                     "lowest": lowest, "ratio_to_lowest": relative,
                     "ratio_to_lowest_low": relative_low, "ratio_to_lowest_high": relative_high, "claim": claim,
                 })
             ties = [row["competitor"] for row in group_rows if row["claim"] == "not distinguishable from lowest"]
+            undefined = [row["competitor"] for row in group_rows if row["claim"] == "undefined"]
             for row in group_rows:
                 if row["claim"] == "lowest":
-                    row["claim"] = ("lowest; every other competitor higher" if not ties
-                                    else "lowest; not distinguishable from " + ", ".join(ties))
+                    parts = []
+                    if ties:
+                        parts.append("not distinguishable from " + ", ".join(ties))
+                    if undefined:
+                        parts.append("undefined against " + ", ".join(undefined))
+                    row["claim"] = "lowest; " + ("; ".join(parts) if parts else "every other competitor higher")
             results.extend(group_rows)
     return results
 

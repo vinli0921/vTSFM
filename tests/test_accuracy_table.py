@@ -184,7 +184,7 @@ def test_paired_bootstrap_is_reproducible_and_scores_every_competitor_on_the_sam
 def test_claims_need_enough_windows_distinct_intervals_and_a_forecastable_signal(tmp_path):
     _comparison_run(tmp_path / "few", {"timesfm25": 1.0, "toto2": 2.0}, windows=4)
     assert {row["claim"] for row in compare(collect_windows([tmp_path / "few"]), resamples=50)} == {
-        "no claim: fewer than 5 windows"}
+        "no claim: fewer than 5 scored windows"}
     _comparison_run(tmp_path / "close", {"timesfm25": 1.0, "toto2": 1.0})
     close = {row["competitor"]: row["claim"] for row in compare(collect_windows([tmp_path / "close"]), resamples=50)}
     assert close["timesfm25"] == "lowest; not distinguishable from toto2"
@@ -233,3 +233,111 @@ def test_off_state_flags_recomputed_mean_history_and_window_csv(tmp_path):
     assert "mean_history_MASE" in lines[0] and ",True,False," in lines[1]
     comparison = (tmp_path / "out/accuracy_table_comparison.csv").read_text().splitlines()
     assert comparison[0].startswith("dtype,signal,subset,competitor,") and len(comparison) == 1 + 2 * 3
+
+
+# --- #97 review regressions ---------------------------------------------------
+
+def _items(count, signal="s/x"):
+    return [f"{signal}/origin-{10 * index}" for index in range(count)]
+
+
+def test_perfect_lowest_competitor_leaves_ratios_undefined_instead_of_crashing(tmp_path):
+    """Item 1: a zero-error seasonal naive is the lowest; ratios to it are undefined."""
+    items = _items(6)
+    native = [_window(item, 2.0, 1.0) for item in items]
+    naive = [_window(item, 0.0, 1.0) for item in items]
+    history = [_window(item, 4.0, 1.0) for item in items]
+    _write_scored_run(tmp_path / "run", "toto2", native, naive, history)
+    by_name = {row["competitor"]: row for row in compare(collect_windows([tmp_path / "run"]), resamples=50)}
+    assert by_name["seasonal_naive"]["claim"] == "lowest; undefined against toto2, mean_history"
+    assert by_name["toto2"]["ratio_to_lowest"] is None and by_name["toto2"]["claim"] == "undefined"
+
+
+def test_zero_numerators_stay_in_ratio_draws(tmp_path):
+    """Item 1: a competitor with zero error in a draw contributes a ratio of 0, not nothing."""
+    items = _items(6)
+    native = [_window(item, 1.0, 1.0) for item in items]  # Total 6: the lowest overall.
+    # Total 7, all in one window: about a third of draws miss it, so naive scores exactly 0.
+    naive = [_window(item, 7.0 if index == 0 else 0.0, 1.0) for index, item in enumerate(items)]
+    history = [_window(item, 4.0, 1.0) for item in items]
+    _write_scored_run(tmp_path / "run", "toto2", native, naive, history)
+    by_name = {row["competitor"]: row for row in compare(collect_windows([tmp_path / "run"]), resamples=400, seed=3)}
+    assert by_name["toto2"]["lowest"] == "toto2"
+    assert by_name["seasonal_naive"]["ratio_to_lowest_low"] == 0
+
+
+def test_a_series_repeated_across_cases_pairs_every_window(tmp_path):
+    """Item 2: fev repeats the same item IDs at a second cutoff (a second case)."""
+    folder = tmp_path / "run" / "toto2"
+    folder.mkdir(parents=True)
+    (folder / "run.json").write_text(json.dumps({"precision": "float32"}))
+    cases = []
+    for window in (0, 1):
+        rows = [_window(f"T{index}", 1.0 + window + index, 1.0) for index in range(5)]
+        cases.append({"case": f"fev-smoke-m4_hourly-window-{window}", "native": {"per_series": rows},
+                      "vtsfm": {"per_series": rows},
+                      "seasonal_naive": {"per_series": [dict(row, MAE=2 * row["MAE"]) for row in rows]},
+                      "mean_history": {"per_series": [dict(row, MAE=3 * row["MAE"]) for row in rows]}})
+    (folder / "accuracy.json").write_text(json.dumps({"cases": cases}))
+    windows = collect_windows([tmp_path / "run"])
+    row, = collect([tmp_path / "run"], windows=windows)
+    assert row["series"] == 10
+    assert {entry["windows"] for entry in compare(windows, resamples=20)} == {10}
+
+
+def test_lowest_needs_a_defined_interval_above_one_for_every_competitor(tmp_path):
+    """Item 3: with no resamples nothing is separated, so 'every other higher' is not claimed."""
+    _comparison_run(tmp_path / "run", {"timesfm25": 1.0, "toto2": 2.0})
+    rows = compare(collect_windows([tmp_path / "run"]), resamples=0)
+    lowest, = [row for row in rows if row["claim"].startswith("lowest")]
+    assert lowest["claim"] == "lowest; undefined against toto2, seasonal_naive, mean_history"
+    assert all(row["probability_lowest"] is None for row in rows)
+
+
+def test_window_minimum_counts_only_scored_windows(tmp_path):
+    """Item 4: four zero-scale windows plus one usable window cannot support a ranking."""
+    items = _items(5)
+    scales = [0.0, 0.0, 0.0, 0.0, 1.0]
+    native = [_window(item, 1.0, scale) for item, scale in zip(items, scales)]
+    naive = [_window(item, 3.0, scale) for item, scale in zip(items, scales)]
+    history = [_window(item, 4.0, scale) for item, scale in zip(items, scales)]
+    _write_scored_run(tmp_path / "run", "toto2", native, naive, history)
+    assert {row["claim"] for row in compare(collect_windows([tmp_path / "run"]), resamples=20)} == {
+        "no claim: fewer than 5 scored windows"}
+
+
+def test_tied_competitors_share_the_probability_of_being_lowest(tmp_path):
+    """Item 5: identical models split P(lowest) instead of inheriting iteration order."""
+    _comparison_run(tmp_path / "run", {"timesfm25": 1.0, "toto2": 1.0})
+    by_name = {row["competitor"]: row for row in compare(collect_windows([tmp_path / "run"]), resamples=40)}
+    assert by_name["timesfm25"]["probability_lowest"] == pytest.approx(0.5)
+    assert by_name["toto2"]["probability_lowest"] == pytest.approx(0.5)
+    assert by_name["seasonal_naive"]["probability_lowest"] == 0
+
+
+def test_a_single_on_state_window_is_still_reported(tmp_path):
+    """Item 7: four off-state windows and one on-state window emit both subsets."""
+    items = [f"s/x/origin-{index}" for index in (4, 8, 12, 16, 20)]
+    targets = [[0., 0.]] * 4 + [[2., 3.]]
+    native = [_window(item, 1.0, 2.0) for item in items]
+    _write_run(tmp_path / "run", "toto2", "float32", native, naive=[_window(item, 3.0, 2.0) for item in items])
+    (tmp_path / "run/toto2/cases.json").write_text(json.dumps(
+        {"cases": [_source_case("signal-x", items, [[1., 3., 1., 3.]] * 5, targets)]}))
+    subsets = {(row["subset"], row["competitor"]): row
+               for row in compare(collect_windows([tmp_path / "run"]), resamples=20)}
+    on_state = subsets[("excluding_off_state", "toto2")]
+    assert on_state["windows"] == 1 and on_state["claim"] == "no claim: fewer than 5 scored windows"
+
+
+def test_window_origins_come_from_recorded_provenance(tmp_path):
+    """Item 8: MetroPT IDs end in /row-<n>; fev records a per-series origin."""
+    from benchmarks.accuracy_table import _origin
+
+    metro = {"provenance": {"origin": 600}}
+    assert _origin(metro, 2, "mp_1/Oil_Temperature/origin-600/row-2") == 600
+    assert _origin(None, None, "mp_1/Oil_Temperature/origin-600/row-2") == 600  # Parsed fallback.
+    fev = {"provenance": {"cutoff": -48, "series": [{"origin": 900}, {"origin": 1200}]}}
+    assert _origin(fev, 1, "T2") == 1200
+    signal = {"provenance": {"origins": [512, 608]}}
+    assert _origin(signal, 1, "s/x/origin-608") == 608
+    assert _origin(None, None, "T1") is None
