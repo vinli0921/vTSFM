@@ -33,7 +33,12 @@ algorithm; it does not approximate it with repeated shorter-horizon forecasts.
 Each request owns its normalization, masks, positivity flag, independent normal
 and flipped streams, running statistics, median feedback, quantile spread,
 output buffer and KV caches. Feedback stays separate between flip streams.
-Quantiles, crossing correction and de-normalization preserve pinned semantics.
+After each block, the stepper writes the difference between the two median
+forecasts into the request's output buffer. When the request finishes, it
+combines that history with the two prefill spreads to assemble all nine
+quantiles, correct crossings, reverse normalization and apply positivity once.
+A request canceled between blocks releases its buffers before that final work.
+The [A100 quantile assembly benchmark](baselines/2026-11-20-timesfm-quantile-assembly/README.md) compares it with both whole-forecast and the previous block epilogue.
 Prefill and autoregressive (AR) decode batch the normal and sign-flipped rows
 in one neural call per phase. Each stream retains its own statistics and feedback.
 
@@ -62,8 +67,15 @@ The [H1024 A100 benchmark](baselines/2026-11-20-timesfm-decode-kv/README.md)
 compares HTTP throughput, cache operations and peak memory for this change.
 
 Cache allocations and existing prefixes persist when requests are reordered.
-Initial shared prefill splits its cache once, so retiring a request cannot
-retain a peer's backing allocation.
+Initial shared prefill splits its cache by request and flip stream. Owners
+with at most 18,022,400 bytes of K/V per flip retain contiguous per-layer
+views of a packed buffer, trimmed to their forecast capacity. Write positions
+and mask counts each have their own typed buffer. Larger owners use per-layer
+clones to bound GPU memory at the admission ceiling. A singleton adopts its
+original cache in place.
+The [A100 prefill storage benchmark](baselines/2026-11-20-timesfm-prefill-kv/README.md)
+measures copy submissions and peak memory, and checks when a retiring
+peer's allocations become reclaimable.
 Completion packs the final response and releases state.
 Cancellation also releases state, including zero-compute housekeeping steps.
 Cleanup is idempotent. Input/queue/response-formatting errors affect their own
@@ -163,6 +175,8 @@ CUDA_VISIBLE_DEVICES=0 VTSFM_RUN_TIMESFM_CONTINUOUS=1 PYTHONPATH=src:tests:. \
   .venv-timesfm25/bin/python -m pytest tests/test_timesfm_continuous.py -q -s
 CUDA_VISIBLE_DEVICES=0 VTSFM_RUN_TIMESFM_PREFILL_HOLD=1 PYTHONPATH=src:tests:. \
   .venv-timesfm25/bin/python -m pytest tests/test_timesfm_prefill_hold.py -q -s
+CUDA_VISIBLE_DEVICES=0 VTSFM_RUN_TIMESFM_PREFILL_OWNERSHIP=1 VTSFM_PREFILL_GROUP_STEPS=1 PYTHONPATH=src:tests:. \
+  .venv-timesfm25/bin/python -m pytest tests/test_timesfm_prefill_ownership.py -q -s
 CUDA_VISIBLE_DEVICES=0 VTSFM_TEST_ADAPTER=timesfm25 \
   VTSFM_TEST_OUTPUT=results/timesfm-block-integration-NEW PYTHONPATH=src:tests:. \
   .venv-timesfm25/bin/python -m pytest tests/test_timesfm_block_integration.py -q -s

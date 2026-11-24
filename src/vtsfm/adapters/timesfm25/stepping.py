@@ -17,6 +17,11 @@ from torch.nn import functional as F
 from timesfm.torch.util import DecodeCache, revin, update_running_stats
 
 
+# W4: 20 layers × K/V × 2 rows × 44 positions × 16 heads × 80 FP32 values, per flip.
+# Larger slabs increased CUDA allocator reservation at the four-request admission limit.
+_MAX_PACKED_PREFILL_KV_BYTES = 18_022_400
+
+
 @dataclass
 class _PassState:
     caches: list = field(default_factory=list)
@@ -25,12 +30,11 @@ class _PassState:
     last_sigma: object = None
     feedback: object = None
     spread: object = None
-    block: object = None
 
     def clear(self):
         self.caches.clear()
         self.last_n = self.last_mu = self.last_sigma = None
-        self.feedback = self.spread = self.block = None
+        self.feedback = self.spread = None
 
 
 @dataclass
@@ -74,10 +78,35 @@ class TimesFMForecastState:
         buffers = [self.normalized, self.padding, self.mean, self.std, self.positive, self.output]
         for stream in self.passes:
             buffers.extend((stream.last_n, stream.last_mu, stream.last_sigma,
-                            stream.feedback, stream.spread, stream.block))
+                            stream.feedback, stream.spread))
             for cache in stream.caches:
                 buffers.extend((cache.next_index, cache.num_masked, cache.key, cache.value))
         return sum(tensor.numel() * tensor.element_size() for tensor in buffers if tensor is not None)
+
+
+def _split_prefill_caches(caches, rows, capacity):
+    """Copy one owner's prefill rows into storage private to this flip."""
+    key = caches[0].key
+    _, width, heads, head_dim = key.shape
+    owner_width = min(capacity, width)
+    elements = (rows.stop - rows.start) * owner_width * heads * head_dim
+    if 2 * len(caches) * elements * key.element_size() > _MAX_PACKED_PREFILL_KV_BYTES:
+        return [DecodeCache(next_index=cache.next_index[rows].clone(),
+                            num_masked=cache.num_masked[rows].clone(),
+                            key=cache.key[rows, :owner_width].clone(),
+                            value=cache.value[rows, :owner_width].clone()) for cache in caches]
+    kv = [tensor[rows] for cache in caches for tensor in (cache.key, cache.value)]
+    if owner_width < width:
+        # Mixed horizons share the widest prefill cache. Retain only this owner's capacity.
+        kv = [tensor[:, :owner_width] for tensor in kv]
+    # Each layer gets disjoint contiguous views. Native prefill can produce
+    # int64 mask counts while its write indices remain int32.
+    kv = torch.stack(kv).unbind()
+    next_indices = torch.stack([cache.next_index[rows] for cache in caches]).unbind()
+    mask_counts = torch.stack([cache.num_masked[rows] for cache in caches]).unbind()
+    return [DecodeCache(key=kv[2 * i], value=kv[2 * i + 1],
+                        next_index=next_indices[i], num_masked=mask_counts[i])
+            for i in range(len(caches))]
 
 
 class TimesFMStepper:
@@ -170,18 +199,11 @@ class TimesFMStepper:
                 # exclusively to this request. Keep their storage in place.
                 target.caches = caches
             elif caches is not None:
-                # Split prefill once; no request may retain peer allocations.
-                target.caches = [DecodeCache(
-                    next_index=cache.next_index[section].clone(),
-                    num_masked=cache.num_masked[section].clone(),
-                    key=cache.key[section, :state.cache_capacity].clone(),
-                    value=cache.value[section, :state.cache_capacity].clone(),
-                ) for cache in caches]
+                target.caches = _split_prefill_caches(caches, section, state.cache_capacity)
             target.last_n, target.last_mu, target.last_sigma = (value[section].clone() for value in stats)
             target.feedback = block[section, :, self.model.aridx].clone()
-            target.block = block[section, :, 1:].clone()
             if spread is not None:
-                target.spread = spread[section, :, 1:].clone()
+                target.spread = spread[section, :state.horizon, 1:].clone()
             cursor += state.rows
 
     def _prefill_passes(self, states):
@@ -212,7 +234,7 @@ class TimesFMStepper:
         for stream in range(2):
             half = slice(stream * rows, (stream + 1) * rows)
             # Row slices are views. A singleton request keeps both halves of its
-            # own allocation; shared cohorts are cloned per request by _store.
+            # own allocation; _store splits shared cohorts into per-request storage.
             stream_caches = [DecodeCache(
                 next_index=cache.next_index[half], num_masked=cache.num_masked[half],
                 key=cache.key[half], value=cache.value[half],
@@ -259,21 +281,24 @@ class TimesFMStepper:
             start = state.blocks_done * self.model.o
             stop = min(start + self.model.o, state.horizon)
             length = stop - start
-            forecast = (first.block[:, :length] - flipped.block[:, :length].flip(-1)) / 2
-            spread = (first.spread[:, start:stop] - flipped.spread[:, start:stop].flip(-1)) / 2
-            median = forecast[..., 4:5]
+            # Each flip already owns its raw point-head median for the next AR
+            # step. Stage their difference in the unpublished output's median row.
+            torch.sub(first.feedback[:, :length], flipped.feedback[:, :length], out=state.output[:, 4, start:stop])
+            state.blocks_done += 1
+            state.normalized = state.padding = None
+            if not self.complete(state):
+                continue
+
+            median = state.output[:, 4, :].unsqueeze(-1) / 2
+            spread = (first.spread - flipped.spread.flip(-1)) / 2
+            for stream in state.passes:
+                stream.clear()
             continuous = spread - spread[..., 4:5] + median
             lower = torch.cat((median, continuous[..., :4].flip(-1)), dim=-1).cummin(-1).values[..., 1:].flip(-1)
             upper = torch.cat((median, continuous[..., 5:]), dim=-1).cummax(-1).values[..., 1:]
             quantiles = revin(torch.cat((lower, median, upper), -1), state.mean, state.std, reverse=True)
             quantiles = torch.where(state.positive, quantiles.clamp_min(0), quantiles)
-            state.output[:, :, start:stop] = quantiles.transpose(1, 2)
-            state.blocks_done += 1
-            state.normalized = state.padding = None
-            first.block = flipped.block = None
-            if self.complete(state):
-                for stream in state.passes:
-                    stream.clear()
+            state.output.copy_(quantiles.transpose(1, 2))
 
     @torch.inference_mode()
     def prefill(self, states):
