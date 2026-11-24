@@ -26,11 +26,12 @@ class TotoRuntime:
 
             self._precision_handles = prepare_native_bf16(
                 self.model, RMSNorm, RotaryProjection, attention_type=SelfAttention)
-        elif self.precision == 'tf32':
+        else:
+            # FP32 and TF32: vLLM builds the model on CUDA, whose sin/cos can differ from the official CPU-built rotary tables by one ulp (#85).
             from toto2.model import RotaryProjection
-            from .precision import prepare_native_tf32
+            from .precision import prepare_native_rotary_tables
 
-            prepare_native_tf32(self.model, RotaryProjection)
+            prepare_native_rotary_tables(self.model, RotaryProjection)
         # Inference-only unit-scaling shims (#74); set
         # VTSFM_TOTO_FAST_UNIT_SCALING=0 to keep the upstream autograd wrappers.
         self.fast_unit_scaling = os.environ.get('VTSFM_TOTO_FAST_UNIT_SCALING', '1') != '0'

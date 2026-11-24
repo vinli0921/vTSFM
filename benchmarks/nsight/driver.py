@@ -1,4 +1,4 @@
-"""Issue #16: in-process drivers for nsys (harness rounds 1, 0b and 0b16) on the vLLM 0.33 stack.
+"""Issue #16: in-process drivers for nsys (harness rounds 1, 0b, 0b16 and 0b8) on the vLLM 0.33 stack.
 
   --path native   official upstream forecast API (timesfm.TimesFM_2p5 forecast, Toto2Model.forecast,
                   uni2ts Moirai2Forecast.forward), as harness.py's native runners do
@@ -8,7 +8,8 @@
 Rounds follow profiling/harness.py (branch profiling-baseline; see workload.py): chiller_6 supply
 temperature, the same windows(), horizon 96, NVTX preprocess / forward / postprocess per request.
 Round 1: batch 1, context 2048, window advances one model patch per request.
-Round 0b: batch 64, context 2048, fixed windows.
+Round 0b: batch 64, context 2048, fixed windows. Rounds 0b16 and 0b8 use 16 or 8 fixed windows, spread
+evenly over the series by the same windows() rule (not a prefix of 0b).
 Timed requests are bracketed by cudaProfilerStart/Stop so `nsys --capture-range=cudaProfilerApi`
 records steady state only (model load and warm-up excluded).
 """
@@ -161,14 +162,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--model', required=True, choices=list(NATIVE))
     ap.add_argument('--path', required=True, choices=['native', 'runtime'])
-    ap.add_argument('--round', required=True, choices=['1', '0b', '0b16'])
+    ap.add_argument('--round', required=True, choices=['1', '0b', '0b16', '0b8'])
     ap.add_argument('--warm', type=int, default=5)
     ap.add_argument('--n', type=int, default=50)
     ap.add_argument('--out', required=True)
     a = ap.parse_args()
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    batch = {'1': 1, '0b': 64, '0b16': 16}[a.round]
+    batch = {'1': 1, '0b': 64, '0b16': 16, '0b8': 8}[a.round]
     r = NATIVE[a.model](batch) if a.path == 'native' else Runtime(a.model)
     make = workload.round_inputs(workload.load_series(), a.round, r.patch)
 

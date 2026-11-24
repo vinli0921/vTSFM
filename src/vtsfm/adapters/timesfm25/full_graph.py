@@ -3,8 +3,9 @@
 """Experimental fixed-shape complete forecasts, eager or one CUDA graph.
 
 Finite equal-length contiguous CUDA FP32 inputs only. The optimized stepper owns
-all numerical operations; these private subclasses freeze cache geometry and
-remove prefill scalar readbacks. No serving flag selects this implementation.
+all numerical operations. These private subclasses freeze cache geometry and
+remove prefill scalar readbacks. The serving policy uses this owner for its
+fixed shape.
 """
 
 import time
@@ -48,15 +49,16 @@ class _DenseStepper(TimesFMStepper):
 
 
 class _PagedStepper(PagedTimesFMStepper):
+    # Frozen calls route through explicit attention. The ordinary model must
+    # retain its own attention for serialized eager fallback in serving.
+    _patch_attention = False
+
     _arena_type = _FrozenArena
 
     def __init__(self, runtime, rows, patches, horizon):
         capacity = patches + 4 * ((horizon - 1) // 128)
         super().__init__(runtime, max_sequences=rows, max_tokens=capacity)
         try:
-            # All prefills now use the shared explicit helper. Restore the
-            # native model immediately; it is never monkeypatched for replay.
-            self._restore_attention()
             self.identities = tuple(tuple(f'graph-sign-{sign}-row-{row}' for row in range(rows))
                                     for sign in range(2))
             # Prefill and every continuation use the same stream-major order.
@@ -208,7 +210,8 @@ class FixedForecast:
             self.stepper.release(state)
 
     @torch.inference_mode()
-    def run(self, context):
+    def run(self, context, *, prevalidated=False):
+        """Run one forecast; a serving caller may have already checked finiteness."""
         if self._closed:
             raise ValueError('Full-forecast owner is closed')
         if (not isinstance(context, torch.Tensor) or tuple(context.shape) != self.shape
@@ -216,7 +219,7 @@ class FixedForecast:
             raise ValueError('Full-forecast input shape/device/dtype requires a new owner')
         if not context.is_contiguous():
             raise ValueError('Full-forecast inputs must be contiguous')
-        if not torch.isfinite(context).all():
+        if not prevalidated and not torch.isfinite(context).all():
             raise ValueError('Full-forecast inputs must be finite; mask changes need a new owner')
         caller = torch.cuda.current_stream(self.device)
         self.stream.wait_stream(caller)

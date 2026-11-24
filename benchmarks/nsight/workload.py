@@ -43,9 +43,9 @@ def windows(y, batch, context, *, stride=None, offset=0):
 
 
 def round_inputs(y, round_name, patch):
-    """Callable i -> context array [rows, 2048] for harness round 1, 0b, or 0b16."""
+    """Callable i -> context array [rows, 2048] for harness round 1, 0b, 0b16, or 0b8."""
     if round_name == '1':  # batch 1; the window advances one model patch per request
         return lambda i: windows(y, 1, 2048, stride=1, offset=i * patch)[0]
-    rows = {'0b': 64, '0b16': 16}[round_name]
+    rows = {'0b': 64, '0b16': 16, '0b8': 8}[round_name]
     fixed = windows(y, rows, 2048)[0]
     return lambda i: fixed

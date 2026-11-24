@@ -86,3 +86,25 @@ def test_live_planner_keeps_ragged_incompatible_and_above_fusion_cap_requests_is
                              ('single', 2, 128), ('single', 2, 129)]
     for request, result in zip(requests, outputs, strict=True):
         assert torch.equal(result, runtime._values(request.context, request.horizon))
+
+
+@pytest.mark.parametrize('adapter', ['timesfm25', 'toto2', 'moirai2'])
+def test_live_planner_fuses_every_scheduled_request_within_row_and_work_limits(torch, adapter, tmp_path):
+    """#75: sixteen scheduled batch-1 requests share one call, not four calls of four."""
+    from vtsfm.adapters import get_adapter
+    from vtsfm.adapters.execution_batch import execute_scheduled
+    from vtsfm.admission import resolve_cost
+
+    spec = get_adapter(adapter)
+    cost = resolve_cost(spec)
+    limits = replace(spec.admission_limits, max_scheduled_requests=16)
+    requests = [_request(torch, f'{chr(65 + index)}{index}', rows=1) for index in range(16)]
+    runtime = _Runtime(torch)
+    row_cap = limits.execution_row_cap(cost(1, 32, 129).work_units)
+    trace = tmp_path / 'calls.jsonl'
+    outputs = list(execute_scheduled(runtime, spec, requests, 16, str(trace),
+                                     limits=limits, cost_for_shape=cost))
+    sizes = [len(json.loads(line)['request_ids']) for line in trace.read_text().splitlines()]
+    assert sizes == [min(16, row_cap)] * (16 // min(16, row_cap))
+    for request, result in zip(requests, outputs, strict=True):
+        assert torch.equal(result, runtime._values(request.context, request.horizon))

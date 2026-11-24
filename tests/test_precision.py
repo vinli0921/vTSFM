@@ -291,7 +291,7 @@ def test_toto_cropped_output_owns_compact_fp32_storage(dtype, rows):
 
 
 @pytest.mark.gpu
-@pytest.mark.parametrize('precision', ['bf16', 'tf32'])
+@pytest.mark.parametrize('precision', ['fp32', 'bf16', 'tf32'])
 def test_native_precision_rotary_tables_match_cpu_construction_on_cuda(precision, monkeypatch):
     torch = pytest.importorskip('torch')
     pytest.importorskip('toto2')
@@ -304,8 +304,11 @@ def test_native_precision_rotary_tables_match_cpu_construction_on_cuda(precision
     from vtsfm.adapters.toto2.precision import prepare_native_bf16
     from vtsfm.adapters.toto2.runtime import TotoRuntime
 
-    monkeypatch.setenv(PRECISION_ENV, precision)
-    monkeypatch.setenv(TF32_OVERRIDE_ENV, '0' if precision == 'bf16' else '1')
+    if precision == 'fp32':
+        monkeypatch.delenv(PRECISION_ENV, raising=False)
+    else:
+        monkeypatch.setenv(PRECISION_ENV, precision)
+    monkeypatch.setenv(TF32_OVERRIDE_ENV, '1' if precision == 'tf32' else '0')
     monkeypatch.setenv('VTSFM_FORECAST_EXECUTION', 'eager')
 
     config = dict(patch_size=32, d_model=16, num_heads=2, num_layers=2,

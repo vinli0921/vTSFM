@@ -105,6 +105,8 @@ silently loosen it to obtain a pass. A native-reference comparison establishes
 parity for the tested settings. It does not independently establish forecast
 accuracy, safe new batching semantics, or throughput/latency improvements.
 
+Known FP32 sources of served-vs-native difference (#85, A6000 probe): vLLM builds models on CUDA, whose rotary `cos`/`sin` tables differ from the official CPU-built ones by up to one ulp. That alone moved Toto by 9.2e-5 and Moirai by 2.1e-4 on a ~1e4-scale signal; all adapters now rebuild those tables on CPU, and a single served request then matches native bit for bit. The remaining source is batch composition: the same row forecast alone or with neighbours differs by about 1e-4 (Toto) to 4e-4 (Moirai) in native and served alike, because FP32 CUDA kernels change with batch shape. Size any magnitude-aware floor (#71) from that batch effect, not from construction drift.
+
 The GPU fixture checks availability and owns cleanup of its reference and server
 processes. Ordinary adapter failures are logged and the runner attempts the
 remaining selected adapters; its final exit status is nonzero if any adapter or
@@ -191,6 +193,65 @@ seasonality. No covariates or jointly modelled multivariate tasks are implied.
 This is a documented subset for regression checks, not a full fev-bench or
 GIFT-Eval score. Keep fev preparation in the CPU environment so it does not
 change the three model environments' dependency baselines.
+
+### AssetOps signals
+
+`benchmarks/assetops_sources.json` pins every AssetOpsBench sensor file used
+here (commit and SHA256) and names the signals built from them. The default
+signals are Chiller 6 supply temperature and condenser water flow, MetroPT oil
+temperature and motor current, and hydraulic `PS1` pressure. `prepare_data`
+prepares MetroPT by default. `--assetops-signals` also fetches the files used
+by the named signals. It verifies and reuses any requested files already in
+`data/source/`. Add `--assetops-checkout PATH` to copy missing files from a
+local AssetOpsBench checkout. Use `--source-file PATH` to prepare only MetroPT
+offline from a verified local copy. To evaluate another `iot/*.json` signal,
+pin its file and add a signal entry.
+
+```bash
+.venv/bin/python -m benchmarks.prepare_data --output data --assetops-signals
+.venv/bin/python -m benchmarks.model_evaluation prepare --data-dir data \
+  --assetops-signals --output data/accuracy-signals.json
+./scripts/test-models.sh --profile accuracy --cases data/accuracy-signals.json --gpu 0
+```
+
+Each signal becomes one case: five forecast origins, by default C512/H96,
+whose whole horizon was recorded. Readings are placed on the signal's time
+grid (15 minutes for Chiller 6, hourly for MetroPT) or one slot per hydraulic
+cycle. Missing history slots are causally forward-filled. The case provenance
+records their positions and counts for each window. Every scored future slot
+is observed. Seasonality is 96, 24 and 1 respectively.
+Hydraulic cycles have no calendar meaning, so its seasonal naive is last-value
+naive and its MASE scale is the one-cycle change; compare models with each
+other and with naive there, not with 1.
+
+An accuracy run writes `accuracy_table.md` and `accuracy_table.csv` after the
+selected adapters finish. The tables summarize all available scores from the
+run, including native MAE, MASE and SQL per model and signal, seasonal-naive
+scores, counts of scaled and zero-scale series, and the largest
+served-minus-native SQL difference, plus the share of each signal's history
+that was forward-filled. Combining runs at different precisions produces a
+model × signal × dtype table with model spread and reduced-precision deltas.
+`--scale observed` re-expresses MASE and SQL over seasonal pairs whose two
+history values were both recorded, so forward-filled runs cannot shrink the
+scale. It rescales the saved scores exactly from the run's `cases.json`; no
+rerun is needed. `score_forecasts(..., scale="observed")` applies the same rule
+when scoring directly.
+
+```bash
+python3 -m benchmarks.accuracy_table results/model-accuracy/FP32_RUN \
+  results/model-accuracy/BF16_RUN --output results/accuracy-signals
+```
+
+SQL is the harness's quantile approximation of a scaled CRPS. Windows come from
+one asset per signal and are correlated; treat the table as evidence about
+these signals, not a model ranking.
+
+An accuracy run scores every usable case before exiting with a nonzero status
+for any parity failure. The table marks affected signals. On the reference A100,
+Toto and Moirai fail the `rtol=atol=1e-4` gate only on condenser water flow.
+Forecasts near zero in a series reaching about 10,000 differ from native by a
+few FP32 rounding steps. See the
+[November 14 baseline](baselines/2026-11-14-assetops-signal-accuracy/README.md).
 
 ## Performance profile
 

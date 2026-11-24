@@ -1,28 +1,40 @@
 """Tensor-only forecasting around the pinned TimesFM 2.5 decoder."""
 
+import os
+
 import torch
 import timesfm
 from timesfm.torch.util import revin
 from torch.nn import functional as F
 
 from vtsfm.execution import ExecutionResult, PreparedBatch
-from vtsfm.precision import configure_precision
+from vtsfm.precision import PRECISION_ENV, configure_precision
 from vtsfm.compilation import compile_core, execution_mode
 
+from .graph_config import FORECAST_MODE_ENV, validate_fixed_forecast_execution
 from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TIMESFM25
 
 
 class TimesFMRuntime:
     def __init__(self, config):
+        execution = execution_mode()
+        if FORECAST_MODE_ENV in os.environ:
+            validate_fixed_forecast_execution(os.environ.get(PRECISION_ENV), execution)
         self.precision = configure_precision('timesfm25')
         self.model = timesfm.TimesFM_2p5_200M_torch(torch_compile=False).model
-        if execution_mode() == 'compile':
+        self.fixed_forecast = None
+        if execution == 'compile':
             compile_model(self.model)
 
     @torch.inference_mode()
     def forecast(self, context, horizon):
         """Forecast [rows, 9, horizon] from finite histories with left NaN padding."""
         context = context.to(device=next(self.model.parameters()).device, dtype=torch.float32)
+        policy = getattr(self, 'fixed_forecast', None)
+        if policy is not None:
+            output = policy.try_forecast(context, horizon)
+            if output is not None:
+                return output
         return self._forecast(context, torch.isfinite(context), horizon)
 
     @torch.inference_mode()
@@ -62,7 +74,7 @@ class TimesFMRuntime:
         return torch.cat(blocks, dim=1)[:, :horizon, 1:], spread[:, :horizon, 1:]
 
     def _forecast(self, context, observed, horizon):
-        if getattr(self.model, '_vtsfm_paged_stepper_active', False):
+        if getattr(self.model, '_vtsfm_paged_stepper_mode', None) == 'patched':
             raise ValueError('TimesFM model is owned by a paged stepper. Close it before running a whole forecast.')
         if not 1 <= horizon <= self.model.os:
             raise ValueError(f'TimesFM forecast horizon must be in [1,{self.model.os}]')
