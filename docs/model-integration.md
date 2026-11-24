@@ -214,8 +214,21 @@ pin its file and add a signal entry.
 ./scripts/test-models.sh --profile accuracy --cases data/accuracy-signals.json --gpu 0
 ```
 
-Each signal becomes one case: five forecast origins, by default C512/H96,
-whose whole horizon was recorded. Readings are placed on the signal's time
+Each window is a C512/H96 forecast (by default) whose whole horizon was
+recorded. By default (`--signal-windows non-overlapping`) a signal contributes
+every such window whose forecast horizon does not overlap another, chosen
+greedily from the earliest eligible origin; histories may overlap. At C512/H96
+that gives 24 windows each for Chiller 6 supply temperature and condenser
+flow, 11 each for MetroPT oil temperature and motor current (gaps leave only
+503 eligible origins), and 17 for hydraulic PS1. The 20+ windows per signal
+asked for in [#84](https://github.com/vinli0921/vTSFM/issues/84) are therefore
+not attainable for MetroPT and hydraulic at this context and horizon; tables
+report each signal's window count instead. `--signal-windows 5` reproduces the
+November 14 baseline's five evenly spaced origins. A request carries at most
+`--signal-rows-per-case` windows (default 8, Moirai's per-request row limit;
+TimesFM and Toto allow 16), so larger signals become several
+`...-part-<n>` cases. Item IDs stay `<signal>/origin-<slot>` and tables group
+all parts of a signal. Readings are placed on the signal's time
 grid (15 minutes for Chiller 6, hourly for MetroPT) or one slot per hydraulic
 cycle. Missing history slots are causally forward-filled. The case provenance
 records their positions and counts for each window. Every scored future slot
@@ -225,12 +238,50 @@ naive and its MASE scale is the one-cycle change; compare models with each
 other and with naive there, not with 1.
 
 An accuracy run writes `accuracy_table.md` and `accuracy_table.csv` after the
-selected adapters finish. The tables summarize all available scores from the
-run, including native MAE, MASE and SQL per model and signal, seasonal-naive
-scores, counts of scaled and zero-scale series, and the largest
-served-minus-native SQL difference, plus the share of each signal's history
-that was forward-filled. Combining runs at different precisions produces a
-model × signal × dtype table with model spread and reduced-precision deltas.
+selected adapters finish, plus `accuracy_table_windows.csv` (one row per model
+and window: origin, flags, and MAE/MASE/SQL for native, vTSFM, seasonal naive
+and mean of history) and `accuracy_table_comparison.csv`. The tables summarize
+all available scores from the run, including native MAE, MASE and SQL per model
+and signal, seasonal-naive and mean-of-history scores, counts of scaled,
+zero-scale and off-state windows, and the largest served-minus-native SQL
+difference, plus the share of each signal's history that was forward-filled.
+Combining runs at different precisions produces a model × signal × dtype table
+with model spread and reduced-precision deltas.
+
+The mean-of-history baseline repeats the mean of the recorded (not
+forward-filled) history values at every step and quantile, next to seasonal
+naive. Runs made before it existed get it recomputed from their `cases.json`.
+
+`MASE`/`SQL` remain the equal-weight mean of per-window ratios, which one
+window with a tiny seasonal scale can dominate (hydraulic PS1 scales span
+0.026–2.49 bar). Two aggregates resist that: the ratio of means (summed error
+over summed scale) and the geometric mean of per-window MASE. Undefined scales
+stay explicit with counts in every aggregate. The paired comparison ranks the
+three models and both baselines within each window by median MAE, then gives
+95% percentile intervals from a fixed-seed paired bootstrap over windows
+(`--resamples`, default 2000; `--seed`, default 0): each resample draws windows
+with replacement and scores every competitor on the same draw. A competitor is
+"higher than lowest" only when its interval for the ratio to the lowest ratio of
+means lies wholly above 1; otherwise it is "not distinguishable", or "undefined"
+when no interval exists (no resamples, or the lowest scores exactly zero). The
+lowest claims "every other competitor higher" only when every other competitor
+is higher. P(lowest) is the share of resamples a competitor wins, with ties
+splitting the win. The bootstrap resamples windows independently, but each
+window's 512-step history overlaps its neighbours' (horizons step by 96), so the
+intervals are approximate and probably too narrow; a block bootstrap would widen
+them. A signal needs at least five windows with a usable seasonal scale
+(the windows the ratio of means scores) before any claim is made.
+
+A window is flagged off-state when at least half of its observed future labels
+are exactly zero (an asset switched off, e.g. condenser flow); the comparison is
+repeated without those windows, even if only one remains. Off-state is defined
+from the future labels, so that repeat conditions on the outcome: read it as a
+post hoc diagnostic, labeled so in the table, not as a ranking. A series that recurs
+across cases (fev cutoffs) is paired per case. A window whose history has no
+recorded value gets no mean-of-history score and drops out of the paired
+comparison; its other scores remain. Chiller 6 supply temperature is noise-like
+(lag-1 autocorrelation −0.01 to 0.12; the history mean scores within the models'
+range), so it is shown as unforecastable and excluded from ranking claims.
 `--scale observed` re-expresses MASE and SQL over seasonal pairs whose two
 history values were both recorded, so forward-filled runs cannot shrink the
 scale. It rescales the saved scores exactly from the run's `cases.json`; no
@@ -244,14 +295,21 @@ python3 -m benchmarks.accuracy_table results/model-accuracy/FP32_RUN \
 
 SQL is the harness's quantile approximation of a scaled CRPS. Windows come from
 one asset per signal and are correlated; treat the table as evidence about
-these signals, not a model ranking.
+these signals, not a model ranking. Make per-signal ranking claims only from the
+paired comparison. Reduced-precision runs for
+[#23](https://github.com/vinli0921/vTSFM/issues/23) should use the same
+manifest and table generator as the FP32 run they are compared with.
 
 An accuracy run scores every usable case before exiting with a nonzero status
-for any parity failure. The table marks affected signals. On the reference A100,
-Toto and Moirai fail the `rtol=atol=1e-4` gate only on condenser water flow.
-Forecasts near zero in a series reaching about 10,000 differ from native by a
-few FP32 rounding steps. See the
-[November 14 baseline](baselines/2026-11-14-assetops-signal-accuracy/README.md).
+for any parity failure. The table marks affected signals. On the reference A100
+with non-overlapping windows, all three adapters fail the `rtol=atol=1e-4` gate
+on 3 of 13 cases, all on condenser water flow: forecasts near zero in a series
+reaching about 10,000 differ from native by a few FP32 rounding steps. The
+CPU-built rotary-table fix ([#90](https://github.com/vinli0921/vTSFM/pull/90))
+addresses Toto and Moirai only; TimesFM's failure needs the magnitude-aware floor
+in [#71](https://github.com/vinli0921/vTSFM/issues/71). The table reports native
+scores, so the failures do not change the accuracy numbers. See the
+[November 23 baseline](baselines/2026-11-23-assetops-signal-accuracy-nonoverlap/README.md).
 
 ## Performance profile
 

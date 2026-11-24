@@ -13,7 +13,10 @@ from unittest.mock import patch
 import pytest
 
 from benchmarks import prepare_data
-from benchmarks.model_evaluation import load_cases, main, signal_cases
+import os
+
+from benchmarks.model_evaluation import (NON_OVERLAPPING, SIGNAL_ROWS_PER_CASE, load_cases, main,
+                                        select_origins, signal_cases)
 
 
 START = datetime(2020, 6, 1)
@@ -187,3 +190,86 @@ def test_prepare_cli_writes_signal_cases_instead_of_the_default_fixture(sources,
     assert [case["name"] for case in cases] == ["signal-t-flow-c8-h4", "signal-c-pressure-c8-h4"]
     manifest = json.loads(output.read_text())["provenance"]
     assert manifest["assetops_signals"] == ["t/flow", "c/pressure"] and manifest["signal_windows"] == 2
+
+
+def test_select_origins_keeps_the_original_even_spacing_and_greedy_non_overlap():
+    origins = [3, 4, 5, 9, 10, 14, 15, 21]
+    assert select_origins(origins, 3, 4) == [3, 9, 21]  # Original evenly spaced policy.
+    assert select_origins(origins, 9, 4) == []
+    assert select_origins(origins, NON_OVERLAPPING, 4) == [3, 9, 14, 21]
+    assert select_origins([], NON_OVERLAPPING, 4) == []
+
+
+def test_non_overlapping_windows_skip_unrecorded_horizons_and_split_by_request_size(sources):
+    prepare_data.fetch_sources(sources["data"], checkout=sources["checkout"])
+    with patch("urllib.request.urlopen", side_effect=_no_download):
+        cases = signal_cases(sources["data"], ["t/flow"], context=2, horizon=4, rows_per_case=4)
+    # Slot 5 was never recorded, so origins 2-5 are ineligible; the first window starts at 6.
+    assert [case["name"] for case in cases] == ["signal-t-flow-c2-h4-part-1", "signal-t-flow-c2-h4-part-2"]
+    origins = [origin for case in cases for origin in case["provenance"]["origins"]]
+    assert origins == [6, 10, 14, 18, 22, 26]
+    assert all(later - earlier >= 4 for earlier, later in zip(origins, origins[1:]))
+    assert [len(case["data"]["inputs"]) for case in cases] == [4, 2]
+    for case in cases:
+        provenance = case["provenance"]
+        assert provenance["window_policy"] == NON_OVERLAPPING and provenance["signal_windows"] == 6
+        assert provenance["parts"] == 2 and provenance["eligible_origins"] == 23
+        assert all(5 not in range(origin, origin + 4) for origin in provenance["origins"])
+        assert [item["item_id"] for item in case["data"]["inputs"]] == [
+            f"t/flow/origin-{origin}" for origin in provenance["origins"]]
+
+
+def test_default_request_size_fits_every_adapters_admission():
+    from importlib import import_module
+
+    for adapter in ("timesfm25", "toto2", "moirai2"):
+        limits = import_module(f"vtsfm.adapters.{adapter}.admission")
+        assert SIGNAL_ROWS_PER_CASE <= limits.DEFAULT_LIMITS.max_request_rows
+        limits.DEFAULT_LIMITS.validate_request(limits.forecast_cost(SIGNAL_ROWS_PER_CASE, 512, 96))
+
+
+def test_prepare_cli_defaults_to_non_overlapping_windows(sources, tmp_path):
+    prepare_data.fetch_sources(sources["data"], checkout=sources["checkout"])
+    output = tmp_path / "signals.json"
+    arguments = ["model_evaluation", "prepare", "--data-dir", str(sources["data"]), "--output", str(output),
+                 "--signal", "c/pressure", "--signal-context", "8", "--signal-horizon", "4",
+                 "--signal-rows-per-case", "3"]
+    with patch.object(sys, "argv", arguments):
+        main()
+    cases = load_cases(output)
+    manifest = json.loads(output.read_text())["provenance"]
+    # 40 cycles: origins 8..36 are eligible, so horizons start at 8, 12, ..., 36.
+    assert manifest["signal_windows"] == NON_OVERLAPPING and manifest["signal_window_counts"] == {"c/pressure": 8}
+    assert [len(case["data"]["inputs"]) for case in cases] == [3, 3, 2]
+    with patch.object(sys, "argv", arguments[:-2] + ["--signal-windows", "several"]), pytest.raises(SystemExit):
+        main()
+
+
+# Recorded in docs/baselines/2026-11-14-assetops-signal-accuracy (five evenly spaced origins).
+NOVEMBER_14_ORIGINS = {
+    "chiller_6/supply_temperature": [512, 1152, 1696, 2240, 2784],
+    "chiller_6/condenser_water_flow": [512, 1152, 1696, 2240, 2784],
+    "metro_pump_1/oil_temperature": [559, 3177, 3409, 4015, 4534],
+    "metro_pump_1/motor_current": [559, 3177, 3409, 4015, 4534],
+    "hydraulic_pump_1/ps1_pressure": [512, 911, 1310, 1709, 2109],
+}
+
+
+@pytest.mark.skipif(not os.environ.get("VTSFM_SIGNAL_DATA"),
+                    reason="Set VTSFM_SIGNAL_DATA to data prepared with prepare_data --assetops-signals")
+def test_pinned_signals_window_counts_and_original_origins():
+    from pathlib import Path
+
+    data = Path(os.environ["VTSFM_SIGNAL_DATA"])
+    with patch("urllib.request.urlopen", side_effect=_no_download):
+        cases = signal_cases(data)
+        original = signal_cases(data, windows=5)
+    counts = {}
+    for case in cases:
+        name = case["data"]["inputs"][0]["item_id"].rsplit("/origin-", 1)[0]
+        counts[name] = counts.get(name, 0) + len(case["data"]["inputs"])
+    assert counts == {"chiller_6/supply_temperature": 24, "chiller_6/condenser_water_flow": 24,
+                      "metro_pump_1/oil_temperature": 11, "metro_pump_1/motor_current": 11,
+                      "hydraulic_pump_1/ps1_pressure": 17}
+    assert {case["data"]["inputs"][0]["item_id"].rsplit("/origin-", 1)[0]: case["provenance"]["origins"]
+            for case in original} == NOVEMBER_14_ORIGINS

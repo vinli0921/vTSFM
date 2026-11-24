@@ -215,18 +215,51 @@ def assetops_cases(data_dir, *, count=2, context=128, horizon=32, batch_size=2):
     return cases
 
 
-def signal_cases(data_dir, names=None, *, context=512, horizon=96, windows=5):
-    """Build one accuracy case per pinned signal from ``assetops_sources.json``.
+NON_OVERLAPPING = "non-overlapping"
+# One HTTP request carries at most this many windows. Moirai admits 8 rows per
+# request (TimesFM and Toto admit 16), so one manifest serves all three adapters.
+SIGNAL_ROWS_PER_CASE = 8
 
-    Each case holds ``windows`` independent rows of shape [context] from one
-    signal, at evenly spaced origins whose next ``horizon`` slots were all
-    actually recorded. Histories may contain slots causally forward-filled
-    from the signal's own earlier readings; those positions are recorded and
-    are never scored. Item IDs are ``<signal>/origin-<slot>``. Reads files
-    already placed by ``python -m benchmarks.prepare_data --assetops-signals``.
+
+def select_origins(origins, windows, horizon):
+    """Choose forecast origins from the sorted eligible ``origins``.
+
+    ``windows=NON_OVERLAPPING`` takes every origin whose horizon starts at least
+    ``horizon`` slots after the previously chosen one, greedily from the earliest
+    eligible origin. Forecast horizons never overlap; histories may. An integer
+    keeps the original policy: that many evenly spaced origins, including the
+    earliest and latest (the November 14 baseline used 5).
     """
-    for value, label in [(context, "context"), (horizon, "horizon"), (windows, "windows")]:
+    if windows == NON_OVERLAPPING:
+        chosen = []
+        for origin in origins:
+            if not chosen or origin >= chosen[-1] + horizon:
+                chosen.append(origin)
+        return chosen
+    _positive_integer(windows, "windows")
+    if len(origins) < windows:
+        return []
+    return [origins[(index * (len(origins) - 1)) // max(1, windows - 1)] for index in range(windows)]
+
+
+def signal_cases(data_dir, names=None, *, context=512, horizon=96, windows=NON_OVERLAPPING,
+                 rows_per_case=SIGNAL_ROWS_PER_CASE):
+    """Build accuracy cases per pinned signal from ``assetops_sources.json``.
+
+    Rows are windows of shape [context] from one signal whose next ``horizon``
+    slots were all actually recorded, chosen by :func:`select_origins`.
+    Histories may contain slots causally forward-filled from the signal's own
+    earlier readings; those positions are recorded and are never scored. Item
+    IDs are ``<signal>/origin-<slot>``, so tables group a signal's windows even
+    when more than ``rows_per_case`` windows are split across several cases
+    (``...-part-<n>``; a signal that fits one case keeps its original name).
+    Reads files already placed by
+    ``python -m benchmarks.prepare_data --assetops-signals``.
+    """
+    for value, label in [(context, "context"), (horizon, "horizon"), (rows_per_case, "rows_per_case")]:
         _positive_integer(value, label)
+    if windows != NON_OVERLAPPING:
+        _positive_integer(windows, "windows")
     if horizon > 1024:
         raise ValueError("prediction_length must be <= 1024")
     names = list(prepare_data.SOURCES["signals"]) if names is None else list(names)
@@ -241,27 +274,34 @@ def signal_cases(data_dir, names=None, *, context=512, horizon=96, windows=5):
             filled.append(last)
         origins = [origin for origin in range(first + context, len(values) - horizon + 1)
                    if all(observed[origin:origin + horizon])]
-        if len(origins) < windows:
-            raise ValueError(f"{name}: need {windows} origins with {horizon} recorded future values "
-                             f"after context {context}; found {len(origins)}")
-        chosen = [origins[(index * (len(origins) - 1)) // max(1, windows - 1)] for index in range(windows)]
-        imputed_positions = [[index for index in range(origin - context, origin) if not observed[index]]
-                             for origin in chosen]
-        cases.append(validate_case({
-            "name": f"signal-{name.replace('/', '-')}-c{context}-h{horizon}",
-            "data": {"inputs": [{"target": filled[origin - context:origin], "item_id": f"{name}/origin-{origin}"}
-                                for origin in chosen],
-                     "parameters": {"prediction_length": horizon, "quantile_levels": list(QUANTILES)}},
-            "evaluation": {"targets": [values[origin:origin + horizon] for origin in chosen],
-                           "observed": [[True] * horizon for _ in chosen], "seasonality": signal["seasonality"]},
-            "provenance": {**signal["provenance"], "origins": chosen,
-                           "forecast_starts": [signal["axis"][origin] for origin in chosen],
-                           "past_imputed_positions": imputed_positions,
-                           "past_imputed_counts": [len(positions) for positions in imputed_positions],
-                           "history_policy": "Recorded readings; missing slots causally forward-filled from earlier readings only",
-                           "truth_policy": "Only windows whose whole horizon was recorded; no filled value is scored",
-                           "sampling_unit": "Windows from one asset's signal; correlated, not independent assets"},
-        }))
+        chosen = select_origins(origins, windows, horizon)
+        if not chosen:
+            raise ValueError(f"{name}: need {windows if windows != NON_OVERLAPPING else 1} origins with {horizon} "
+                             f"recorded future values after context {context}; found {len(origins)}")
+        parts = [chosen[start:start + rows_per_case] for start in range(0, len(chosen), rows_per_case)]
+        for part, part_origins in enumerate(parts, start=1):
+            imputed_positions = [[index for index in range(origin - context, origin) if not observed[index]]
+                                 for origin in part_origins]
+            base = f"signal-{name.replace('/', '-')}-c{context}-h{horizon}"
+            cases.append(validate_case({
+                "name": base if len(parts) == 1 else f"{base}-part-{part}",
+                "data": {"inputs": [{"target": filled[origin - context:origin], "item_id": f"{name}/origin-{origin}"}
+                                    for origin in part_origins],
+                         "parameters": {"prediction_length": horizon, "quantile_levels": list(QUANTILES)}},
+                "evaluation": {"targets": [values[origin:origin + horizon] for origin in part_origins],
+                               "observed": [[True] * horizon for _ in part_origins],
+                               "seasonality": signal["seasonality"]},
+                "provenance": {**signal["provenance"], "origins": part_origins,
+                               "forecast_starts": [signal["axis"][origin] for origin in part_origins],
+                               "past_imputed_positions": imputed_positions,
+                               "past_imputed_counts": [len(positions) for positions in imputed_positions],
+                               "window_policy": windows if windows == NON_OVERLAPPING else f"evenly-spaced-{windows}",
+                               "signal_windows": len(chosen), "eligible_origins": len(origins),
+                               "part": part, "parts": len(parts),
+                               "history_policy": "Recorded readings; missing slots causally forward-filled from earlier readings only",
+                               "truth_policy": "Only windows whose whole horizon was recorded; no filled value is scored",
+                               "sampling_unit": "Windows from one asset's signal; correlated, not independent assets"},
+            }))
     return cases
 
 
@@ -279,6 +319,43 @@ def seasonal_naive_forecasts(case):
             raise ValueError("Seasonal naive needs at least one complete past season")
         rows.append([[past[-seasonality + (step % seasonality)] for step in range(horizon)]] * len(QUANTILES))
     return np.asarray(rows, dtype=float)
+
+
+def mean_history_forecasts(case):
+    """Return [series, nine quantiles, horizon] repeating the mean of recorded history.
+
+    Causally forward-filled slots (see :func:`history_observed`) are excluded, so
+    the baseline uses only readings that were actually recorded. Every step and
+    quantile gets the same value: a point baseline whose SQL equals its MASE.
+    Cases without imputation provenance use their whole history. A row with no
+    recorded history (e.g. the first reading after a long gap) has no baseline:
+    its forecasts are NaN, and :func:`score_mean_history` marks it unavailable.
+    """
+    import numpy as np
+
+    validate_case(case)
+    horizon = case["data"]["parameters"]["prediction_length"]
+    masks = history_observed(case)
+    rows = []
+    for row, item in enumerate(case["data"]["inputs"]):
+        past = np.asarray(item["target"], dtype=float)
+        recorded = past if masks is None else past[np.asarray(masks[row], dtype=bool)]
+        rows.append(np.full((len(QUANTILES), horizon), recorded.mean() if recorded.size else np.nan))
+    return np.asarray(rows, dtype=float)
+
+
+def score_mean_history(case, *, scale="all"):
+    """Score the mean-of-history baseline, leaving rows without recorded history unscored.
+
+    Those rows get ``MAE``/``MASE``/``SQL`` of None and ``forecast_status``
+    ``"no_recorded_history"``; every other row, and every other source's
+    scores for the case, are unaffected.
+    """
+    import numpy as np
+
+    forecasts = mean_history_forecasts(case)
+    missing = [row for row in range(len(forecasts)) if np.isnan(forecasts[row]).all()]
+    return score_forecasts(case, np.nan_to_num(forecasts), scale=scale, unavailable_rows=missing)
 
 
 SCALES = ("all", "observed")
@@ -325,7 +402,7 @@ def seasonal_scale(past, seasonality, observed=None):
     return (sum(pairs) / len(pairs), len(pairs)) if pairs else (None, 0)
 
 
-def score_forecasts(case, values, *, scale="all"):
+def score_forecasts(case, values, *, scale="all", unavailable_rows=()):
     """Score [N, 9, H] forecasts against observed future labels, using past only.
 
     MAE uses the median. MASE divides median MAE by mean absolute seasonal
@@ -335,6 +412,8 @@ def score_forecasts(case, values, *, scale="all"):
     pinball loss over all nine quantiles, divided by the same scale. Aggregates
     are equal-weight means over eligible series. Undefined scales (zero, or no
     usable pairs) are excluded explicitly, never converted to zero or JSON NaN.
+    Rows in ``unavailable_rows`` had no forecast; they are left unscored and
+    counted, and their placeholder values are ignored.
     """
     import numpy as np
 
@@ -349,6 +428,9 @@ def score_forecasts(case, values, *, scale="all"):
     forecast = np.asarray(values, dtype=float)
     if forecast.shape != (len(inputs), 9, horizon) or not np.isfinite(forecast).all():
         raise ValueError(f"Forecasts must be finite with shape {(len(inputs), 9, horizon)}")
+    unavailable = set(unavailable_rows)
+    if not unavailable <= set(range(len(inputs))):
+        raise ValueError("unavailable_rows must index the case's series")
     per_series = []
     for row, item in enumerate(inputs):
         observed = np.asarray(evaluation["observed"][row], dtype=bool)
@@ -362,7 +444,8 @@ def score_forecasts(case, values, *, scale="all"):
         series_scale = float(differences.mean()) if differences.size else None
         status = "insufficient_history" if series_scale is None else "zero" if series_scale == 0 else "valid"
         mae = mase = sql = None
-        if observed.any():
+        available = row not in unavailable
+        if available and observed.any():
             mae = float(np.abs(forecast[row, 4, observed] - truth[observed]).mean())
             if status == "valid":
                 errors = truth[None, observed] - forecast[row][:, observed]
@@ -373,7 +456,8 @@ def score_forecasts(case, values, *, scale="all"):
                            "seasonal_scale": series_scale, "scale_status": status,
                            "scale_pairs": int(differences.size),
                            "filled_history": None if masks is None else masks[row].count(False),
-                           "observed_targets": int(observed.sum())})
+                           "observed_targets": int(observed.sum()),
+                           **({} if available else {"forecast_status": "no_recorded_history"})})
     def average(metric):
         eligible = [row[metric] for row in per_series if row[metric] is not None]
         return sum(eligible) / len(eligible) if eligible else None
@@ -383,7 +467,8 @@ def score_forecasts(case, values, *, scale="all"):
                        "valid_scaled_series": sum(row["MASE"] is not None for row in per_series),
                        "zero_scale_series": sum(row["scale_status"] == "zero" for row in per_series),
                        "insufficient_history_series": sum(row["scale_status"] == "insufficient_history" for row in per_series),
-                       "unobserved_series": sum(row["observed_targets"] == 0 for row in per_series)},
+                       "unobserved_series": sum(row["observed_targets"] == 0 for row in per_series),
+                       "unavailable_series": len(unavailable)},
             "per_series": per_series}
     # Extreme but finite inputs can still overflow arithmetic. Do not serialize
     # nonfinite scores or let an infinite denominator silently report success.
@@ -507,6 +592,15 @@ def fev_cases(cache_dir, config_path=None):
     return cases
 
 
+def _window_policy(value):
+    if value == NON_OVERLAPPING:
+        return value
+    try:
+        return _positive_integer(int(value), "windows")
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected '{NON_OVERLAPPING}' or a positive integer, got {value!r}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -523,7 +617,11 @@ def main():
                          choices=sorted(prepare_data.SOURCES["signals"]), help="Use this signal (repeatable)")
     signals.add_argument("--signal-context", type=int, default=512)
     signals.add_argument("--signal-horizon", type=int, default=96)
-    signals.add_argument("--signal-windows", type=int, default=5, help="Rows (forecast origins) per signal")
+    signals.add_argument("--signal-windows", type=_window_policy, default=NON_OVERLAPPING,
+                         help=f"'{NON_OVERLAPPING}' (default: every window whose horizon does not overlap another) "
+                              "or an integer count of evenly spaced origins (5 reproduces the Nov 14 baseline)")
+    signals.add_argument("--signal-rows-per-case", type=int, default=SIGNAL_ROWS_PER_CASE,
+                         help="Windows per request; more windows are split into several cases per signal")
     args = parser.parse_args()
     if args.output.exists():
         parser.error(f"Output already exists: {args.output}")
@@ -532,7 +630,8 @@ def main():
         cases = assetops_cases(args.data_dir, count=5, batch_size=7)
     else:
         cases = signal_cases(args.data_dir, names, context=args.signal_context,
-                             horizon=args.signal_horizon, windows=args.signal_windows)
+                             horizon=args.signal_horizon, windows=args.signal_windows,
+                             rows_per_case=args.signal_rows_per_case)
     if args.fev:
         cases.extend(fev_cases(args.cache_dir or args.output.parent / "fev-cache"))
     manifest = {"cases": cases, "provenance": {
@@ -542,6 +641,10 @@ def main():
         **({"assetops_windows": 5} if names is None else {
             "assetops_signals": names, "signal_context": args.signal_context,
             "signal_horizon": args.signal_horizon, "signal_windows": args.signal_windows,
+            "signal_rows_per_case": args.signal_rows_per_case,
+            "signal_window_counts": {name: max(case["provenance"]["signal_windows"] for case in cases
+                                               if case["data"]["inputs"][0]["item_id"].startswith(f"{name}/origin-"))
+                                     for name in names},
             "sources_commit": prepare_data.COMMIT}),
     }}
     args.output.parent.mkdir(parents=True, exist_ok=True)
