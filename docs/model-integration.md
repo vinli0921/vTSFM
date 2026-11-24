@@ -318,3 +318,11 @@ Compare vLLM points across payload forms at matching settings. The native
 server's own point is a reference for each form, not part of this comparison.
 Parity for both forms: `--profile integration --payload json` and
 `--profile integration --payload b64`.
+
+Measured on the reference A100 at `2ecec16` (eager FP32, ABBA, 100 requests per
+point): with one client, base64 cut vLLM W2 p50 by 9.8% (Toto), 8.8% (TimesFM)
+and 7.8% (Moirai, 8-row requests), while repeat JSON points differed by at most
+2.3%. With four concurrent clients the vLLM change stayed under 1%, because one
+request's parsing overlaps other requests' GPU work. W1 did not change
+measurably (under 1%), and W2 payloads are about 71% smaller. Add `--clients 1`
+to the W2 loop above to reproduce the single-client points.
