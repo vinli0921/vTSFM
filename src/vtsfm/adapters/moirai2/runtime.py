@@ -113,6 +113,8 @@ class MoiraiRuntime:
             length = unique_lengths[0]
             return self._forecast(context[:, -length:], observed[:, -length:], padding[:, -length:], horizon)
         result = context.new_empty((context.shape[0], len(FORECAST_SETTINGS.quantiles), horizon))
+        # BF16/TF32 runs one forecast per distinct length. In a repeated cycle
+        # of three or more lengths, each runner is evicted before its next use.
         for length in unique_lengths:
             rows = [index for index, value in enumerate(lengths) if value == length]
             result[rows] = self._forecast(context[rows, -length:], observed[rows, -length:],
