@@ -69,6 +69,8 @@ UNFORECASTABLE = {
 }
 RESAMPLES = 2000
 SEED = 0
+# Markdown labels; the CSV keeps the plain subset names.
+SUBSET_LABELS = {"all": "all", "excluding_off_state": "excluding off-state (post hoc)"}
 # Below this many windows a bootstrap interval is too coarse to support any claim.
 MIN_CLAIM_WINDOWS = 5
 COLUMNS = ["model", "dtype", "signal", "scale", "series", "scaled_series", "zero_scale_series",
@@ -512,13 +514,16 @@ def markdown(table, comparison=None, *, resamples=RESAMPLES, seed=SEED) -> str:
                          "It is scored but excluded from ranking claims." for signal in flagged]
     if comparison:
         lines += ["", f"**Paired comparison** (MASE; 95% percentile intervals from {resamples} paired bootstrap "
-                      f"resamples of windows, seed {seed}; windows are correlated, so intervals are approximate). "
-                      "Rank 1 is the lowest median MAE within a window.", "",
+                      f"resamples of windows, seed {seed}). Windows are resampled independently, but their "
+                      "histories overlap heavily, so the intervals are approximate and probably too narrow. "
+                      "Off-state is defined from the future labels, so the subset excluding it is a post hoc "
+                      "diagnostic. Rank 1 is the lowest median MAE within a window.", "",
                   "| Signal | dtype | Subset | Windows | Competitor | Ratio of means | Geo-mean | Mean rank | "
                   "P(lowest) | ÷ lowest | Claim |",
                   "| --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |"]
         for row in comparison:
-            lines.append(f"| {row['signal']} | {row['dtype']} | {row['subset']} | {row['windows']} | "
+            lines.append(f"| {row['signal']} | {row['dtype']} | {SUBSET_LABELS.get(row['subset'], row['subset'])} | "
+                         f"{row['windows']} | "
                          f"{row['competitor']} | "
                          f"{_interval(row['MASE_ratio_of_means'], row['MASE_ratio_of_means_low'], row['MASE_ratio_of_means_high'])} | "
                          f"{_interval(row['MASE_geometric_mean'], row['MASE_geometric_mean_low'], row['MASE_geometric_mean_high'])} | "

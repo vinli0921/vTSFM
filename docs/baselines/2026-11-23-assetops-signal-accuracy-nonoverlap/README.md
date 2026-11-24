@@ -16,7 +16,8 @@ AssetOpsBench data at `e844f64`, pinned in `benchmarks/assetops_sources.json`. T
 Each signal uses every forecast origin with 512 history steps and 96 recorded future values whose horizon
 does not overlap another chosen origin: 24 windows for each Chiller 6 signal, 17 for Hydraulic PS1 and 11
 for each MetroPT signal. At C512/H96, MetroPT and Hydraulic cannot reach 20 such windows. Windows from one
-asset are correlated, so the bootstrap intervals are approximate. Scores use the official native FP32
+asset are correlated: the bootstrap resamples windows independently, but their 512-step histories overlap
+heavily, so the intervals are approximate and probably too narrow. Scores use the official native FP32
 forecasts. MAE and MASE use the median; SQL uses all nine quantiles.
 
 | File | Contents |
@@ -33,7 +34,8 @@ forecasts. MAE and MASE use the median; SQL uses all nine quantiles.
 - **Chiller 6 condenser flow:** 19 of 24 windows are off-state (at least half the future labels are
   exactly zero). Across all 24, the models cannot be told apart, and seasonal naive (1.46×) and the
   history mean (1.79×) score higher than the lowest model, Moirai. On the 5 on-state windows TimesFM is
-  lowest, but Toto's ratio interval is [1.00, 1.01]; treat that as fragile at the 5-window minimum.
+  lowest, but Toto's ratio interval is [1.00, 1.01]; treat that as fragile at the 5-window minimum. That
+  subset is post hoc: off-state is defined from the future labels.
 - **Hydraulic PS1, MetroPT oil temperature:** no model, or seasonal naive, can be told apart from the lowest.
 - **Chiller 6 supply temperature:** flagged unforecastable (lag-1 autocorrelation −0.01 to 0.12); scored
   but excluded from ranking claims.

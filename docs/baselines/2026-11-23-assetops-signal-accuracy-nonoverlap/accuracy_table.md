@@ -18,7 +18,7 @@
 
 `chiller_6/supply_temperature` is unforecastable on this data: noise-like (lag-1 autocorrelation -0.01 to 0.12); the history mean scores within the models' range. It is scored but excluded from ranking claims.
 
-**Paired comparison** (MASE; 95% percentile intervals from 2000 paired bootstrap resamples of windows, seed 0; windows are correlated, so intervals are approximate). Rank 1 is the lowest median MAE within a window.
+**Paired comparison** (MASE; 95% percentile intervals from 2000 paired bootstrap resamples of windows, seed 0). Windows are resampled independently, but their histories overlap heavily, so the intervals are approximate and probably too narrow. Off-state is defined from the future labels, so the subset excluding it is a post hoc diagnostic. Rank 1 is the lowest median MAE within a window.
 
 | Signal | dtype | Subset | Windows | Competitor | Ratio of means | Geo-mean | Mean rank | P(lowest) | ÷ lowest | Claim |
 | --- | --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |
@@ -27,11 +27,11 @@
 | chiller_6/condenser_water_flow | fp32 | all | 24 | moirai2 | 0.501 [0.261, 0.700] | 0.170 [0.057, 0.544] | 2.92 | 0.84 | 1.00 [1.00, 1.00] | lowest; not distinguishable from timesfm25, toto2 |
 | chiller_6/condenser_water_flow | fp32 | all | 24 | seasonal_naive | 0.729 [0.395, 1.012] | 0.178 [0.042, 0.737] | 3.54 | 0.00 | 1.46 [1.27, 1.84] | higher than lowest |
 | chiller_6/condenser_water_flow | fp32 | all | 24 | mean_history | 0.898 [0.790, 1.046] | 1.109 [0.746, 2.073] | 4.12 | 0.00 | 1.79 [1.20, 3.53] | higher than lowest |
-| chiller_6/condenser_water_flow | fp32 | excluding_off_state | 5 | timesfm25 | 0.758 [0.726, 0.785] | 0.758 [0.726, 0.785] | 1.60 | 0.97 | 1.00 [1.00, 1.00] | lowest; every other competitor higher |
-| chiller_6/condenser_water_flow | fp32 | excluding_off_state | 5 | toto2 | 0.761 [0.728, 0.787] | 0.761 [0.727, 0.787] | 2.20 | 0.02 | 1.00 [1.00, 1.01] | higher than lowest |
-| chiller_6/condenser_water_flow | fp32 | excluding_off_state | 5 | moirai2 | 0.780 [0.755, 0.806] | 0.779 [0.755, 0.806] | 3.60 | 0.00 | 1.03 [1.01, 1.05] | higher than lowest |
-| chiller_6/condenser_water_flow | fp32 | excluding_off_state | 5 | seasonal_naive | 1.009 [0.953, 1.040] | 1.007 [0.952, 1.040] | 5.00 | 0.00 | 1.33 [1.31, 1.36] | higher than lowest |
-| chiller_6/condenser_water_flow | fp32 | excluding_off_state | 5 | mean_history | 0.763 [0.728, 0.791] | 0.762 [0.727, 0.791] | 2.60 | 8.00e-03 | 1.01 [1.00, 1.01] | higher than lowest |
+| chiller_6/condenser_water_flow | fp32 | excluding off-state (post hoc) | 5 | timesfm25 | 0.758 [0.726, 0.785] | 0.758 [0.726, 0.785] | 1.60 | 0.97 | 1.00 [1.00, 1.00] | lowest; every other competitor higher |
+| chiller_6/condenser_water_flow | fp32 | excluding off-state (post hoc) | 5 | toto2 | 0.761 [0.728, 0.787] | 0.761 [0.727, 0.787] | 2.20 | 0.02 | 1.00 [1.00, 1.01] | higher than lowest |
+| chiller_6/condenser_water_flow | fp32 | excluding off-state (post hoc) | 5 | moirai2 | 0.780 [0.755, 0.806] | 0.779 [0.755, 0.806] | 3.60 | 0.00 | 1.03 [1.01, 1.05] | higher than lowest |
+| chiller_6/condenser_water_flow | fp32 | excluding off-state (post hoc) | 5 | seasonal_naive | 1.009 [0.953, 1.040] | 1.007 [0.952, 1.040] | 5.00 | 0.00 | 1.33 [1.31, 1.36] | higher than lowest |
+| chiller_6/condenser_water_flow | fp32 | excluding off-state (post hoc) | 5 | mean_history | 0.763 [0.728, 0.791] | 0.762 [0.727, 0.791] | 2.60 | 8.00e-03 | 1.01 [1.00, 1.01] | higher than lowest |
 | chiller_6/supply_temperature | fp32 | all | 24 | timesfm25 | 0.797 [0.760, 0.837] | 0.798 [0.758, 0.840] | 2.21 | 0.82 | 1.00 [1.00, 1.00] | no claim: unforecastable signal |
 | chiller_6/supply_temperature | fp32 | all | 24 | toto2 | 0.802 [0.764, 0.843] | 0.803 [0.762, 0.846] | 2.79 | 1.00e-03 | 1.01 [1.00, 1.01] | no claim: unforecastable signal |
 | chiller_6/supply_temperature | fp32 | all | 24 | moirai2 | 0.803 [0.769, 0.840] | 0.804 [0.766, 0.843] | 2.92 | 0.04 | 1.01 [1.00, 1.02] | no claim: unforecastable signal |

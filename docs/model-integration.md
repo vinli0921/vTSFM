@@ -264,13 +264,17 @@ means lies wholly above 1; otherwise it is "not distinguishable", or "undefined"
 when no interval exists (no resamples, or the lowest scores exactly zero). The
 lowest claims "every other competitor higher" only when every other competitor
 is higher. P(lowest) is the share of resamples a competitor wins, with ties
-splitting the win. Windows from one asset are correlated, so these intervals are
-approximate. A signal needs at least five windows with a usable seasonal scale
+splitting the win. The bootstrap resamples windows independently, but each
+window's 512-step history overlaps its neighbours' (horizons step by 96), so the
+intervals are approximate and probably too narrow; a block bootstrap would widen
+them. A signal needs at least five windows with a usable seasonal scale
 (the windows the ratio of means scores) before any claim is made.
 
 A window is flagged off-state when at least half of its observed future labels
 are exactly zero (an asset switched off, e.g. condenser flow); the comparison is
-repeated without those windows, even if only one remains. A series that recurs
+repeated without those windows, even if only one remains. Off-state is defined
+from the future labels, so that repeat conditions on the outcome: read it as a
+post hoc diagnostic, labeled so in the table, not as a ranking. A series that recurs
 across cases (fev cutoffs) is paired per case. A window whose history has no
 recorded value gets no mean-of-history score and drops out of the paired
 comparison; its other scores remain. Chiller 6 supply temperature is noise-like

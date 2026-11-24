@@ -231,6 +231,8 @@ def test_off_state_flags_recomputed_mean_history_and_window_csv(tmp_path):
     lines = (tmp_path / "out/accuracy_table_windows.csv").read_text().splitlines()
     assert lines[0].startswith("model,dtype,signal,case,item_id,origin,") and len(lines) == 7
     assert "mean_history_MASE" in lines[0] and ",True,False," in lines[1]
+    report = (tmp_path / "out/accuracy_table.md").read_text()
+    assert "| excluding off-state (post hoc) |" in report and "probably too narrow" in report
     comparison = (tmp_path / "out/accuracy_table_comparison.csv").read_text().splitlines()
     assert comparison[0].startswith("dtype,signal,subset,competitor,") and len(comparison) == 1 + 2 * 3
 
