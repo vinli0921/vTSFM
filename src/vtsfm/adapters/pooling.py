@@ -188,7 +188,7 @@ class ForecastIOProcessor(IOProcessor):
                 len(inputs), max(len(item['target']) for item in inputs), horizon))
 
     def parse_data(self, data):
-        parsed = parse_request(data, self.settings)
+        parsed = parse_request(data, self.settings, self.forecast_limits)
         self._check_limits(parsed[0], parsed[1])
         return parsed
 

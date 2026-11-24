@@ -16,6 +16,40 @@ import platform
 
 ADAPTERS = ('timesfm25', 'toto2', 'moirai2')
 QUANTILES = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
+PAYLOAD_ENV = 'VTSFM_TEST_PAYLOAD'
+PAYLOAD_FORMS = ('json', 'b64')
+
+
+def payload_form():
+    """The HTTP request form selected by scripts/test-models.sh --payload."""
+    form = os.environ.get(PAYLOAD_ENV, 'json')
+    if form not in PAYLOAD_FORMS:
+        raise ValueError(f'{PAYLOAD_ENV} must be one of {PAYLOAD_FORMS}')
+    return form
+
+
+def wire_data(data, form='json'):
+    """Return ``(http_data, form_sent)`` for a case's JSON-list ``data``.
+
+    ``b64`` encodes equal-length series as ``inputs_b64``. Ragged cases, and
+    cases with item IDs on only some series, have no compact form and are
+    sent as JSON lists; ``form_sent`` records which form each request used.
+    Native references and parity checks keep using the original ``data``.
+    """
+    if form not in PAYLOAD_FORMS:
+        raise ValueError(f'payload form must be one of {PAYLOAD_FORMS}')
+    inputs = data['inputs']
+    item_ids = [item.get('item_id') for item in inputs]
+    if (form == 'json' or len({len(item['target']) for item in inputs}) != 1
+            or len({item_id is None for item_id in item_ids}) != 1):
+        return data, 'json'
+    from vtsfm.adapters.forecast import encode_inputs_b64
+
+    compact = {'inputs_b64': encode_inputs_b64([item['target'] for item in inputs],
+                                               None if item_ids[0] is None else item_ids)}
+    if 'parameters' in data:
+        compact['parameters'] = data['parameters']
+    return compact, 'b64'
 
 
 def integration_cases(adapter):

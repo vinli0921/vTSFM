@@ -3,7 +3,7 @@
 import pytest
 
 from benchmarks.model_evaluation import score_forecasts, seasonal_naive_forecasts
-from model_integration_support import QUANTILES, compare_response
+from model_integration_support import QUANTILES, compare_response, payload_form, wire_data
 from model_serving_support import record_check, save_json
 
 
@@ -21,9 +21,10 @@ def test_observed_forecast_quality_preserves_native(served_model):
     scores, failures = [], []
     for index, entry in enumerate(run['cases']):
         case = entry['case']
-        check = {'case': case['name'], 'status': 'failed'}
+        data, form = wire_data(case['data'], payload_form())
+        check = {'case': case['name'], 'payload_form': form, 'status': 'failed'}
         try:
-            payload = {'model': run['spec'].model_id, 'task': 'plugin', 'data': case['data']}
+            payload = {'model': run['spec'].model_id, 'task': 'plugin', 'data': data}
             save_json(run['output'] / f'{index}-request.json', payload)
             response = run['session'].post(run['url'] + '/pooling', json=payload,
                                            timeout=run['parity_timeout_s'])

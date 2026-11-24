@@ -284,3 +284,47 @@ counterbalance `--backend-order native,vtsfm` with `--backend-order vtsfm,native
 before interpreting speed differences. No performance threshold blocks merging
 automatically. The older `benchmarks.run` Chronos comparator remains unchanged;
 this profile supplies the matched HTTP path for these three adapters.
+
+### Compact request payloads
+
+`--payload b64` (any profile) sends each equal-length case as the compact
+`inputs_b64` request form described in the README, to both the native and vLLM
+servers. Ragged cases stay JSON lists. Native references and parity checks still
+use the original lists. Every check, point and `performance.json` records the
+`payload_form` it sent; performance points also record `payload_bytes`.
+Encoding happens before the timed samples. The default is `--payload json`.
+
+To compare the two request forms ([#73](https://github.com/vinli0921/vTSFM/issues/73)),
+run one point per invocation so each point gets fresh servers, in ABBA order
+(`json`, `b64`, `b64`, `json`). Requests above an adapter's row limit are
+rejected before submission, so a 64-series workload is four 16-row requests for
+TimesFM and Toto, and eight 8-row requests for Moirai:
+
+```bash
+# W2: 64 series, C2048, H96. Repeat per adapter, with these --batches/--clients:
+#   timesfm25 or toto2: --batches 16 --clients 4;  moirai2: --batches 8 --clients 8
+for payload in json b64 b64 json; do
+  ./scripts/test-models.sh --profile performance --adapter toto2 --gpu 0 \
+    --batches 16 --contexts 2048 --horizon 96 --clients 4 \
+    --requests 100 --warmups 5 --payload "$payload"
+done
+# W1: batch 1, C2048, H96. It checks that small requests do not regress.
+for payload in json b64 b64 json; do
+  ./scripts/test-models.sh --profile performance --adapter toto2 --gpu 0 \
+    --batches 1 --contexts 2048 --horizon 96 --clients 1 \
+    --requests 100 --warmups 5 --payload "$payload"
+done
+```
+
+Compare vLLM points across payload forms at matching settings. The native
+server's own point is a reference for each form, not part of this comparison.
+Parity for both forms: `--profile integration --payload json` and
+`--profile integration --payload b64`.
+
+Measured on the reference A100 at `2ecec16` (eager FP32, ABBA, 100 requests per
+point): with one client, base64 cut vLLM W2 p50 by 9.8% (Toto), 8.8% (TimesFM)
+and 7.8% (Moirai, 8-row requests), while repeat JSON points differed by at most
+2.3%. With four concurrent clients the vLLM change stayed under 1%, because one
+request's parsing overlaps other requests' GPU work. W1 did not change
+measurably (under 1%), and W2 payloads are about 71% smaller. Add `--clients 1`
+to the W2 loop above to reproduce the single-client points.
