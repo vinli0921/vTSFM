@@ -26,9 +26,9 @@ class TotoRuntime:
         else:
             # FP32 and TF32: vLLM builds the model on CUDA, whose sin/cos can differ from the official CPU-built rotary tables by one ulp (#85).
             from toto2.model import RotaryProjection
-            from .precision import prepare_native_tf32
+            from .precision import prepare_native_rotary_tables
 
-            prepare_native_tf32(self.model, RotaryProjection)
+            prepare_native_rotary_tables(self.model, RotaryProjection)
         if execution_mode() == 'compile':
             compile_model(self.model)
 

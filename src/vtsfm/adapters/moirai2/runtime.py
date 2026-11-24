@@ -36,9 +36,9 @@ class MoiraiRuntime:
             self._precision_handles = prepare_native_bf16(self.model)
         else:
             # FP32 and TF32: match the official CPU-built rotary tables (#85).
-            from .precision import prepare_native_tf32
+            from .precision import prepare_native_rotary_tables
 
-            prepare_native_tf32(self.model)
+            prepare_native_rotary_tables(self.model)
         # Opt-in (#24): exact fused attention for univariate rows. Every request
         # this runtime accepts is univariate (target_dim=1; execute() rejects
         # grouped rows), and the patch raises on multivariate input anyway.
