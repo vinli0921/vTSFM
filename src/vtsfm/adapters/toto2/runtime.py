@@ -1,5 +1,7 @@
 """Tensor forecasting around the official Toto 2 decoder."""
 
+import os
+
 import torch
 from torch.nn import functional as F
 from toto2 import Toto2Model
@@ -9,6 +11,7 @@ from vtsfm.execution import ExecutionResult, PreparedBatch
 from vtsfm.precision import configure_precision
 from vtsfm.compilation import compile_core, execution_mode
 
+from . import fast_scaling
 from .spec import DECODE_BLOCK_SIZE, FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TOTO2
 
 
@@ -29,6 +32,11 @@ class TotoRuntime:
             from .precision import prepare_native_rotary_tables
 
             prepare_native_rotary_tables(self.model, RotaryProjection)
+        # Inference-only unit-scaling shims (#74); set
+        # VTSFM_TOTO_FAST_UNIT_SCALING=0 to keep the upstream autograd wrappers.
+        self.fast_unit_scaling = os.environ.get('VTSFM_TOTO_FAST_UNIT_SCALING', '1') != '0'
+        if self.fast_unit_scaling:
+            fast_scaling.install()
         if execution_mode() == 'compile':
             compile_model(self.model)
 
@@ -74,7 +82,8 @@ class TotoRuntime:
         # One variate per batch element keeps every row an independent series.
         inputs = {'target': target.unsqueeze(1), 'target_mask': mask.unsqueeze(1),
                   'series_ids': torch.zeros((len(target), 1), dtype=torch.long, device=target.device)}
-        quantiles = self.model.forecast(inputs, horizon=horizon, decode_block_size=DECODE_BLOCK_SIZE)
+        with fast_scaling.fast_unit_scaling(self.fast_unit_scaling):
+            quantiles = self.model.forecast(inputs, horizon=horizon, decode_block_size=DECODE_BLOCK_SIZE)
         # Upstream returns [9 quantiles, rows, variates, horizon].
         # Public transport is FP32 and owns only the requested horizon, even
         # when the upstream crop is already contiguous or shares padded storage.
