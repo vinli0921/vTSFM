@@ -86,8 +86,17 @@ def test_small_budget_and_sparse_horizons_retain_native_serial_calls(model, monk
     forecasters = [Toto2Forecaster(device='cpu', seed=42).fit(
         pd.Series(np.arange(width, dtype=float), name='sensor')) for width in [9, 10, 11, 9, 10]]
     targets = [pd.RangeIndex(fc.cutoff[0] + 1, fc.cutoff[0] + 5) for fc in forecasters]
+    align = Toto2Forecaster._align_context
+    forecasts_before_alignment = []
+
+    def record_alignment(*args):
+        forecasts_before_alignment.append(len(calls))
+        return align(*args)
+
+    monkeypatch.setattr(Toto2Forecaster, '_align_context', staticmethod(record_alignment))
     result = TotoCalibrationBatcher(max_batch_points=100)(forecasters, targets)
     assert calls == [2, 2, 1] and len(result) == 5
+    assert forecasts_before_alignment == [0, 0, 1, 1, 2]
 
 
 def test_cached_model_loading_retains_the_native_seed_order(model, monkeypatch):
@@ -108,7 +117,7 @@ def test_cached_model_loading_retains_the_native_seed_order(model, monkeypatch):
     assert draws == [wanted]
 
 
-@pytest.mark.parametrize('failure', ['bad-output', 'oom', 'linear-shape', 'unrelated-error'])
+@pytest.mark.parametrize('failure', ['bad-output', 'oom', 'alignment-oom', 'linear-shape', 'unrelated-error'])
 def test_toto_batch_failure_retries_only_recoverable_errors(model, monkeypatch, failure):
     sizes = []
     native_forecast = model.forecast
@@ -119,7 +128,7 @@ def test_toto_batch_failure_retries_only_recoverable_errors(model, monkeypatch, 
         rows = inputs['target'].shape[0]
         sizes.append(rows)
         if rows == 1:
-            assert batch_target() is None
+            assert batch_target is None or batch_target() is None
             return native_forecast(inputs, **options)
         batch_target = weakref.ref(inputs['target'])
         if failure == 'oom':
@@ -137,6 +146,24 @@ def test_toto_batch_failure_retries_only_recoverable_errors(model, monkeypatch, 
     targets = [y.iloc[origin:14].index for origin in [10, 11]]
     expected = [fc.predict(ForecastingHorizon(index, is_relative=False))
                 for fc, index in zip(forecasters, targets)]
+    if failure == 'alignment-oom':
+        align = Toto2Forecaster._align_context
+        padded_target = None
+        attempts = 0
+
+        def fail_second_alignment(*args):
+            nonlocal padded_target, attempts
+            attempts += 1
+            if attempts == 2:
+                raise torch.OutOfMemoryError('simulated padding OOM')
+            if attempts > 2:
+                assert padded_target() is None
+            result = align(*args)
+            if attempts == 1:
+                padded_target = weakref.ref(result[0])
+            return result
+
+        monkeypatch.setattr(Toto2Forecaster, '_align_context', staticmethod(fail_second_alignment))
     monkeypatch.setattr(model, 'forecast', forecast)
     if failure == 'unrelated-error':
         with pytest.raises(ValueError, match='unrelated model error'):
@@ -144,7 +171,7 @@ def test_toto_batch_failure_retries_only_recoverable_errors(model, monkeypatch, 
         assert sizes == [2]
         return
     forecasts = TotoCalibrationBatcher()(forecasters, targets)
-    assert sizes == [2, 1, 1]
+    assert sizes == ([1, 1] if failure == 'alignment-oom' else [2, 1, 1])
     for actual, wanted in zip(forecasts, expected):
         pd.testing.assert_series_equal(actual, wanted)
 

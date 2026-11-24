@@ -77,9 +77,13 @@ def test_float_initial_window_and_batch_size_one_keep_all_origins(batch_size):
     assert len(callback.calls) == 24
 
 
-@pytest.mark.parametrize('failure', ['count', 'index', 'nan', 'dtype'])
+@pytest.mark.parametrize('failure', ['missing', 'scalar', 'count', 'index', 'nan', 'dtype'])
 def test_bad_batch_results_use_native_residuals(failure):
     def callback(forecasters, targets):
+        if failure == 'missing':
+            return None
+        if failure == 'scalar':
+            return 0
         values = list(RecordingBatch()(forecasters, targets))
         if failure == 'count':
             return values[:-1]
@@ -97,6 +101,39 @@ def test_bad_batch_results_use_native_residuals(failure):
     pd.testing.assert_frame_equal(candidate.residuals_matrix_, original.residuals_matrix_)
     pd.testing.assert_frame_equal(candidate.predict_interval(), original.predict_interval())
     assert len(candidate.forecasters_) == len(original.forecasters_)
+
+
+@pytest.mark.parametrize('observed, forecast, dtype', [
+    (2**53 + 1, 2**53, 'int64'),
+    (2**53, 2**53 + 1, 'uint64'),
+    (2**63 - 1, -(2**63), 'int64'),
+])
+def test_integer_residuals_are_subtracted_before_casting(observed, forecast, dtype):
+    y = pd.Series(observed, index=pd.RangeIndex(12), dtype=dtype)
+
+    def callback(forecasters, targets):
+        return [pd.Series(forecast, index=target, dtype=dtype) for target in targets]
+
+    candidate = BatchedConformalIntervals(ContextForecaster(), initial_window=5,
+        batch_predict=callback, batch_size=4).fit(y, fh=[1])
+    assert candidate.residuals_matrix_.loc[5, 5] == float(observed - forecast)
+
+
+@pytest.mark.parametrize('lazy', [False, True])
+def test_batch_callback_type_errors_propagate(lazy):
+    def broken_forecasts():
+        yield None
+        raise TypeError('callback failed')
+
+    def callback(forecasters, targets):
+        if lazy:
+            return broken_forecasts()
+        raise TypeError('callback failed')
+
+    candidate = BatchedConformalIntervals(ContextForecaster(), initial_window=5,
+        batch_predict=callback, batch_size=4)
+    with pytest.raises(TypeError, match='callback failed'):
+        candidate.fit(pd.Series(np.arange(12, dtype=float)), fh=[1])
 
 
 def test_missing_values_keep_native_residuals_and_intervals():

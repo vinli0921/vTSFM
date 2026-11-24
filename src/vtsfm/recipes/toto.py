@@ -58,23 +58,27 @@ class TotoCalibrationBatcher:
                     model_path=fc.model_path, device=fc._device).load_from_checkpoint()
             model = models[key]
             patch = model.config.patch_size
-            values, mask, missing = fc._align_context(
-                fc._inputs_['target'], fc._inputs_['target_mask'], patch)
+            width = fc._inputs_['target'].shape[-1]
+            aligned_width = math.ceil(width / patch) * patch
+            needs_padding = width != aligned_width
             horizon = math.ceil(len(target) / patch) * patch
-            points = values.numel() + len(model.output_head.knots) * horizon
+            points = aligned_width + len(model.output_head.knots) * horizon
             if points > self.max_batch_points:
                 outputs[index] = self._serial(fc, target)
                 continue
-            key = (id(model), fc._seed, fc.decode_block_size, values.shape[-1], missing, horizon)
-            groups.setdefault(key, []).append((index, fc, values, mask, model, points))
+            group_key = (id(model), fc._seed, fc.decode_block_size, aligned_width, needs_padding, horizon)
+            groups.setdefault(group_key, []).append((index, fc, model, points))
 
         for entries in groups.values():
             batch = []
+            batch_points = 0
             for entry in entries:
-                if sum(row[-1] for row in batch) + entry[-1] > self.max_batch_points:
+                if batch_points + entry[-1] > self.max_batch_points:
                     self._predict(batch, future_indexes, outputs)
                     batch = []
+                    batch_points = 0
                 batch.append(entry)
+                batch_points += entry[-1]
             self._predict(batch, future_indexes, outputs)
         return tuple(outputs)
 
@@ -89,18 +93,19 @@ class TotoCalibrationBatcher:
         import torch
         from ._toto_linear import _OriginLinearMode, _OriginLinearShapeError
 
-        first = entries[0][1]
-        model = entries[0][4]
+        _, first, model, _ = entries[0]
         torch.manual_seed(first._seed)
-        horizon = max(len(targets[row[0]]) for row in entries)
+        horizon = max(len(targets[index]) for index, *_ in entries)
         try:
-            values = torch.cat([row[2] for row in entries], dim=0)
-            masks = torch.cat([row[3] for row in entries], dim=0)
+            aligned = [fc._align_context(fc._inputs_['target'], fc._inputs_['target_mask'],
+                                         model.config.patch_size) for _, fc, _, _ in entries]
+            values = torch.cat([value for value, _, _ in aligned], dim=0)
+            masks = torch.cat([mask for _, mask, _ in aligned], dim=0)
             ids = torch.cat([row[1]._inputs_['series_ids'] for row in entries], dim=0)
             with torch.no_grad(), _OriginLinearMode(len(entries)):
                 predictions = model.forecast({'target': values, 'target_mask': masks, 'series_ids': ids},
                     horizon=horizon, decode_block_size=first.decode_block_size,
-                    has_missing_values=entries[0][2].shape[-1] != first._inputs_['target'].shape[-1])
+                    has_missing_values=aligned[0][2])
             array = predictions.detach().cpu().numpy()
         except (torch.OutOfMemoryError, _OriginLinearShapeError):
             # Release the failed batch's tensors before the caller retries serially.

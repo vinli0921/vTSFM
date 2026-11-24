@@ -94,7 +94,13 @@ class BatchedConformalIntervals(ConformalIntervals):
                 fitted = forecaster.clone().fit(y.iloc[:origin], fh=target.index)
                 clones.append(fitted)
                 targets.append(target)
-            predictions = tuple(self.batch_predict(tuple(clones), tuple(target.index for target in targets)))
+            result = self.batch_predict(tuple(clones), tuple(target.index for target in targets))
+            try:
+                iterator = iter(result)
+            except TypeError:
+                predictions = ()
+            else:
+                predictions = tuple(iterator)
             if len(predictions) != len(clones):
                 predictions = (None,) * len(clones)
             for origin, fitted, target, prediction in zip(origins, clones, targets, predictions):
@@ -107,7 +113,14 @@ class BatchedConformalIntervals(ConformalIntervals):
                 if values is None or not np.isfinite(values).all():
                     residuals.loc[y.index[origin]] = fitted.predict_residuals(target)
                 else:
-                    residuals.loc[y.index[origin], target.index] = target.to_numpy(dtype=float) - values
+                    if (pd.api.types.is_integer_dtype(target.dtype)
+                            and pd.api.types.is_integer_dtype(prediction.dtype)):
+                        # Subtract Python integers before rounding or fixed-width overflow.
+                        difference = target.astype(object) - prediction.astype(object)
+                        difference = difference.to_numpy(dtype=float, na_value=np.nan)
+                    else:
+                        difference = target.to_numpy(dtype=float) - values
+                    residuals.loc[y.index[origin], target.index] = difference
                 # Native sktime updates reuse these fitted origin forecasters.
                 self.forecasters_.append({'id': str(y.index[origin]), 'forecaster': fitted})
         return residuals
