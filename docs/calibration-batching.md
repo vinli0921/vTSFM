@@ -239,6 +239,19 @@ and `VTSFM_RECIPE_RESULTS` changes the directory. If a model misses the 1e-4
 prefix tolerance, keep the cap off for that model rather than loosening it.
 Times are recorded, not a speedup claim.
 
+Results on an A100-SXM4-40GB (driver 595.91.07) at `2b298f5`, FP32:
+
+| Model | Prefix max abs / rel difference (3 cutoffs) | Capped recipe | Labels vs uncapped |
+| --- | --- | --- | --- |
+| TimesFM (97 vs 128) | 0 / 0; 1,024 rejected | 7 anomalies, 1,512 s | uncapped cannot run |
+| Toto (97 vs 1,024) | 2.3e-5 / 3.1e-7 | 8 anomalies, 53 s | identical 8 (uncapped 289 s) |
+| Moirai (97 vs 1,024) | 2.0e-4 / 3.1e-6 | 8 anomalies, 509 s | not run (optional) |
+
+Every prefix check passed. Before the cap, TimesFM could not run this recipe
+and Moirai ran out of memory. Wall times are single runs and include model load.
+TimesFM and Moirai calibrate serially, one origin at a time; only Toto has a
+batch callback.
+
 ### VM runbook for the checkpoint checks
 
 On a fresh Linux VM with an idle CUDA 13 GPU, copy
