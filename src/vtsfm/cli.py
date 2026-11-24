@@ -19,7 +19,7 @@ from vtsfm.adapters.moirai2.spec import MOIRAI_ATTENTION_ENV, resolve_attention_
 from vtsfm.adapters.timesfm25.graph_config import (
     FORECAST_GRAPH_SHAPE, FORECAST_MODE_ENV, FORECAST_MODES, validate_fixed_forecast_execution,
 )
-from vtsfm.admission import FORECAST_LIMITS_ENV, resolve_cost, resolve_limits
+from vtsfm.admission import FORECAST_LIMITS_ENV, resolve_adapter_limits, resolve_cost
 from vtsfm.compilation import EXECUTION_ENV, EXECUTION_MODES, execution_mode
 from vtsfm.stepping import CONTINUOUS_ENV
 from vtsfm.precision import PRECISION_ENV, PRECISIONS, TF32_OVERRIDE_ENV, validate_precision
@@ -137,8 +137,9 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
             raise ValueError(f'--forecast-batch-rows must be between 2 and {MAX_FORECAST_BATCH_ROWS}')
         environment[FORECAST_BATCH_ROWS_ENV] = str(forecast_batch_rows)
     if selected.admission_limits is not None:
-        encoded = Path(forecast_limits).read_text() if forecast_limits is not None else None
-        limits = resolve_limits(selected.admission_limits, encoded)
+        if forecast_limits is not None:
+            environment[FORECAST_LIMITS_ENV] = Path(forecast_limits).read_text()
+        limits = resolve_adapter_limits(selected, environment)
         slots = int(command[command.index('--max-num-seqs') + 1])
         # The adapter owns this cost; its descriptor imports no model runtime.
         forecast_cost = resolve_cost(selected)
@@ -227,7 +228,7 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument('--forecast-batch-rows', type=int,
                        help='Enable bounded whole-forecast batching with this fused series limit (2–16)')
     serve.add_argument('--forecast-limits', metavar='JSON_FILE',
-                       help='Tighten the selected adapter\'s numerical limits using a JSON policy file')
+                       help='Set numerical limits within the qualified ceiling using a JSON file')
     serve.add_argument('--continuous-batching', action='store_true',
                        help='Enable experimental TimesFM forecast-block scheduling (default: 4 slots, 16 fused rows)')
     serve.add_argument('--forecast-queue-limit', type=int,

@@ -69,16 +69,49 @@ Remove `--dry-run` to serve. The resolved JSON appears as
 `VTSFM_FORECAST_LIMITS`; the launcher reads the file once and sends the same
 immutable policy to frontend and worker. It clears an inherited policy from a
 different server. Unknown fields, duplicate keys, noninteger/negative values,
-and increases above the declared ceilings fail before launch. Increasing the
+and values above the applicable ceilings fail before launch. Increasing the
 envelope requires new measurements and an intentional adapter metadata change.
 
 Direct `LLM`/`vllm` users can set the same environment variable before construction
-or use adapter defaults. Explicitly set `max_num_seqs` to 1–4. The model checks
-slots and resident accounting before checkpoint construction, so bypassing the
-launcher does not bypass startup validation. A byte cap too small for the
-configured worst corner and slot count is rejected at startup; lower the shape
-ceilings or slot count together with it. A tighter work/row limit can also reject
-a request that satisfies the separate context/horizon limits.
+or use adapter defaults. Set `max_num_seqs` within the selected policy. The model
+checks slots and resident bytes before checkpoint construction. A byte cap too
+small for the configured worst corner and slot count fails at startup. A tighter
+work or row limit can also reject a request within the context and horizon limits.
+
+## Wider eager FP32 profile
+
+Use the following `--forecast-limits` file for Toto on the reference A100:
+
+```json
+{"max_scheduled_requests": 16, "max_forward_bytes": 88081408}
+```
+
+For Moirai:
+
+```json
+{
+  "max_execution_rows": 16,
+  "max_execution_work": 571669504,
+  "max_scheduled_requests": 16,
+  "max_forward_bytes": 59769856
+}
+```
+
+```bash
+./scripts/serve.sh --adapter toto2 --forecast-limits limits.json \
+  --forecast-precision fp32 --forecast-execution eager \
+  --max-num-seqs 16 --forecast-batch-rows 16
+```
+
+Use `--adapter moirai2` with the Moirai file. Toto still admits up to 16 rows
+per request and Moirai up to eight. Both can fuse 16 rows from compatible
+requests in one call. The same Moirai profile bounds upstream and univariate
+attention. The tests below describe the measured A100 envelope.
+
+To qualify the same profile with the admission suite, set
+`VTSFM_FORECAST_LIMITS="$(cat limits.json)"`, `VTSFM_PRECISION=fp32`,
+`VTSFM_FORECAST_EXECUTION=eager`, and `NVIDIA_TF32_OVERRIDE=0` before running
+the adapter's command under [measurement and reproduction](#measurement-and-reproduction).
 
 ## Work and memory accounting
 
@@ -324,3 +357,131 @@ forecasts. The failed run and diagnostic are retained alongside the passing run.
 The highest sampled device peaks leave roughly 36 GiB of headroom on this
 otherwise idle 40 GiB A100. Keep the declared caps until new measurements
 qualify a larger envelope.
+
+### Wider Toto and Moirai probes — November 24, 2026
+
+[#86](https://github.com/vinli0921/vTSFM/issues/86) used the idle
+A100-SXM4-40GB with driver 595.91.07, vLLM 0.33.0 V1, Torch 2.14.0+cu130,
+eager FP32, and TF32 disabled. The checkpoint revisions above were unchanged.
+The serving source was `b3b74b0` with temporary numerical-limit overrides
+for these probes. The original admission suite passed four tests per adapter
+on that revision before the overrides.
+
+The single-request HTTP memory probes reuse the admission suite's synthetic
+inputs and native comparison. Each row is an absolute peak in GiB at the
+adapter's maximum context. The worker emptied its allocator cache and reset
+the Torch peaks before each probe. NVML sampled the whole device every 20 ms.
+
+| Adapter / attention | C | B | H | Torch allocated | Torch reserved | NVML device | Native parity |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Toto / upstream | 8192 | 32 | 96 | 1.794 | 2.135 | 3.163 | passed |
+| Toto / upstream | 8192 | 32 | 1024 | 3.634 | 4.492 | 5.520 | passed |
+| Toto / upstream | 8192 | 64 | 96 | 2.303 | 2.951 | 3.979 | passed |
+| Toto / upstream | 8192 | 64 | 1024 | 5.987 | 7.535 | 8.563 | passed |
+| Moirai / upstream | 7168 | 16 | 96 | 2.916 | 3.814 | 4.842 | passed |
+| Moirai / upstream | 7168 | 16 | 1024 | 3.594 | 4.100 | 5.128 | passed |
+| Moirai / upstream | 7168 | 32 | 96 | 5.778 | 7.555 | 8.583 | passed |
+| Moirai / upstream | 7168 | 32 | 1024 | 7.138 | 8.137 | 9.165 | passed |
+| Moirai / upstream | 7168 | 64 | 96 | 11.507 | 15.014 | 16.042 | passed |
+| Moirai / upstream | 7168 | 64 | 1024 | 14.225 | 16.209 | 17.237 | passed |
+| Moirai / univariate | 7168 | 16 | 96 | 1.227 | 1.812 | 2.840 | passed |
+| Moirai / univariate | 7168 | 16 | 1024 | 1.379 | 1.777 | 2.805 | passed |
+| Moirai / univariate | 7168 | 32 | 96 | 2.400 | 3.539 | 4.567 | passed |
+| Moirai / univariate | 7168 | 32 | 1024 | 2.707 | 3.480 | 4.508 | passed |
+| Moirai / univariate | 7168 | 64 | 96 | 4.752 | 6.963 | 7.991 | passed |
+| Moirai / univariate | 7168 | 64 | 1024 | 5.363 | 6.896 | 7.924 | passed |
+
+Every requested shape passed the native comparison at `rtol=atol=1e-4`.
+Moirai's univariate attention reduced the B64/H1024 device peak from 17.237
+to 7.924 GiB. These were isolated requests against temporary row limits.
+
+Pausing the server before submitting a wave of B1/C2048/H96 requests produced
+one actual model call per wave. The probes used Toto and Moirai upstream
+attention, with a fusion cap of 16 rows.
+
+| Adapter | 8 scheduled requests | 16 scheduled requests |
+| --- | --- | --- |
+| Toto | one 8-row call | one 16-row call |
+| Moirai | one 8-row call | one 16-row call |
+
+All 48 wave responses matched the native reference at `1e-4`. At each slot
+count a submitted request was disconnected before resuming scheduling. Engine
+and worker state drained, the cancelled request was absent from worker traces,
+and the next forecast matched the reference.
+
+#### Offered load
+
+The [#53](https://github.com/vinli0921/vTSFM/issues/53) rate grid and request
+shapes were replayed on the same pins with a four-slot fused control and a
+sixteen-slot configuration. Toto fused up to 16 rows in both arms. Moirai
+used upstream attention and a fusion cap of eight or 16 rows. The wider arm
+kept the established per-request limits. The minimum resident caps cover the
+maximum request shape in every active slot. Both arms used a queue cap of 128.
+
+Batch-one traffic used C2048. The mixed replay used B1/C512, B2/C512, B4/C1024,
+B1/C2048 and ragged B2/C384–512. All requests used H96. Each point offered
+100 open-loop HTTP arrivals in each of three repeats.
+The original `#53` trace archive was unavailable on this checkout. The rerun
+reconstructed the published workloads using the pinned MetroPT material and
+fresh fixed-seed Poisson arrivals, with identical inputs and dispatch times
+within each matched repeat. Configuration order was reversed for the middle
+repeat. Throughput counts decoded completions per elapsed wall time through
+queue drain. The p99 SLO measures from scheduled arrival through JSON decode.
+Startup, warmup and comparison of all nine quantiles against independent
+native outputs were outside timing.
+
+Each listed rate is the highest tested offered load that met p99 ≤ 500 ms in all three repeats.
+
+| Fused envelope | Toto batch one | Toto mixed | Moirai batch one | Moirai mixed |
+| --- | ---: | ---: | ---: | ---: |
+| #53 four slots | 20 req/s | No tested rate | 80 req/s | 10 req/s |
+| Rerun four slots | 40 req/s | No tested rate | 80 req/s | 10 req/s |
+| Rerun sixteen slots | 40 req/s | No tested rate | 80 req/s | 10 req/s |
+
+7,200 of 7,200 timed HTTP requests completed. 0 completed forecasts failed native parity.
+
+<details>
+<summary>Per-rate p99 and served throughput</summary>
+
+The table shows the largest p99 and mean served rate of the three repeats.
+
+| Adapter | Workload | Offered req/s | Four slots p99 (ms) | Sixteen slots p99 (ms) | Four slots served req/s | Sixteen slots served req/s |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Toto | Batch one | 5 | 169.9 | 153.2 | 5.24 | 5.24 |
+| Toto | Batch one | 10 | 156.3 | 153.5 | 10.43 | 10.43 |
+| Toto | Batch one | 20 | 176.1 | 166.6 | 20.60 | 20.63 |
+| Toto | Batch one | 40 | 267.5 | 175.1 | 39.34 | 40.02 |
+| Toto | Mixed | 10 | 686.1 | 596.9 | 10.11 | 10.12 |
+| Toto | Mixed | 30 | 3338.4 | 3345.8 | 16.79 | 18.04 |
+| Moirai | Batch one | 10 | 107.7 | 108.8 | 10.47 | 10.47 |
+| Moirai | Batch one | 20 | 102.6 | 100.8 | 20.80 | 20.80 |
+| Moirai | Batch one | 40 | 120.9 | 122.9 | 41.01 | 40.82 |
+| Moirai | Batch one | 80 | 226.2 | 130.0 | 75.30 | 78.65 |
+| Moirai | Mixed | 10 | 159.3 | 166.3 | 10.15 | 10.15 |
+| Moirai | Mixed | 30 | 672.7 | 845.7 | 27.84 | 28.30 |
+
+</details>
+
+The wider profile lowered the worst repeat's batch-one p99 from 268 to 175 ms
+for Toto at 40 req/s and from 226 to 130 ms for Moirai at 80 req/s. The highest
+passing rates on this grid were identical for the two settings. At 30 req/s
+mixed, Moirai's worst p99 rose from 673 to 846 ms.
+
+#### Admission at the selected limits
+
+The existing admission suite passed for both adapters at the opt-in limits.
+The Moirai maximum-wave check also passed with univariate attention. Each
+entry below takes the largest peak across three queued waves of 16 requests,
+each request at its adapter's maximum rows, context, and horizon. Native
+parity, cancellation drain, post-wave allocation stability, and response
+routing passed at the existing tolerances.
+
+| Adapter / attention | Rows per request | Calls per wave | Torch allocated (GiB) | Torch reserved (GiB) | NVML device (GiB) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Toto / upstream | 16 | 16 | 2.472 | 3.012 | 4.040 |
+| Moirai / upstream | 8 | 8 | 3.602 | 4.105 | 5.133 |
+| Moirai / univariate | 8 | 8 | 1.386 | 1.783 | 2.811 |
+
+The benchmark sources, raw samples, GPU and package metadata, request
+traces and cleanup records were retained under `results/issue86/` on the
+reference A100 host.

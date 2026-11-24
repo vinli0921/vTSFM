@@ -1,5 +1,6 @@
 """Pinned Moirai checkpoint and pooling settings."""
 
+from dataclasses import replace
 import json
 from vtsfm.adapters.base import AdapterSpec, FORECAST_VLLM_ARGS
 from vtsfm.adapters.forecast import ForecastSettings
@@ -27,6 +28,14 @@ MOIRAI2 = AdapterSpec(
     ),
     supports_group_attention=False,
     admission_limits=DEFAULT_LIMITS,
+    # The wider A100 profile covers a full forward of sixteen maximum requests.
+    eager_fp32_admission_ceiling=replace(
+        DEFAULT_LIMITS,
+        max_execution_rows=16,
+        max_execution_work=571_669_504,
+        max_scheduled_requests=16,
+        max_forward_bytes=59_769_856,
+    ),
     admission_cost='vtsfm.adapters.moirai2.admission:forecast_cost',
     execution_capabilities=ExecutionCapabilities(
         max_context=FORECAST_SETTINGS.max_context, max_horizon=FORECAST_SETTINGS.max_horizon,
