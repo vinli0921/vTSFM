@@ -1,22 +1,23 @@
 # vTSFM
 
-A general time-series foundation model (TSFM) extension for vLLM, with
-Chronos-2 plus minimal TimesFM 2.5, Toto 2 313M, and Moirai 2.0 small adapters.
-CPU-safe adapter metadata selects each model family's implementation, numerical
-IO, and serving settings.
-The `vtsfm` plugin uses the pinned Chronos-2 integration; the original `chronos2`
-plugin remains available as a comparator.
+vTSFM serves time-series foundation models through vLLM’s `POST /pooling`
+endpoint. TimesFM 2.5, Toto 2 313M, and Moirai 2.0 small share a numerical
+request format, device-resident forecasting, and optional cross-request batching
+on vLLM 0.33 V1. Chronos-2 remains the default CLI selection and has a separate
+vLLM 0.16 environment for reproducing the [original baseline](docs/baselines/2026-10-20/README.md).
 
-Shared batching uses a CPU-safe planner for compatibility, request and row
-budgets, and output routing. Numerical adapters can opt into executing compatible scheduled
-requests together. Model-specific normalization, patching, covariates, group
-semantics, and attention kernels belong to each adapter. The
-[historical results](docs/baselines/2026-10-20/README.md) measure the community
-Chronos plugin against native inference, before vTSFM-specific optimization.
+| Adapter | Serving behavior on `main` |
+| --- | --- |
+| `timesfm25` | Batches the normal and sign-flipped decodes together. Supports opt-in [forecast-block continuous batching](docs/continuous-batching.md) and a separate [fixed-shape CUDA graph mode](docs/timesfm-graph-serving.md). |
+| `toto2` | Uses the upstream 768-point decode block and bypasses unit-scaling autograd wrappers during inference. [Toto optimization and A100 results](https://github.com/vinli0921/vTSFM/pull/94) |
+| `moirai2` | Reuses forecast wrappers for the two most recent context-width and horizon pairs on the same model and device. Each request supplies fresh inputs. [Moirai optimization and A100 results](https://github.com/vinli0921/vTSFM/pull/93) |
+
+The [feature tracker](https://github.com/vinli0921/vTSFM/issues/87) and
+[experiment tracker](https://github.com/vinli0921/vTSFM/issues/101) link to active work and measurements.
 
 ## Get started on a CPU
 
-Clone the repository using an account with access to this private project.
+Clone the repository and set up the CPU environment.
 
 ```bash
 git clone https://github.com/vinli0921/vTSFM.git
@@ -55,6 +56,10 @@ does not install or change drivers. Model downloads need network access and disk
 space; keep weights outside Git. On Columbia's Insomnia cluster, whose drivers
 predate CUDA 13, follow [the Insomnia setup guide](docs/insomnia.md).
 
+For TimesFM, Toto, or Moirai, use the [adapter-specific setup below](#timesfm-25-toto-2-and-moirai-20).
+
+### Chronos-2 baseline
+
 ```bash
 ./scripts/setup.sh
 ./scripts/doctor.sh
@@ -90,14 +95,15 @@ use the smaller numerical contract described below.
 
 ## TimesFM 2.5, Toto 2, and Moirai 2.0
 
-These adapters use the same vLLM pooling interface and preserve upstream forecast
-semantics. Whole-forecast batching and TimesFM block scheduling are described
-below; attention remains upstream-owned. Each has its own environment, leaving
-`.venv` and the Chronos baseline unchanged:
+Each adapter has its own Linux GPU environment. Start a TimesFM server in one
+terminal, then send the example forecast request from a second terminal.
 
 ```bash
 ./scripts/setup.sh --adapter timesfm25
 ./scripts/serve.sh --adapter timesfm25 --backend vtsfm --port 8001
+```
+
+```bash
 curl --fail-with-body -H 'Content-Type: application/json' \
   --data-binary @examples/timesfm25.json http://127.0.0.1:8001/pooling
 ```
@@ -117,10 +123,9 @@ TimesFM/Toto and 7168 for Moirai, reserving room for the prediction horizon.
 TimesFM keeps histories and forecast tensors on the model device and uses the
 pinned upstream decoder. It preserves the reference normalization, continuous
 quantile head, flip invariance, positivity, and crossing correction.
-Toto uses the documented 768-point block decoding setting. Moirai keeps
-histories and forecasts on the model device and calls the pinned upstream
-`Moirai2Forecast.forward`, including its recursive quantile forecast. Shorter
-histories in a request are masked as padding, so each forecasts as it would alone.
+Moirai calls the pinned upstream `Moirai2Forecast.forward`, including its
+recursive quantile forecast. Padding masks mark the start of each history
+when a request contains series of different lengths.
 
 Moirai has an experimental, opt-in attention path for long contexts:
 `VTSFM_MOIRAI_ATTENTION=univariate ./scripts/serve.sh --adapter moirai2`. It runs
@@ -137,15 +142,14 @@ for supported inputs, concurrent serving, cancellation, and the manual TimesFM
 lifecycle suite. Response metadata travels with each result; IO keeps no pending
 request map.
 
-TimesFM now enforces a measured numerical envelope: at most 16 series per
-request, context 8192, horizon 1024, and four scheduled requests. The worker
-splits compatible work within execution budgets. Use `--forecast-limits FILE`
-to tighten the policy; see [numerical admission](docs/numerical-admission.md) for
-defaults, errors, memory measurements, and the manual GPU suite. Toto and Moirai
-also have model-specific policies and bounded whole-forecast batching, qualified
-on the reference A100. Request caps are 16 series for Toto and eight for Moirai,
-with at most four scheduled requests. These finite probes establish the tested
-envelope; they do not establish a throughput speedup.
+Whole-forecast serving defaults to one scheduled request. To enable
+cross-request fusion, start the server with `--max-num-seqs 4 --forecast-batch-rows 8`.
+The worker groups compatible series within each adapter’s row and work limits.
+On `main`, all three adapters admit up to four scheduled requests. TimesFM and
+Toto allow 16 series per request and per model call, and Moirai allows eight.
+Use `--forecast-limits FILE` to tighten these limits. The proposed 16-slot
+profiles are tracked separately for [Toto and Moirai](https://github.com/vinli0921/vTSFM/pull/99)
+and [TimesFM](https://github.com/vinli0921/vTSFM/pull/102). [Admission policies and A100 measurements](docs/numerical-admission.md)
 
 TimesFM also supports experimental forecast-block continuous batching:
 
@@ -158,7 +162,9 @@ four slots, bounded active numerical work, and 16 waiting/running requests per
 API process (overflow: HTTP 503). Final responses are unchanged. See
 [continuous batching](docs/continuous-batching.md) for adapter-owned caches, the
 pinned V1 scheduler/worker hooks, parity tests, memory measurements and offered-load
-benchmarks. This mode is opt-in.
+benchmarks. The stepper packs prefill and decode KV and assembles all nine
+quantiles once at completion. On the archived A100 H1024 burst, it served
+10.56 requests/s versus 10.40 for whole-forecast batching. [Workload and six paired runs](docs/baselines/2026-11-20-timesfm-quantile-assembly/README.md)
 
 An isolated [native-attention/KV feasibility experiment](docs/timesfm-native-kv.md)
 reuses vLLM's block allocator and Triton backend for TimesFM. It is a manual
@@ -186,24 +192,24 @@ CUDA_VISIBLE_DEVICES='' VTSFM_TEST_ADAPTER=timesfm25 \
   .venv-timesfm25/bin/python -m pytest tests/test_forecast_runtime.py -q
 ```
 
-This downloads the pinned checkpoint. GPU HTTP smoke tests passed for all three
-on an RTX 4080 Laptop GPU using cached checkpoints, FP32, eager execution, and
-`--gpu-memory-utilization 0.35`. Checks covered examples, unequal history lengths,
-and repeated requests; they do not establish performance or forecast accuracy.
+This downloads the pinned checkpoint. On an idle GPU, the manual suite checks
+served forecasts against independent native forecasts on synthetic and pinned
+AssetOpsBench cases. Its performance profile measures matched native/vLLM HTTP
+throughput, p95 latency, and sampled GPU memory.
 
-For a manual native-GPU versus HTTP parity run across all three adapters, use
-`./scripts/test-models.sh`. It includes synthetic and pinned AssetOpsBench cases;
-`--profile accuracy` adds observed-label scoring, and `--profile performance`
-compares matching native/vLLM HTTP workloads. See the [model integration guide](docs/model-integration.md)
-for environment setup, idle-GPU requirements, per-model selection, and saved
-pre-merge evidence.
+```bash
+./scripts/test-models.sh --adapter timesfm25 --profile integration
+./scripts/test-models.sh --adapter timesfm25 --profile performance --contexts 512 --batches 1 --clients 1,4
+```
+
+Use `--profile accuracy` for forecast scoring. [Model integration guide](docs/model-integration.md) · [Multi-signal AssetOpsBench measurements](docs/baselines/2026-11-14-assetops-signal-accuracy/README.md)
 
 `--forecast-execution compile` opts TimesFM, Toto and Moirai into experimental
 neural compilation. Eager execution stays the default. See
 [compiled execution](docs/compiled-execution.md) for the native numerical
 boundaries, manual validation commands and remaining qualification work.
 
-## Run a comparison
+## Reproduce the Chronos-2 comparison
 
 Benchmarks require exclusive access to the selected GPU and a free port. The
 runner refuses occupied resources, launches its own servers sequentially, and
@@ -255,9 +261,11 @@ fixture. See [data and measurement details](docs/architecture.md#benchmark-contr
 
 ## Reproducible runtime pins
 
-Experimental worker precision controls are documented in
-[forecast precision](docs/precision.md). FP32 remains the default; native BF16
-for Toto/Moirai and optional TF32 require explicit selection and GPU validation.
+FP32 remains the default. Toto and Moirai support opt-in native BF16, and
+all three numerical adapters expose a TF32 option. In the five-signal A100
+parity run at `b3b74b0`, Moirai passed in all tested modes. Toto BF16 passed
+all five signals with `VTSFM_TOTO_FAST_UNIT_SCALING=0` and failed all five with
+fast scaling enabled. TimesFM TF32 passed two of five signals. [Precision settings](docs/precision.md) · [Qualification results and remaining work](https://github.com/vinli0921/vTSFM/issues/21)
 
 | Adapter | vLLM | Torch | Torch CUDA runtime | Transformers |
 | --- | --- | --- | --- | --- |
@@ -265,7 +273,7 @@ for Toto/Moirai and optional TF32 require explicit selection and GPU validation.
 | Chronos-2 baseline | 0.16.0 (V1 runner) | 2.9.1 | 12.8 | 4.57.6 |
 
 The vLLM release determines the compatible Torch and CUDA binaries. The
-forecasting launcher selects V1 because V2 does not support the `plugin` task.
+forecasting launcher selects V1 because the pinned releases require it for the `plugin` task.
 See the [runtime upgrade spike](docs/runtime-upgrade.md) for the A100 results.
 
 The remaining settings for the Chronos-2 baseline are:
@@ -292,7 +300,7 @@ and GPU checks.
 | Forecast-block scheduling | `src/vtsfm/stepping.py`, `continuous_scheduler.py`, `block_worker.py`, `block_pooling.py` | Schedule resumable TimesFM forecasts with request-owned state and bounded intake |
 | Plugin integration | `src/vtsfm/plugin.py`, `src/vtsfm/cli.py` | Register lazy targets and select adapter/backend settings |
 | Numerical transport and output routing | `src/vtsfm/adapters/multimodal.py`, `transport.py`, `pooling.py`, `src/vtsfm/worker.py` | Preserve request identity and crop per-request forecasts in actual worker slot order |
-| Kernel research | Adapter model attention boundary | Profile and implement family-specific kernels; not implemented yet |
+| Attention experiments | `src/vtsfm/adapters/moirai2/attention.py`, `src/vtsfm/adapters/timesfm25/native_stepping.py` | Opt-in univariate fused SDPA for Moirai and a TimesFM backend using vLLM’s paged attention |
 | Measurement | `benchmarks/`, `src/vtsfm/benchmark_memory.py` | Reproduce native/community/vTSFM comparisons and review raw samples |
 
 The former model, IO, and native module paths remain compatibility shims. To add a
@@ -308,10 +316,6 @@ Read [architecture](docs/architecture.md) and [contribution guidance](CONTRIBUTI
 before changing plugin discovery or the serving contract.
 See [numerical transport](docs/numerical-transport.md) for the pinned vLLM worker
 boundary and the manual checkpoint-free multi-request probe.
-TimesFM, Toto, and Moirai expose scheduled concurrency through
-`serve --max-num-seqs 3`; the default is one. For experimental
-whole-forecast batching, combine `--max-num-seqs 4` with
-`--forecast-batch-rows 8`. See the [batching boundaries](docs/numerical-transport.md#current-execution-boundary).
 
 Optional [conformal calibration batching](docs/calibration-batching.md) provides
 native Toto-2 batching plus an optional AssetOpsBench factory patch.
