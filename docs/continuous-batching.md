@@ -338,7 +338,7 @@ rounds on the A100, including for equal-length inputs. This prototype therefore
 keeps model calls isolated per owner.
 There is no attention KV state. Requests own their expanded targets, masks and
 output buffers until completion or cancellation. This mode is experimental.
-Ordinary Moirai serving still runs complete forecasts.
+Ordinary Moirai serving still runs complete forecasts. The [A100 benchmark](baselines/2026-11-25-moirai-forecast-blocks/README.md) reports throughput, p95 latency, memory and native parity for both modes.
 
 In the pinned Linux Moirai environment, exercise native parity without occupying
 a GPU, or run the HTTP lifecycle and maximum-shape check on an idle A100:
