@@ -194,6 +194,12 @@ def model_run():
                 metadata.setdefault('server_execution', {})[kind] = {
                     'forecast_execution': serve_environment.get(EXECUTION_ENV, 'eager'),
                     'triton_default_fp_fusion': serve_environment.get('TRITON_DEFAULT_FP_FUSION')}
+                if kind == 'vtsfm' and adapter == 'timesfm25':
+                    from vtsfm.adapters.timesfm25.spec import COMPILE_SCOPE_ENV, FLIP_LAYOUT_ENV
+
+                    metadata['server_execution'][kind].update(
+                        timesfm_compile_scope=serve_environment.get(COMPILE_SCOPE_ENV, 'core'),
+                        timesfm_flip_layout=serve_environment.get(FLIP_LAYOUT_ENV, 'packed'))
                 if kind == 'vtsfm' and adapter == 'toto2':
                     scaling_mode = serve_environment.get('VTSFM_TOTO_FAST_UNIT_SCALING', '1')
                     metadata['server_execution'][kind].update(

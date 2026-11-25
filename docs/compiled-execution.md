@@ -86,6 +86,12 @@ error before either patch is attempted.
 
 ## Validation
 
+### Wider FP32 scopes and native arithmetic
+
+TimesFM can opt into `VTSFM_TIMESFM_COMPILE_SCOPE=wide` or `whole` with `--forecast-execution compile` for whole-forecast serving. Whole compilation substantially improved warm HTTP throughput for repeated MetroPT shapes. Chiller condenser flow still exceeded the strict native tolerance, including with separate flip passes. Eager with `VTSFM_TIMESFM_FLIP_LAYOUT=split` matched native on the five-signal and integration suites. [TimesFM A100 study](baselines/2026-11-25-timesfm-compile/README.md)
+
+Toto can opt into `VTSFM_TOTO_FAST_UNIT_SCALING=stride-aware`. In eager FP32 it keeps the scalar identity shortcut for contiguous inputs and executes the original multiplication on strided inputs or tensor-valued scales. That mode passed the tested stress signals and integration cases. Whole compilation still exceeded tolerance on condenser flow. [Toto A100 follow-up](baselines/2026-11-25-toto-native-layout/README.md)
+
 ### Experimental whole-forecast scope for Toto FP32
 
 The default compiled Toto path wraps `model.transformer.forward` and keeps
