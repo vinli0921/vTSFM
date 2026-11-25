@@ -15,6 +15,7 @@ FORECAST_SETTINGS = ForecastSettings(
 )
 COMPILE_SCOPE_ENV = 'VTSFM_TIMESFM_COMPILE_SCOPE'
 COMPILE_SCOPES = ('core', 'wide', 'whole', 'positioned-eager', 'positioned')
+FLIP_LAYOUT_ENV = 'VTSFM_TIMESFM_FLIP_LAYOUT'
 
 
 def compile_scope(environment, execution, precision, *, continuous=False):
@@ -27,6 +28,16 @@ def compile_scope(environment, execution, precision, *, continuous=False):
         raise ValueError(f'TimesFM {scope} requires whole-forecast serving with '
                          f'--forecast-execution {required_mode} and FP32')
     return scope
+
+
+def flip_layout(environment, precision, *, independent_whole_forecast):
+    """Select the experimental upstream flip geometry for independent FP32 requests."""
+    layout = environment.get(FLIP_LAYOUT_ENV, 'packed')
+    if layout not in ('packed', 'split'):
+        raise ValueError(f"{FLIP_LAYOUT_ENV} must be 'packed' or 'split', got {layout!r}")
+    if layout == 'split' and (precision not in (None, 'fp32') or not independent_whole_forecast):
+        raise ValueError('TimesFM split flips require independent whole-forecast serving in FP32')
+    return layout
 
 
 TIMESFM25 = AdapterSpec(

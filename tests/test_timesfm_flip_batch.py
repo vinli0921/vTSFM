@@ -89,6 +89,29 @@ def test_whole_forecast_decodes_both_flips_in_one_call(runtime, monkeypatch, len
 
 
 @pytest.mark.parametrize('lengths,horizon,offset', CASES)
+def test_split_layout_keeps_native_flip_batch_geometry(runtime, monkeypatch, lengths, horizon, offset):
+    values = context(lengths, offset)
+    original = values.clone()
+    with torch.inference_mode():
+        expected = two_call_forecast(runtime.model, values, horizon)
+    runtime.flip_layout = 'split'
+    decode, calls = runtime.model.decode, []
+
+    def counted(horizon, inputs, masks):
+        calls.append((inputs.clone(), masks.clone()))
+        return decode(horizon, inputs, masks)
+
+    monkeypatch.setattr(runtime.model, 'decode', counted)
+    actual = runtime.forecast(values, horizon)
+    assert len(calls) == 2
+    assert calls[0][0].shape[0] == calls[1][0].shape[0] == len(lengths)
+    torch.testing.assert_close(calls[0][0], -calls[1][0], rtol=0, atol=0)
+    assert torch.equal(calls[0][1], calls[1][1])
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(values, original, rtol=0, atol=0, equal_nan=True)
+
+
+@pytest.mark.parametrize('lengths,horizon,offset', CASES)
 def test_block_mode_matches_the_two_call_forecast(runtime, lengths, horizon, offset):
     values = context(lengths, offset)
     with torch.inference_mode():
