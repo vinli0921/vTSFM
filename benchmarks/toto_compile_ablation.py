@@ -18,6 +18,7 @@ SCOPE = {
     'eager': ('eager', 'optimized'),
     'eager-native-scaling': ('eager', 'upstream'),
     'eager-tensor-scale': ('eager', 'device'),
+    'eager-scale-multiply': ('eager', 'multiply'),
     'whole': ('whole', 'optimized'),
     'whole-tensor-scale': ('whole', 'device'),
     'whole-scale-multiply': ('whole', 'multiply'),
