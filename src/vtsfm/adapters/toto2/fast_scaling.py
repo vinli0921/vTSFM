@@ -23,8 +23,9 @@ Numerics: a scale of exactly 1.0 returns the input tensor itself rather than
 ``1.0 * x``. Values are identical, but the result keeps the input's strides
 where the multiply could have produced a contiguous copy, so a later kernel may
 round differently. A native-layout evaluation retains the literal forward
-multiplication while bypassing autograd bookkeeping. Its tensor-valued
-scales never require a Python truth test.
+multiplication while bypassing autograd bookkeeping. The stride-aware option
+keeps the shortcut for contiguous inputs and Python scalar identity scales.
+Neither of these policies reads a tensor scale in a Python condition.
 """
 
 import contextlib
@@ -55,7 +56,10 @@ def _fast(input, fwd_scale, bwd_scale):
     mode = _active.get()
     if not mode or torch.is_grad_enabled():
         return None
-    if mode != 'native-layout' and fwd_scale == 1.0:
+    if mode == '1':
+        return input if fwd_scale == 1.0 else fwd_scale * input
+    if (mode == 'stride-aware' and not isinstance(fwd_scale, torch.Tensor)
+            and fwd_scale == 1.0 and input.is_contiguous()):
         return input
     return fwd_scale * input
 
@@ -122,9 +126,11 @@ def uninstall():
 
 
 @contextlib.contextmanager
-def fast_unit_scaling(enabled=True, *, preserve_layout=False):
-    """Use the shims for calls made in this block when grad is disabled."""
-    token = _active.set('native-layout' if enabled and preserve_layout else enabled)
+def fast_unit_scaling(enabled=True, *, mode='1'):
+    """Use the selected shim for calls in this inference-only block."""
+    if mode not in ('native-layout', 'stride-aware'):
+        mode = '1'
+    token = _active.set(mode if enabled else False)
     try:
         yield
     finally:

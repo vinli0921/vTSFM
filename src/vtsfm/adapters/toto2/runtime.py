@@ -89,9 +89,7 @@ class TotoRuntime:
         # One variate per batch element keeps every row an independent series.
         inputs = {'target': target.unsqueeze(1), 'target_mask': mask.unsqueeze(1),
                   'series_ids': torch.zeros((len(target), 1), dtype=torch.long, device=target.device)}
-        with fast_scaling.fast_unit_scaling(
-            self.fast_unit_scaling, preserve_layout=self.unit_scaling_mode == 'native-layout',
-        ):
+        with fast_scaling.fast_unit_scaling(self.fast_unit_scaling, mode=self.unit_scaling_mode):
             quantiles = self.model.forecast(inputs, horizon=horizon, decode_block_size=DECODE_BLOCK_SIZE)
         # Upstream returns [9 quantiles, rows, variates, horizon].
         # Public transport is FP32 and owns only the requested horizon, even
