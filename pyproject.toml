@@ -39,8 +39,11 @@ benchmark = [
 ]
 dev = ["pytest==8.4.2", "build>=1.2,<2", "ruff==0.14.0"]
 evaluation = ["fev==0.10.0"]
-# accelerate: the AssetOps TimesFM card loads with device_map (#19).
-recipes = ["numpy==2.2.6", "pandas==2.3.3", "sktime==1.2.0", "accelerate==1.16.0"]
+recipes = ["numpy==2.2.6", "pandas==2.3.3", "sktime==1.2.0"]
+# The AssetOps TimesFM card loads with device_map, which needs accelerate (#19).
+# Separate from recipes: accelerate requires Torch, which the CPU CI job and
+# .venv do not install. Add it to a GPU environment for the TimesFM check.
+recipes-timesfm2 = ["accelerate==1.16.0", "torch==2.14.0"]
 # AssetOps Moirai catalog card (sktime's vendored Moirai2Forecast) for the #19
 # recipe checks. Kept apart from moirai2: uni2ts pins gluonts~=0.14.3, which
 # cannot consume the vendored forecaster's tuple output. No uni2ts here.

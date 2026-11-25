@@ -147,8 +147,9 @@ Per model, through the AssetOps catalog cards:
     indexes the steps it needs.
   - The 97-step capped request fits the unmodified card. The uncapped recipe's
     1,844-step request never can.
-  - The card loads with `device_map`, which needs `accelerate`; the `recipes`
-    extra pins `accelerate==1.16.0`.
+  - The card loads with `device_map`, which needs `accelerate`. The
+    `recipes-timesfm2` extra pins `accelerate==1.16.0`; it is separate from
+    `recipes` because `accelerate` requires Torch.
 - **Moirai 2.0:** the round 4 card (sktime's vendored `Moirai2Forecast`) runs in
   its own environment, `.venv-recipes-moirai2`. Build it with
   `scripts/setup.sh --recipes moirai2` from the `recipes-moirai2` extra.
@@ -269,7 +270,7 @@ git apply ~/issue19-conformal-cap.patch
 ./scripts/setup.sh --adapter toto2
 ./scripts/setup.sh --recipes moirai2
 UV=.tools/uv/uv; [ -x "$UV" ] || UV=uv
-"$UV" pip install --python .venv-toto2/bin/python -e '.[recipes,toto2]' \
+"$UV" pip install --python .venv-toto2/bin/python -e '.[recipes,recipes-timesfm2,toto2]' \
   'toto-models==1.0.0' 'skpro==2.14.0' 'torch==2.14.0'
 
 # 3. Pinned AssetOpsBench. The tests patch a temporary copy; the checkout
