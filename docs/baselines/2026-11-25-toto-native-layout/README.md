@@ -42,15 +42,51 @@ scaling change cut p50 to 10.06 ms and still produced 117 misses. The stride-awa
 compiled control took 10.37 ms p50 with 145 misses. It took 78.8 s for first
 use, compared with 28.9 s in the original whole-compile control. This arithmetic
 probe uses a separate measurement boundary from the earlier HTTP comparison.
+The all-multiply compiled arm also missed 145 values at 10.69 ms p50. With
+tensor scales kept on-device and legacy scalar identity scaling, compiling
+only the transformer missed 113 values at 12.00 ms, and compiling the outer
+forecast with the transformer eager missed 102 at 61.11 ms.
 
-## End-to-end qualification
+## End-to-end qualification and serving throughput
 
-Eager serving with `VTSFM_TOTO_FAST_UNIT_SCALING=native-layout` matched the
+Two eager inference modes (`native-layout` and `stride-aware`) matched the
 independent native checkpoint bit for bit across five AssetOpsBench signals.
-The five B5/C512/H96 requests compared 21,600 quantile values, including all
-4,320 condenser-flow values, and scored 2,400 observed labels. The native and
-served accuracy scores were identical. The existing `rtol=atol=1e-4` gate and
-checkpoint were used both in the reproducer and the HTTP profile.
+Each arm compared 21,600 quantiles and scored 2,400 observed labels on
+B5/C512/H96 requests. The original eager path missed 69 of 4,320 condenser-flow
+values. A separate eager `stride-aware` integration run matched all 8,586 values
+across six cases, including sparse quantiles on ragged inputs, H800 crossing
+the native decode-block boundary, repeated shapes, and two MetroPT windows.
+
+Whole-forecast compilation with stride-aware scaling still missed **145 of
+4,320 condenser-flow quantiles** over HTTP. The other four signals passed.
+The strict, unchanged `rtol=atol=1e-4` check applies to every quantile. Keep the
+whole-forecast compile path experimental and use eager when strict correctness
+on this workload matters.
+
+| MetroPT workload | Legacy req/s | Stride-aware req/s | Throughput gain | Legacy → stride-aware p95 |
+| --- | ---: | ---: | ---: | ---: |
+| B1/C2048/H96, one client | 13.41 | 14.07 | 4.9% | 76.10 → 72.85 ms |
+| B1/C2048/H96, four clients | 14.57 | 15.42 | 5.8% | 278.47 → 267.37 ms |
+| B4/C512/H96, one client | 13.13 | 13.65 | 4.0% | 78.49 → 77.06 ms |
+| B4/C512/H96, four clients | 14.54 | 15.15 | 4.2% | 281.68 → 274.72 ms |
+
+The HTTP comparison used four fresh workers in legacy/stride/stride/legacy
+order with shape order reversed in the second block. All 1,600 timed requests
+completed. The independent native output check ran before each timed shape.
+Each cell pools 200 requests after warmup. Throughput divides completions by
+summed elapsed wall time. p95 uses the pooled client latencies and includes
+queueing at the one serving slot. Both arms peaked at 1,312.63 MiB of worker
+Torch allocation for B1 and 1,313.89 MiB for B4, and at 2,416.56 MiB of sampled
+device residency. The tracked serving revision was `3ca81ca`. Its untracked
+`.venv-toto2` symlink addressed the same pinned environment in all arms.
+NVML ownership checks found no foreign GPU processes, and each worker shut
+down cleanly.
+
+Set the experimental policy before starting eager FP32 serving.
+
+```bash
+VTSFM_TOTO_FAST_UNIT_SCALING=stride-aware ./scripts/serve.sh --adapter toto2 --forecast-precision fp32
+```
 
 ## Reproduce the precision ablation
 
