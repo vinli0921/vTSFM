@@ -104,6 +104,8 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
     if selected.name == 'timesfm25':
         scope = timesfm_compile_scope(environment, mode, forecast_precision, continuous=continuous_batching)
         if scope != 'core':
+            if timesfm_forecast_mode is not None:
+                raise ValueError('TimesFM positioned forecasts require the standard whole-forecast serving path')
             forecast_precision = 'fp32'
     else:
         environment.pop(TIMESFM_COMPILE_SCOPE_ENV, None)
