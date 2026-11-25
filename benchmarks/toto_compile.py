@@ -54,8 +54,7 @@ def serve(args, monitor, owner, native, common, record, cache):
     command, environment = build_vllm_command(adapter=args.adapter, port=args.port, benchmark=True,
         forecast_execution='eager' if args.arm in EAGER_ARMS else 'compile', forecast_precision='fp32',
         max_num_seqs=1)
-    if args.adapter == 'timesfm25':
-        command[command.index('--worker-extension-cls') + 1] = 'benchmarks.compile_worker.CompileMetrics'
+    command[command.index('--worker-extension-cls') + 1] = 'benchmarks.compile_worker.CompileMetrics'
     environment.update(common, TORCHINDUCTOR_CACHE_DIR=str(Path(cache) / 'inductor'),
                        TRITON_CACHE_DIR=str(Path(cache) / 'triton'))
     command += ['--gpu-memory-utilization', '0.35', '--no-async-scheduling']
@@ -78,7 +77,10 @@ def serve(args, monitor, owner, native, common, record, cache):
                 raise AssertionError(f'Wrong active {args.adapter} path: {scope}')
             if args.adapter == 'timesfm25' and scope['scope'] != args.arm:
                 raise AssertionError(f'Unexpected TimesFM scope: {scope}')
-            if args.adapter == 'toto2' and (not scope['fast_unit_scaling'] or len(scope['installed_shims']) != 2):
+            if args.adapter == 'toto2' and (
+                scope['unit_scaling_mode'] != args.toto_unit_scaling
+                or not scope['fast_unit_scaling'] or len(scope['installed_shims']) != 2
+            ):
                 raise AssertionError(f'Unexpected Toto scaling path: {scope}')
             if Path(scope['runtime_file']).resolve() != ROOT / f'src/vtsfm/adapters/{args.adapter}/runtime.py':
                 raise AssertionError(f'Worker imported a different checkout: {scope}')
@@ -134,6 +136,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--adapter', choices=SCOPE_ENVS, default='toto2')
     parser.add_argument('--arm', required=True, choices=['eager', 'core', 'wide', 'whole', 'positioned-eager', 'positioned'])
+    parser.add_argument('--toto-unit-scaling', choices=['1', 'native-layout'], default='1')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--data-dir', type=Path, required=True)
     parser.add_argument('--shapes', nargs='+', type=shape, default=[(1, 2048, 96), (4, 512, 96)])
@@ -146,6 +149,8 @@ def main():
     args = parser.parse_args()
     if args.adapter == 'toto2' and args.arm not in ('eager', 'core', 'whole'):
         parser.error(f'{args.arm} is only defined for TimesFM')
+    if args.adapter != 'toto2' and args.toto_unit_scaling != '1':
+        parser.error('The alternative unit-scaling policy is only defined for Toto')
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=False)
     record = {'adapter': args.adapter, 'arm': args.arm, 'status': 'running', 'points': [], 'started_utc_epoch': time.time(),
@@ -163,7 +168,7 @@ def main():
                  for rows, width, horizon in args.shapes]
         common = dict(CUDA_VISIBLE_DEVICES=str(args.gpu), CUDA_DEVICE_ORDER='PCI_BUS_ID',
             HF_HUB_OFFLINE='1', NVIDIA_TF32_OVERRIDE='0', TRITON_DEFAULT_FP_FUSION='0',
-            OMP_NUM_THREADS='4', VTSFM_TOTO_FAST_UNIT_SCALING='1', PYTHONUNBUFFERED='1',
+            OMP_NUM_THREADS='4', VTSFM_TOTO_FAST_UNIT_SCALING=args.toto_unit_scaling, PYTHONUNBUFFERED='1',
             PYTHONPATH=os.pathsep.join([str(ROOT / 'src'), str(ROOT / 'tests'), str(ROOT)]))
         reference_environment = dict(os.environ, **common)
         reference_environment.update(VTSFM_FORECAST_EXECUTION='eager', VTSFM_PRECISION='fp32')

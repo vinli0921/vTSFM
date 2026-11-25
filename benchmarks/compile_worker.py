@@ -1,4 +1,4 @@
-"""Untimed probe for the TimesFM compilation path used by the serving worker."""
+"""Untimed probes for compilation and arithmetic in the serving worker."""
 
 import inspect
 
@@ -6,6 +6,12 @@ from vtsfm.benchmark_memory import MemoryMetrics
 
 
 class CompileMetrics(MemoryMetrics):
+    def bench_toto_compile_scope(self):
+        runtime = self.model_runner.get_model().runtime
+        result = super().bench_toto_compile_scope()
+        result['unit_scaling_mode'] = getattr(runtime, 'unit_scaling_mode', '1')
+        return result
+
     def bench_timesfm_compile_scope(self):
         runtime = self.model_runner.get_model().runtime
         targets = []
