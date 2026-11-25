@@ -17,7 +17,15 @@ All compile arms keep Triton contraction and Inductor CUDA graphs disabled. The 
 
 The wide and whole scopes matched upstream in the retained FP32 B1/C512/H96 and B16/C2048/H800 regression, including changed values, repeat calls after shape changes and input immutability. The wide test observed 24 unique Dynamo graphs and the whole test observed 42.
 
-The separate five-signal AssetOpsBench HTTP check found the chiller condenser-water-flow limitation in ordinary eager and wide. Each case had 4,320 quantile values. Eager missed 69 and wide missed 57, in the same input row. The native references matched exactly. The scopes shared 33 failures, with 36 cells specific to eager and 24 specific to wide. The other four signals passed in both scopes. The configured tolerance remains 0.0001 absolute plus 0.0001 relative.
+The separate five-signal AssetOpsBench HTTP check passed four signals in every arm. Chiller condenser flow produced strict parity misses in the same input row across ordinary eager, wide and whole. Each case had 4,320 quantile values. All three native reference forecasts matched exactly. The configured tolerance was 0.0001 absolute plus 0.0001 relative.
+
+| Scope | Chiller misses | Shared with eager | Candidate-only misses | Maximum absolute error |
+| --- | ---: | ---: | ---: | ---: |
+| Eager | 69 | 69 | 0 | 0.00390625 |
+| Wide | 57 | 33 | 24 | 0.00610352 |
+| Whole | 59 | 46 | 13 | 0.00366211 |
+
+The wider scopes reduced the total miss count on this input and introduced new failures at other quantile cells. Broad compilation remains opt-in.
 
 ## Position-known prefill ablation
 
