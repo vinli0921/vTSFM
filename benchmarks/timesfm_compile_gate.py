@@ -165,6 +165,11 @@ def run(args):
             monitor.assert_idle()
             child = owner.spawn(command, env, 'candidate')
             guard = _GuardedMonitor(monitor, child, result)
+            result['gpu_ownership']['method'] = (
+                'Controller snapshots of NVML compute and graphics owners about every 250 ms '
+                'during the child lifetime. Device-call timers do not query NVML. Detection '
+                'excludes the point and cleanup stops only owned subprocesses.'
+            )
             deadline = time.monotonic() + args.startup_timeout
             while child.poll() is None:
                 guard.assert_owned()
