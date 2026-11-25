@@ -77,6 +77,8 @@ def serve(args, monitor, owner, native, common, record, cache):
                 raise AssertionError(f'Wrong active {args.adapter} path: {scope}')
             if args.adapter == 'timesfm25' and scope['scope'] != args.arm:
                 raise AssertionError(f'Unexpected TimesFM scope: {scope}')
+            if args.adapter == 'timesfm25' and scope['flip_layout'] != args.timesfm_flip_layout:
+                raise AssertionError(f'Unexpected TimesFM flip layout: {scope}')
             if args.adapter == 'toto2' and (
                 scope['unit_scaling_mode'] != args.toto_unit_scaling
                 or not scope['fast_unit_scaling'] or len(scope['installed_shims']) != 2
@@ -137,6 +139,7 @@ def main():
     parser.add_argument('--adapter', choices=SCOPE_ENVS, default='toto2')
     parser.add_argument('--arm', required=True, choices=['eager', 'core', 'wide', 'whole', 'positioned-eager', 'positioned'])
     parser.add_argument('--toto-unit-scaling', choices=['1', 'native-layout', 'stride-aware'], default='1')
+    parser.add_argument('--timesfm-flip-layout', choices=['packed', 'split'], default='packed')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--data-dir', type=Path, required=True)
     parser.add_argument('--shapes', nargs='+', type=shape, default=[(1, 2048, 96), (4, 512, 96)])
@@ -151,11 +154,16 @@ def main():
         parser.error(f'{args.arm} is only defined for TimesFM')
     if args.adapter != 'toto2' and args.toto_unit_scaling != '1':
         parser.error('The alternative unit-scaling policy is only defined for Toto')
+    if args.adapter != 'timesfm25' and args.timesfm_flip_layout != 'packed':
+        parser.error('The alternative flip layout is only defined for TimesFM')
+    if args.adapter == 'timesfm25':
+        os.environ['VTSFM_TIMESFM_FLIP_LAYOUT'] = args.timesfm_flip_layout
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=False)
     record = {'adapter': args.adapter, 'arm': args.arm, 'status': 'running', 'points': [], 'started_utc_epoch': time.time(),
               'revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
               'working_tree': subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT, text=True).strip()}
+    record['arithmetic'] = args.toto_unit_scaling if args.adapter == 'toto2' else args.timesfm_flip_layout
     # The owned-process context cleans up both reference and server on SIGTERM.
     def terminate(signal_number, frame):
         raise SystemExit(128 + signal_number)
