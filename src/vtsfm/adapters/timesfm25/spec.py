@@ -13,6 +13,20 @@ FORECAST_SETTINGS = ForecastSettings(
     quantiles=(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
     default_horizon=96, default_quantiles=(0.1, 0.5, 0.9),
 )
+COMPILE_SCOPE_ENV = 'VTSFM_TIMESFM_COMPILE_SCOPE'
+
+
+def compile_scope(environment, execution, precision, *, continuous=False):
+    """Select the default guarded core or an experimental wider FP32 scope."""
+    scope = environment.get(COMPILE_SCOPE_ENV, 'core')
+    if scope not in ('core', 'wide', 'whole'):
+        raise ValueError(f'{COMPILE_SCOPE_ENV} must be core, wide or whole, got {scope!r}')
+    if scope != 'core' and (execution != 'compile' or precision not in (None, 'fp32') or continuous):
+        raise ValueError('TimesFM wide and whole compile scopes require whole-forecast serving '
+                         'with --forecast-execution compile and FP32')
+    return scope
+
+
 TIMESFM25 = AdapterSpec(
     name='timesfm25', model_id=MODEL_ID, model_revision=MODEL_REVISION,
     architectures=('VTSFMTimesFMForForecasting',),

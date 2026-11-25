@@ -16,6 +16,9 @@ from vtsfm.config import (
 )
 from vtsfm.adapters import get_adapter, list_adapters
 from vtsfm.adapters.moirai2.spec import MOIRAI_ATTENTION_ENV, resolve_attention_config
+from vtsfm.adapters.timesfm25.spec import (
+    COMPILE_SCOPE_ENV as TIMESFM_COMPILE_SCOPE_ENV, compile_scope as timesfm_compile_scope,
+)
 from vtsfm.adapters.toto2.spec import compile_scope as toto_compile_scope
 from vtsfm.adapters.timesfm25.graph_config import (
     FORECAST_GRAPH_SHAPE, FORECAST_MODE_ENV, FORECAST_MODES, validate_fixed_forecast_execution,
@@ -98,6 +101,12 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
     if selected.name == 'moirai2':
         environment[MOIRAI_ATTENTION_ENV], forecast_precision = resolve_attention_config(
             mode, forecast_precision, environment)
+    if selected.name == 'timesfm25':
+        scope = timesfm_compile_scope(environment, mode, forecast_precision, continuous=continuous_batching)
+        if scope != 'core':
+            forecast_precision = 'fp32'
+    else:
+        environment.pop(TIMESFM_COMPILE_SCOPE_ENV, None)
     if selected.name == 'toto2' and toto_compile_scope(environment, mode, forecast_precision) == 'whole':
         forecast_precision = 'fp32'
     if mode == 'compile':
@@ -293,7 +302,8 @@ def main(argv: list[str] | None = None) -> int:
         keys = ('VTSFM_ADAPTER', 'VLLM_PLUGINS', 'VLLM_USE_V2_MODEL_RUNNER', 'VLLM_SERVER_DEV_MODE',
                 'OMP_NUM_THREADS', 'HF_HUB_DISABLE_TELEMETRY', FORECAST_BATCH_ROWS_ENV, FORECAST_LIMITS_ENV,
                 CONTINUOUS_ENV, FORECAST_MODE_ENV, PRECISION_ENV, TF32_OVERRIDE_ENV,
-                EXECUTION_ENV, MOIRAI_ATTENTION_ENV, 'TRITON_F32_DEFAULT', 'TRITON_DEFAULT_FP_FUSION')
+                EXECUTION_ENV, MOIRAI_ATTENTION_ENV, TIMESFM_COMPILE_SCOPE_ENV,
+                'TRITON_F32_DEFAULT', 'TRITON_DEFAULT_FP_FUSION')
         print(json.dumps({'command': command, 'environment': {
             key: environment[key] for key in keys if key in environment}}, indent=2))
         return 0
