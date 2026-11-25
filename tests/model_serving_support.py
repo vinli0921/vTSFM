@@ -194,6 +194,10 @@ def model_run():
                 metadata.setdefault('server_execution', {})[kind] = {
                     'forecast_execution': serve_environment.get(EXECUTION_ENV, 'eager'),
                     'triton_default_fp_fusion': serve_environment.get('TRITON_DEFAULT_FP_FUSION')}
+                if kind == 'vtsfm' and adapter == 'toto2':
+                    metadata['server_execution'][kind].update(
+                        toto_compile_scope=serve_environment.get('VTSFM_TOTO_COMPILE_SCOPE', 'core'),
+                        toto_fast_unit_scaling=serve_environment.get('VTSFM_TOTO_FAST_UNIT_SCALING', '1') != '0')
                 # First use of each static shape may compile lazily. This bound
                 # applies to untimed correctness calls, not measured requests.
                 parity_timeout = 900 if kind == 'vtsfm' and execution == 'compile' else 180

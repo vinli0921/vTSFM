@@ -83,6 +83,41 @@ error before either patch is attempted.
 
 ## Validation
 
+### Experimental whole-forecast scope for Toto FP32
+
+The default compiled Toto path wraps `model.transformer.forward` and keeps
+selected submodules eager. Set `VTSFM_TOTO_COMPILE_SCOPE=whole` with
+`--forecast-execution compile --forecast-precision fp32` to compile the common
+tensor forecast method instead. Both the single-request and fused execution
+paths call it. This scope includes masked input preparation, the native forecast
+loop and the owned nine-quantile output. It uses the same bounded static
+specialization policy, Inductor options and disabled CUDA Graphs as guarded
+compilation. The number of resulting compiler graphs can exceed one.
+
+Run the focused comparison on an idle, pinned Linux GPU with the prepared
+AssetOpsBench data directory. Start each arm with a fresh output directory and
+reverse the arm and shape orders for a second block. Each run uses an
+independent native oracle, one serving slot and a fresh worker. The benchmark
+reports startup, first call per shape, compiler counters, warm HTTP p50/p95,
+requests/s, allocator peaks and sampled device residency separately.
+
+```bash
+.venv-toto2/bin/python -m benchmarks.toto_compile --arm eager --data-dir data --output results/toto72/1-eager
+.venv-toto2/bin/python -m benchmarks.toto_compile --arm core --data-dir data --output results/toto72/1-core
+.venv-toto2/bin/python -m benchmarks.toto_compile --arm whole --data-dir data --output results/toto72/1-whole
+VTSFM_TOTO_COMPILE_SCOPE=whole ./scripts/test-models.sh --adapter toto2 --profile integration --forecast-execution compile --forecast-precision fp32
+VTSFM_TOTO_COMPILE_SCOPE=whole ./scripts/test-models.sh --adapter toto2 --profile accuracy --forecast-execution compile --forecast-precision fp32
+```
+
+Each serving arm keeps the default fast unit-scaling shims active. Their
+source pin and both the neural-core and full-forecast compile targets are
+checked through the loopback benchmark RPC before timing. First-use costs
+include fresh per-arm Inductor and Triton disk caches. Optional `--shapes`
+arguments are ordered `rows,context,horizon` triples. With four clients the
+reported throughput includes time queued behind the one serving slot.
+
+### Shared model checks
+
 Use the existing manual profiles on an idle GPU:
 
 ```bash

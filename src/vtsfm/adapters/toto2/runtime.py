@@ -9,15 +9,17 @@ from toto2.configuration import Toto2ModelConfig
 
 from vtsfm.execution import ExecutionResult, PreparedBatch
 from vtsfm.precision import configure_precision
-from vtsfm.compilation import compile_core, execution_mode
+from vtsfm.compilation import compile_core, compile_method, execution_mode
 
 from . import fast_scaling
-from .spec import DECODE_BLOCK_SIZE, FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TOTO2
+from .spec import DECODE_BLOCK_SIZE, FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TOTO2, compile_scope
 
 
 class TotoRuntime:
     def __init__(self, config):
-        self.precision = configure_precision('toto2')
+        mode = execution_mode()
+        scope = compile_scope(os.environ, mode, os.environ.get('VTSFM_PRECISION'))
+        self.precision = configure_precision('toto2', 'fp32' if scope == 'whole' else None)
         self.model = Toto2Model(Toto2ModelConfig(**config))
         if self.precision == 'bf16':
             from dd_unit_scaling import RMSNorm
@@ -37,7 +39,11 @@ class TotoRuntime:
         self.fast_unit_scaling = os.environ.get('VTSFM_TOTO_FAST_UNIT_SCALING', '1') != '0'
         if self.fast_unit_scaling:
             fast_scaling.install()
-        if execution_mode() == 'compile':
+        if scope == 'whole':
+            # Both single-request forecast() and cross-request execute() call this
+            # tensor boundary, including mask preparation and recursive decoding.
+            compile_method(self, '_forecast')
+        elif mode == 'compile':
             compile_model(self.model)
 
     @torch.inference_mode()

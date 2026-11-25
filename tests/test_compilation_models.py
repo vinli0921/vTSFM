@@ -11,6 +11,45 @@ import importlib
 import pytest
 
 
+def test_toto_whole_compile_runs_decode_with_fresh_inputs(monkeypatch):
+    torch = pytest.importorskip('torch')
+    pytest.importorskip('toto2')
+    from torch._dynamo import config as dynamo_config
+    from torch._dynamo.utils import counters
+    from vtsfm.adapters.toto2.runtime import TotoRuntime
+
+    monkeypatch.setenv('TRITON_DEFAULT_FP_FUSION', '0')
+    monkeypatch.setenv('VTSFM_TOTO_FAST_UNIT_SCALING', '1')
+    monkeypatch.setenv('VTSFM_FORECAST_EXECUTION', 'eager')
+    monkeypatch.setenv('VTSFM_PRECISION', 'fp32')
+    monkeypatch.delenv('VTSFM_TOTO_COMPILE_SCOPE', raising=False)
+    for name in ('recompile_limit', 'accumulated_recompile_limit', 'fail_on_recompile_limit_hit', 'suppress_errors'):
+        monkeypatch.setattr(dynamo_config, name, getattr(dynamo_config, name))
+    config = dict(patch_size=16, d_model=32, num_heads=2, num_layers=2,
+                  layer_group_size=2, num_variate_layers_per_group=1,
+                  variate_layer_first=False, residual_attn_ratio=1.0)
+    reference = TotoRuntime(config)
+    monkeypatch.setenv('VTSFM_FORECAST_EXECUTION', 'compile')
+    monkeypatch.setenv('VTSFM_TOTO_COMPILE_SCOPE', 'whole')
+    candidate = TotoRuntime(config)
+    assert candidate._forecast._torchdynamo_orig_callable.__func__ is TotoRuntime._forecast
+    assert 'forward' not in vars(candidate.model.transformer)
+    candidate.model.load_state_dict(reference.model.state_dict(), strict=True)
+    reference.model.eval()
+    candidate.model.eval()
+
+    context = torch.linspace(-0.5, 0.5, 64).reshape(2, 32)
+    context[0, :12] = float('nan')
+    before = counters['stats']['unique_graphs']
+    held = candidate.forecast(context, 17)
+    saved = held.clone()
+    for values, horizon in [(context + 3, 17), (context[1:], 800), (context, 17)]:
+        expected = reference.forecast(values, horizon)
+        torch.testing.assert_close(candidate.forecast(values, horizon), expected, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(held, saved, rtol=0, atol=0)
+    assert counters['stats']['unique_graphs'] > before
+
+
 @pytest.mark.parametrize('adapter', ['timesfm25', 'toto2', 'moirai2'])
 def test_compiled_tiny_forecasts_preserve_state_keys_inputs_and_retained_shapes(adapter, monkeypatch):
     torch = pytest.importorskip('torch')

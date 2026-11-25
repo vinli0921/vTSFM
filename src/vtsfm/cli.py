@@ -16,6 +16,7 @@ from vtsfm.config import (
 )
 from vtsfm.adapters import get_adapter, list_adapters
 from vtsfm.adapters.moirai2.spec import MOIRAI_ATTENTION_ENV, resolve_attention_config
+from vtsfm.adapters.toto2.spec import compile_scope as toto_compile_scope
 from vtsfm.adapters.timesfm25.graph_config import (
     FORECAST_GRAPH_SHAPE, FORECAST_MODE_ENV, FORECAST_MODES, validate_fixed_forecast_execution,
 )
@@ -97,6 +98,8 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
     if selected.name == 'moirai2':
         environment[MOIRAI_ATTENTION_ENV], forecast_precision = resolve_attention_config(
             mode, forecast_precision, environment)
+    if selected.name == 'toto2' and toto_compile_scope(environment, mode, forecast_precision) == 'whole':
+        forecast_precision = 'fp32'
     if mode == 'compile':
         # Set before the child imports Torch/Triton, preserving native arithmetic.
         environment['TRITON_DEFAULT_FP_FUSION'] = '0'
