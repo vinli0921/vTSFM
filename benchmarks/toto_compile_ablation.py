@@ -29,7 +29,10 @@ SCOPE = {
     'whole-stride-aware': ('whole', 'stride-aware'),
     'whole-dense-identity': ('whole', 'dense'),
     'transformer': ('transformer', 'device'),
+    'transformer-stride-aware': ('transformer', 'stride-aware'),
     'outer': ('outer', 'device'),
+    'outer-stride-aware': ('outer', 'stride-aware'),
+    'whole-stride-eager-scaler': ('eager-scaler', 'stride-aware'),
 }
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -104,6 +107,8 @@ def build_runtime(native, arm):
         compile_method(runtime.model.transformer, 'forward')
     elif scope == 'outer':
         compile_method(runtime, '_forecast', ((runtime.model.transformer, 'forward'),))
+    elif scope == 'eager-scaler':
+        compile_method(runtime, '_forecast', ((runtime.model.scaler, 'forward'),))
     return runtime
 
 
