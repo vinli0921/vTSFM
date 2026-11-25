@@ -57,7 +57,7 @@ def compositions(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize('impute', [None, 'zero', 'interpolate'])
 @pytest.mark.parametrize('fh', [None, [1, 2, 3, 4]])
-@pytest.mark.parametrize('mode', ['default', 'serial', 'batched'])
+@pytest.mark.parametrize('mode', ['default', 'serial', 'batched', 'capped', 'capped-batched'])
 def test_real_recipe_preserves_labels_horizons_metadata_and_persistence(compositions, impute, fh, mode):
     original, patched = compositions
     y = pd.Series(np.sin(np.arange(45) / 4), name='sensor')
@@ -77,15 +77,20 @@ def test_real_recipe_preserves_labels_horizons_metadata_and_persistence(composit
     expected = original.run_recipe(store, y, recipe, **options)
     original_record = records.pop()
     callback = RecordingBatch()
+    capped = mode.startswith('capped')
     if mode != 'default':
         options['conformal_factory'] = partial(BatchedConformalIntervals, batch_size=7,
-                                               batch_predict=callback if mode == 'batched' else None)
+                                               batch_predict=callback if mode.endswith('batched') else None,
+                                               cap_calibration_horizon=capped)
     actual = patched.run_recipe(store, y, recipe, **options)
     assert actual == expected
     assert records.pop() == original_record
-    if mode == 'batched':
+    longest = max((len(index) for call in callback.calls for _, index in call), default=0)
+    if mode.endswith('batched'):
         assert callback.calls and all(len(call) <= 7 for call in callback.calls)
-        assert max(len(index) for call in callback.calls for _, index in call) > len(fh or range(9))
+        # The recipe's default horizon is len(y) // 5 = 9 steps.
+        horizon = len(fh or range(9))
+        assert longest == horizon + 1 if capped else longest > horizon + 1
     else:
         assert callback.calls == []
 

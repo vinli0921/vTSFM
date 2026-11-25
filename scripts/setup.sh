@@ -4,11 +4,15 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage: scripts/setup.sh [--cpu [--evaluation]] [--adapter chronos2|timesfm25|toto2|moirai2]
+       scripts/setup.sh [--cpu] --recipes moirai2
 
 Create this clone's .venv with Python 3.11.17 and install vTSFM editable.
   --cpu       Install tests, data preparation, and reporting without Torch/vLLM.
   --evaluation Add pinned fev preparation tools to the CPU environment only.
   --adapter   Install a new model in .venv-<adapter>; Chronos keeps .venv.
+  --recipes   Install AssetOps recipe checks in .venv-recipes-<model> (no vLLM).
+              moirai2 uses sktime's Moirai card without uni2ts. With --cpu it
+              installs CPU Torch wheels; otherwise CUDA 13.0 wheels.
   -h, --help  Show this help without downloading or changing anything.
 
 GPU setup requires Linux. The default installs the legacy Chronos stack.
@@ -24,12 +28,15 @@ EOF
 cpu=0
 evaluation=0
 adapter=chronos2
+recipes=
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --cpu) cpu=1 ;;
     --evaluation) evaluation=1 ;;
     --adapter) adapter="${2:?--adapter requires a value}"; shift ;;
     --adapter=*) adapter="${1#*=}" ;;
+    --recipes) recipes="${2:?--recipes requires a value}"; shift ;;
+    --recipes=*) recipes="${1#*=}" ;;
     -h|--help) usage; exit 0 ;;
     *) printf 'Unknown setup option: %s\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
@@ -41,6 +48,14 @@ case "$adapter" in
   chronos2|timesfm25|toto2|moirai2) ;;
   *) printf 'Unknown adapter: %s\n' "$adapter" >&2; exit 2 ;;
 esac
+if [[ -n "$recipes" ]]; then
+  if [[ "$recipes" != moirai2 ]]; then
+    printf 'Unknown recipe environment: %s\n' "$recipes" >&2; exit 2
+  fi
+  if [[ "$adapter" != chronos2 || "$evaluation" == 1 ]]; then
+    printf 'Use --recipes alone or with --cpu; it creates its own environment.\n' >&2; exit 2
+  fi
+fi
 if [[ "$cpu" == 1 && "$adapter" != chronos2 ]]; then
   printf 'Use --cpu without --adapter for the shared CPU test environment.\n' >&2
   exit 2
@@ -50,6 +65,7 @@ if [[ "$evaluation" == 1 && "$cpu" != 1 ]]; then
   exit 2
 fi
 vtsfm_select_environment --adapter "$adapter"
+if [[ -n "$recipes" ]]; then VTSFM_PYTHON="$VTSFM_ROOT/.venv-recipes-$recipes/bin/python"; fi
 environment_dir="${VTSFM_PYTHON%/bin/python}"
 cd -- "$VTSFM_ROOT"
 if [[ "$cpu" == 0 && "$(uname -s)" != Linux ]]; then
@@ -66,10 +82,10 @@ if [[ -x "$VTSFM_PYTHON" ]]; then
     printf 'Move or remove that .venv explicitly, then rerun setup; it has not been replaced.\n' >&2
     exit 1
   fi
-  if [[ "$cpu" == 0 && "$adapter" != chronos2 ]] &&
+  if [[ "$cpu" == 0 && ( "$adapter" != chronos2 || -n "$recipes" ) ]] &&
     "$VTSFM_PYTHON" -c 'from importlib.metadata import version; version("nvidia-cuda-runtime-cu12")' 2>/dev/null; then
     printf 'Existing environment has CUDA 12 packages: %s\n' "$environment_dir" >&2
-    printf '%s requires CUDA 13.0 wheels. Move the environment aside or use a fresh checkout, then rerun setup.\n' "$adapter" >&2
+    printf '%s requires CUDA 13.0 wheels. Move the environment aside or use a fresh checkout, then rerun setup.\n' "${recipes:-$adapter}" >&2
     exit 1
   fi
 elif [[ -e "$environment_dir" ]]; then
@@ -130,9 +146,16 @@ if [[ "$cpu" == 1 ]]; then
   extras='.[dev,benchmark]'
   if [[ "$evaluation" == 1 ]]; then extras='.[dev,benchmark,evaluation]'; fi
 fi
+if [[ -n "$recipes" ]]; then
+  extras=".[dev,recipes-$recipes]"
+  install_args=(pip install --python "$VTSFM_PYTHON" --torch-backend cu130)
+  if [[ "$cpu" == 1 ]]; then install_args=(pip install --python "$VTSFM_PYTHON" --torch-backend cpu); fi
+fi
 "$uv_bin" "${install_args[@]}" --editable "$extras"
 printf 'Environment ready: %s\n' "$VTSFM_PYTHON"
-if [[ "$cpu" == 1 ]]; then
+if [[ -n "$recipes" ]]; then
+  printf 'Next: see docs/calibration-batching.md for the recipe checks.\n'
+elif [[ "$cpu" == 1 ]]; then
   printf 'Next: scripts/doctor.sh --cpu\n'
 else
   printf 'Next: scripts/doctor.sh --adapter %s\n' "$adapter"
