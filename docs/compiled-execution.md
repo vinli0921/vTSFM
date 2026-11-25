@@ -51,8 +51,11 @@ epilogue fusion to preserve recursive forecast parity. These eager boundaries
 can limit the compiled work. Inductor CUDA Graphs are disabled; explicit graph
 capture and replay are not implemented.
 
-The worker sets Dynamo's per-frame/accumulated recompilation limits to 64/256.
-TimesFM's decode phases exceeded the default eight specializations. When a legal
+The adapter constructor requests Dynamo per-frame/accumulated recompilation
+limits of 64/256. The effective limits can differ once vLLM starts the worker.
+The [Toto A100 study](baselines/2026-11-25-toto-whole-compile/README.md) observed
+a per-frame limit of 16. TimesFM's decode phases exceeded the default eight
+specializations. When a legal
 new shape exhausts the cache, normal Dynamo warnings and eager fallback keep it
 serviceable; retained compiled entries remain usable. Other compiler/model errors
 propagate. No shape bucketing or eviction policy is added. See the pinned
@@ -114,7 +117,8 @@ source pin and both the neural-core and full-forecast compile targets are
 checked through the loopback benchmark RPC before timing. First-use costs
 include fresh per-arm Inductor and Triton disk caches. Optional `--shapes`
 arguments are ordered `rows,context,horizon` triples. With four clients the
-reported throughput includes time queued behind the one serving slot.
+reported throughput includes time queued behind the one serving slot. See the
+[A100 measurements and qualification](baselines/2026-11-25-toto-whole-compile/README.md).
 
 ### Shared model checks
 
