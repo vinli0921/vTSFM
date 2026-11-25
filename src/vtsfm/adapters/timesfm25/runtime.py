@@ -9,10 +9,15 @@ from torch.nn import functional as F
 
 from vtsfm.execution import ExecutionResult, PreparedBatch
 from vtsfm.precision import PRECISION_ENV, configure_precision
-from vtsfm.compilation import compile_core, execution_mode
+from vtsfm.compilation import compile_core, compile_method, execution_mode
+from vtsfm.stepping import CONTINUOUS_ENV
 
 from .graph_config import FORECAST_MODE_ENV, validate_fixed_forecast_execution
-from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TIMESFM25
+from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TIMESFM25, compile_scope
+
+
+# Keep explicit graph replay under the adapter’s separate buffer owner.
+_WIDER_INDUCTOR_OPTIONS = {'triton.cudagraphs': False}
 
 
 class TimesFMRuntime:
@@ -20,11 +25,18 @@ class TimesFMRuntime:
         execution = execution_mode()
         if FORECAST_MODE_ENV in os.environ:
             validate_fixed_forecast_execution(os.environ.get(PRECISION_ENV), execution)
-        self.precision = configure_precision('timesfm25')
+        scope = compile_scope(os.environ, execution, os.environ.get(PRECISION_ENV),
+                              continuous=os.environ.get(CONTINUOUS_ENV) == '1')
+        self.compile_scope = scope if execution == 'compile' else 'eager'
+        self.precision = configure_precision('timesfm25', 'fp32' if scope != 'core' else None)
         self.model = timesfm.TimesFM_2p5_200M_torch(torch_compile=False).model
         self.fixed_forecast = None
-        if execution == 'compile':
+        if self.compile_scope == 'core':
             compile_model(self.model)
+        elif self.compile_scope == 'wide':
+            compile_method(self.model, 'forward', inductor_options=_WIDER_INDUCTOR_OPTIONS)
+        elif self.compile_scope == 'whole':
+            compile_method(self, '_forecast', inductor_options=_WIDER_INDUCTOR_OPTIONS)
 
     @torch.inference_mode()
     def forecast(self, context, horizon):

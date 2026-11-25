@@ -29,7 +29,7 @@ def compile_core(core, native_calls):
     compile_method(core, 'forward', native_calls)
 
 
-def compile_method(owner, method, native_calls=()):
+def compile_method(owner, method, native_calls=(), *, inductor_options=INDUCTOR_OPTIONS):
     """Compile one bound method, retaining selected instance-local native calls."""
     if os.environ.get('TRITON_DEFAULT_FP_FUSION') != '0':
         raise ValueError('Compiled forecasts require TRITON_DEFAULT_FP_FUSION=0 before importing Torch')
@@ -54,7 +54,7 @@ def compile_method(owner, method, native_calls=()):
             setattr(module, attribute, torch.compiler.disable(original, recursive=True))
             originals.append((module, attribute, original, local))
         compiled = torch.compile(getattr(owner, method), backend='inductor', dynamic=False,
-                                 fullgraph=False, options=dict(INDUCTOR_OPTIONS))
+                                 fullgraph=False, options=dict(inductor_options))
         setattr(owner, method, compiled)
     except BaseException:
         for owner, attribute, original, local in reversed(originals):
