@@ -19,9 +19,11 @@ SCOPE = {
     'eager-native-scaling': ('eager', 'upstream'),
     'eager-tensor-scale': ('eager', 'device'),
     'eager-scale-multiply': ('eager', 'multiply'),
+    'eager-dense-identity': ('eager', 'dense'),
     'whole': ('whole', 'optimized'),
     'whole-tensor-scale': ('whole', 'device'),
     'whole-scale-multiply': ('whole', 'multiply'),
+    'whole-dense-identity': ('whole', 'dense'),
     'transformer': ('transformer', 'device'),
     'outer': ('outer', 'device'),
 }
@@ -72,11 +74,12 @@ def build_runtime(native, arm):
     os.environ['VTSFM_FORECAST_EXECUTION'] = 'compile' if scope == 'whole' else 'eager'
     os.environ['VTSFM_TOTO_COMPILE_SCOPE'] = 'whole' if scope == 'whole' else 'core'
     os.environ['VTSFM_TOTO_FAST_UNIT_SCALING'] = '0' if scaling == 'upstream' else '1'
-    if scaling in ('device', 'multiply'):
+    if scaling in ('device', 'multiply', 'dense'):
         def scale(input, fwd_scale, _bwd_scale):
             if fast_scaling._active.get() and not torch.is_grad_enabled():
-                if scaling == 'device' and not isinstance(fwd_scale, torch.Tensor) and fwd_scale == 1.0:
-                    return input
+                if not isinstance(fwd_scale, torch.Tensor) and fwd_scale == 1.0:
+                    if scaling == 'device' or (scaling == 'dense' and input.is_contiguous()):
+                        return input
                 return fwd_scale * input
             return None
 
