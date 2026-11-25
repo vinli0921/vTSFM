@@ -13,4 +13,7 @@ class CompileMetrics(MemoryMetrics):
             targets.append(getattr(runtime, 'compile_scope', 'core'))
         if hasattr(runtime._forecast, '_torchdynamo_orig_callable'):
             targets.append('whole')
-        return {'compile_targets': targets, 'runtime_file': inspect.getfile(type(runtime))}
+        staged = getattr(runtime, 'positioned_forecast', None)
+        if staged is not None and hasattr(staged._prefill_forward, '_torchdynamo_orig_callable'):
+            targets.append('positioned')
+        return {'compile_targets': targets, 'scope': runtime.compile_scope, 'runtime_file': inspect.getfile(type(runtime))}

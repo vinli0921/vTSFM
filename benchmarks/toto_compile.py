@@ -26,6 +26,7 @@ from vtsfm.cli import build_vllm_command
 ROOT = Path(__file__).resolve().parents[1]
 SCOPE_ENVS = {'toto2': COMPILE_SCOPE_ENV, 'timesfm25': 'VTSFM_TIMESFM_COMPILE_SCOPE'}
 SCOPE_PROBES = {'toto2': 'bench_toto_compile_scope', 'timesfm25': 'bench_timesfm_compile_scope'}
+EAGER_ARMS = ('eager', 'positioned-eager')
 
 
 def shape(text):
@@ -51,7 +52,7 @@ def serve(args, monitor, owner, native, common, record, cache):
     # build_vllm_command validates the selected scope before starting vLLM.
     os.environ[SCOPE_ENVS[args.adapter]] = 'core' if args.arm == 'eager' else args.arm
     command, environment = build_vllm_command(adapter=args.adapter, port=args.port, benchmark=True,
-        forecast_execution='eager' if args.arm == 'eager' else 'compile', forecast_precision='fp32',
+        forecast_execution='eager' if args.arm in EAGER_ARMS else 'compile', forecast_precision='fp32',
         max_num_seqs=1)
     if args.adapter == 'timesfm25':
         command[command.index('--worker-extension-cls') + 1] = 'benchmarks.compile_worker.CompileMetrics'
@@ -73,8 +74,10 @@ def serve(args, monitor, owner, native, common, record, cache):
             if config['cuda_matmul_allow_tf32'] or config['float32_matmul_precision'] != 'highest':
                 raise AssertionError(f'Unexpected FP32 worker configuration: {config}')
             scope = _rpc(session, url, SCOPE_PROBES[args.adapter])
-            if scope['compile_targets'] != ([] if args.arm == 'eager' else [args.arm]):
+            if scope['compile_targets'] != ([] if args.arm in EAGER_ARMS else [args.arm]):
                 raise AssertionError(f'Wrong active {args.adapter} path: {scope}')
+            if args.adapter == 'timesfm25' and scope['scope'] != args.arm:
+                raise AssertionError(f'Unexpected TimesFM scope: {scope}')
             if args.adapter == 'toto2' and (not scope['fast_unit_scaling'] or len(scope['installed_shims']) != 2):
                 raise AssertionError(f'Unexpected Toto scaling path: {scope}')
             if Path(scope['runtime_file']).resolve() != ROOT / f'src/vtsfm/adapters/{args.adapter}/runtime.py':
@@ -112,7 +115,7 @@ def serve(args, monitor, owner, native, common, record, cache):
                         'before': before, 'after': after})
                     if result['status'] != 'passed' or guard.failure:
                         raise RuntimeError(f'Invalid timing point {label}: {guard.failure}')
-                    if args.arm != 'eager' and after['dynamo']['unique_graphs'] <= record['ready_counters']['dynamo']['unique_graphs']:
+                    if args.arm not in EAGER_ARMS and after['dynamo']['unique_graphs'] <= record['ready_counters']['dynamo']['unique_graphs']:
                         raise AssertionError('No numerical compiler activity after readiness')
                     response = session.post(
                         url + '/pooling', data=encoded, headers={'Content-Type': 'application/json'},
@@ -130,7 +133,7 @@ def serve(args, monitor, owner, native, common, record, cache):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--adapter', choices=SCOPE_ENVS, default='toto2')
-    parser.add_argument('--arm', required=True, choices=['eager', 'core', 'wide', 'whole'])
+    parser.add_argument('--arm', required=True, choices=['eager', 'core', 'wide', 'whole', 'positioned-eager', 'positioned'])
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--data-dir', type=Path, required=True)
     parser.add_argument('--shapes', nargs='+', type=shape, default=[(1, 2048, 96), (4, 512, 96)])
@@ -141,8 +144,8 @@ def main():
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--startup-timeout', type=int, default=1200)
     args = parser.parse_args()
-    if args.adapter == 'toto2' and args.arm == 'wide':
-        parser.error('The wide arm is only defined for TimesFM')
+    if args.adapter == 'toto2' and args.arm not in ('eager', 'core', 'whole'):
+        parser.error(f'{args.arm} is only defined for TimesFM')
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=False)
     record = {'adapter': args.adapter, 'arm': args.arm, 'status': 'running', 'points': [], 'started_utc_epoch': time.time(),
