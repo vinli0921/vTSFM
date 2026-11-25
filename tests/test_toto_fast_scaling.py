@@ -189,3 +189,35 @@ def test_concurrent_install_preserves_both_original_objects(monkeypatch):
         fast_scaling.uninstall()
         # Restore even if a faulty installation captured one of its own shims.
         dd_scale._ScaledGrad, gc_scale._scale = originals
+
+
+def test_native_layout_shim_preserves_pinned_multiplication_on_strided_input():
+    torch = pytest.importorskip('torch')
+    from vtsfm.adapters.toto2 import fast_scaling
+
+    values = torch.arange(24, dtype=torch.float32).view(4, 6)[:, ::2]
+    with torch.inference_mode(), fast_scaling.fast_unit_scaling(mode='native-layout'):
+        for scale in (1.0, torch.tensor(1.0), torch.tensor(0.5)):
+            expected = scale * values
+            scaled = fast_scaling._fast(values, scale, 1.0)
+            torch.testing.assert_close(scaled, expected, rtol=0, atol=0, check_stride=True)
+            assert scaled.data_ptr() != values.data_ptr()
+
+
+
+def test_stride_aware_shim_preserves_strides_and_skips_dense_scalar_identity():
+    torch = pytest.importorskip('torch')
+    from vtsfm.adapters.toto2 import fast_scaling
+
+    dense = torch.arange(24, dtype=torch.float32).reshape(4, 6)
+    strided = dense[:, ::2]
+    with torch.inference_mode(), fast_scaling.fast_unit_scaling(mode='stride-aware'):
+        assert fast_scaling._fast(dense, 1.0, 1.0) is dense
+        for view in (strided, dense.T, dense[:, :1].T):
+            scaled = fast_scaling._fast(view, 1.0, 1.0)
+            torch.testing.assert_close(scaled, 1.0 * view, rtol=0, atol=0, check_stride=True)
+        from torch._subclasses.fake_tensor import FakeTensorMode
+
+        with FakeTensorMode():
+            tensors = fast_scaling._fast(torch.ones(3), torch.tensor(1.0), 1.0)
+            assert tensors.shape == (3,)

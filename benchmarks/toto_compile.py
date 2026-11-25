@@ -136,7 +136,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--adapter', choices=SCOPE_ENVS, default='toto2')
     parser.add_argument('--arm', required=True, choices=['eager', 'core', 'wide', 'whole', 'positioned-eager', 'positioned'])
-    parser.add_argument('--toto-unit-scaling', choices=['1', 'native-layout'], default='1')
+    parser.add_argument('--toto-unit-scaling', choices=['1', 'native-layout', 'stride-aware'], default='1')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--data-dir', type=Path, required=True)
     parser.add_argument('--shapes', nargs='+', type=shape, default=[(1, 2048, 96), (4, 512, 96)])
