@@ -36,7 +36,8 @@ class TotoRuntime:
             prepare_native_rotary_tables(self.model, RotaryProjection)
         # Inference-only unit-scaling shims (#74); set
         # VTSFM_TOTO_FAST_UNIT_SCALING=0 to keep the upstream autograd wrappers.
-        self.fast_unit_scaling = os.environ.get('VTSFM_TOTO_FAST_UNIT_SCALING', '1') != '0'
+        self.unit_scaling_mode = os.environ.get('VTSFM_TOTO_FAST_UNIT_SCALING', '1')
+        self.fast_unit_scaling = self.unit_scaling_mode != '0'
         if self.fast_unit_scaling:
             fast_scaling.install()
         if scope == 'whole':
@@ -88,7 +89,9 @@ class TotoRuntime:
         # One variate per batch element keeps every row an independent series.
         inputs = {'target': target.unsqueeze(1), 'target_mask': mask.unsqueeze(1),
                   'series_ids': torch.zeros((len(target), 1), dtype=torch.long, device=target.device)}
-        with fast_scaling.fast_unit_scaling(self.fast_unit_scaling):
+        with fast_scaling.fast_unit_scaling(
+            self.fast_unit_scaling, preserve_layout=self.unit_scaling_mode == 'native-layout',
+        ):
             quantiles = self.model.forecast(inputs, horizon=horizon, decode_block_size=DECODE_BLOCK_SIZE)
         # Upstream returns [9 quantiles, rows, variates, horizon].
         # Public transport is FP32 and owns only the requested horizon, even

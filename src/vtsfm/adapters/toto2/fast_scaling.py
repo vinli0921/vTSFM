@@ -22,7 +22,9 @@ digest recorded here; otherwise it stays native and a warning names it.
 Numerics: a scale of exactly 1.0 returns the input tensor itself rather than
 ``1.0 * x``. Values are identical, but the result keeps the input's strides
 where the multiply could have produced a contiguous copy, so a later kernel may
-round differently (observed max abs difference 1.9e-6 at 16 rows, #74).
+round differently. A native-layout evaluation retains the literal forward
+multiplication while bypassing autograd bookkeeping. Its tensor-valued
+scales never require a Python truth test.
 """
 
 import contextlib
@@ -50,9 +52,12 @@ _installed = {}  # module name -> (attribute, original object)
 
 
 def _fast(input, fwd_scale, bwd_scale):
-    if _active.get() and not torch.is_grad_enabled():
-        return input if fwd_scale == 1.0 else fwd_scale * input
-    return None
+    mode = _active.get()
+    if not mode or torch.is_grad_enabled():
+        return None
+    if mode != 'native-layout' and fwd_scale == 1.0:
+        return input
+    return fwd_scale * input
 
 
 class _InferenceScaledGrad:
@@ -117,9 +122,9 @@ def uninstall():
 
 
 @contextlib.contextmanager
-def fast_unit_scaling(enabled=True):
+def fast_unit_scaling(enabled=True, *, preserve_layout=False):
     """Use the shims for calls made in this block when grad is disabled."""
-    token = _active.set(enabled)
+    token = _active.set('native-layout' if enabled and preserve_layout else enabled)
     try:
         yield
     finally:

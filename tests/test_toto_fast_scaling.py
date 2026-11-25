@@ -189,3 +189,16 @@ def test_concurrent_install_preserves_both_original_objects(monkeypatch):
         fast_scaling.uninstall()
         # Restore even if a faulty installation captured one of its own shims.
         dd_scale._ScaledGrad, gc_scale._scale = originals
+
+
+def test_native_layout_shim_preserves_pinned_multiplication_on_strided_input():
+    torch = pytest.importorskip('torch')
+    from vtsfm.adapters.toto2 import fast_scaling
+
+    values = torch.arange(24, dtype=torch.float32).view(4, 6)[:, ::2]
+    with torch.inference_mode(), fast_scaling.fast_unit_scaling(preserve_layout=True):
+        for scale in (1.0, torch.tensor(1.0), torch.tensor(0.5)):
+            expected = scale * values
+            scaled = fast_scaling._fast(values, scale, 1.0)
+            torch.testing.assert_close(scaled, expected, rtol=0, atol=0, check_stride=True)
+            assert scaled.data_ptr() != values.data_ptr()

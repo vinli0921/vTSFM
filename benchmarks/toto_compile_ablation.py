@@ -19,10 +19,12 @@ SCOPE = {
     'eager-native-scaling': ('eager', 'upstream'),
     'eager-tensor-scale': ('eager', 'device'),
     'eager-scale-multiply': ('eager', 'multiply'),
+    'eager-native-layout': ('eager', 'native-layout'),
     'eager-dense-identity': ('eager', 'dense'),
     'whole': ('whole', 'optimized'),
     'whole-tensor-scale': ('whole', 'device'),
     'whole-scale-multiply': ('whole', 'multiply'),
+    'whole-native-layout': ('whole', 'native-layout'),
     'whole-dense-identity': ('whole', 'dense'),
     'transformer': ('transformer', 'device'),
     'outer': ('outer', 'device'),
@@ -73,7 +75,7 @@ def build_runtime(native, arm):
     scope, scaling = SCOPE[arm]
     os.environ['VTSFM_FORECAST_EXECUTION'] = 'compile' if scope == 'whole' else 'eager'
     os.environ['VTSFM_TOTO_COMPILE_SCOPE'] = 'whole' if scope == 'whole' else 'core'
-    os.environ['VTSFM_TOTO_FAST_UNIT_SCALING'] = '0' if scaling == 'upstream' else '1'
+    os.environ['VTSFM_TOTO_FAST_UNIT_SCALING'] = {'upstream': '0', 'native-layout': 'native-layout'}.get(scaling, '1')
     if scaling in ('device', 'multiply', 'dense'):
         def scale(input, fwd_scale, _bwd_scale):
             if fast_scaling._active.get() and not torch.is_grad_enabled():
