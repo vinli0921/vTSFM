@@ -1,4 +1,4 @@
-"""Run one fresh Toto A100 HTTP comparison arm on prepared AssetOpsBench windows.
+"""Run one fresh TimesFM or Toto HTTP compilation arm on AssetOpsBench windows.
 
 Start each arm in a separate process. The native oracle exits before the server
 starts. Timings exclude startup, first forecast per shape, parity and warmups.
@@ -19,10 +19,13 @@ from benchmarks.model_evaluation import assetops_cases
 from benchmarks.model_performance import measure_requests
 from benchmarks.run import GpuMonitor, OwnedProcesses, Sampler, ensure_port_free, ensure_worker_gpu, wait_ready
 from benchmarks.timesfm_graph_http import _GuardedMonitor, _StartupSession, _reference, _rpc
-from vtsfm.adapters.toto2.spec import COMPILE_SCOPE_ENV, MODEL_ID
+from vtsfm.adapters import get_adapter
+from vtsfm.adapters.toto2.spec import COMPILE_SCOPE_ENV
 from vtsfm.cli import build_vllm_command
 
 ROOT = Path(__file__).resolve().parents[1]
+SCOPE_ENVS = {'toto2': COMPILE_SCOPE_ENV, 'timesfm25': 'VTSFM_TIMESFM_COMPILE_SCOPE'}
+SCOPE_PROBES = {'toto2': 'bench_toto_compile_scope', 'timesfm25': 'bench_timesfm_compile_scope'}
 
 
 def shape(text):
@@ -46,10 +49,12 @@ def serve(args, monitor, owner, native, common, record, cache):
 
     ensure_port_free('127.0.0.1', args.port)
     # build_vllm_command validates the selected scope before starting vLLM.
-    os.environ[COMPILE_SCOPE_ENV] = 'whole' if args.arm == 'whole' else 'core'
-    command, environment = build_vllm_command(adapter='toto2', port=args.port, benchmark=True,
+    os.environ[SCOPE_ENVS[args.adapter]] = 'core' if args.arm == 'eager' else args.arm
+    command, environment = build_vllm_command(adapter=args.adapter, port=args.port, benchmark=True,
         forecast_execution='eager' if args.arm == 'eager' else 'compile', forecast_precision='fp32',
         max_num_seqs=1)
+    if args.adapter == 'timesfm25':
+        command[command.index('--worker-extension-cls') + 1] = 'benchmarks.compile_worker.CompileMetrics'
     environment.update(common, TORCHINDUCTOR_CACHE_DIR=str(Path(cache) / 'inductor'),
                        TRITON_CACHE_DIR=str(Path(cache) / 'triton'))
     command += ['--gpu-memory-utilization', '0.35', '--no-async-scheduling']
@@ -67,17 +72,18 @@ def serve(args, monitor, owner, native, common, record, cache):
             ensure_worker_gpu(config, monitor.uuid, require_uuid=True)
             if config['cuda_matmul_allow_tf32'] or config['float32_matmul_precision'] != 'highest':
                 raise AssertionError(f'Unexpected FP32 worker configuration: {config}')
-            scope = _rpc(session, url, 'bench_toto_compile_scope')
-            targets = [] if args.arm == 'eager' else [args.arm]
-            if scope['compile_targets'] != targets or not scope['fast_unit_scaling'] or len(scope['installed_shims']) != 2:
-                raise AssertionError(f'Wrong active Toto path: {scope}')
-            if Path(scope['runtime_file']).resolve() != ROOT / 'src/vtsfm/adapters/toto2/runtime.py':
+            scope = _rpc(session, url, SCOPE_PROBES[args.adapter])
+            if scope['compile_targets'] != ([] if args.arm == 'eager' else [args.arm]):
+                raise AssertionError(f'Wrong active {args.adapter} path: {scope}')
+            if args.adapter == 'toto2' and (not scope['fast_unit_scaling'] or len(scope['installed_shims']) != 2):
+                raise AssertionError(f'Unexpected Toto scaling path: {scope}')
+            if Path(scope['runtime_file']).resolve() != ROOT / f'src/vtsfm/adapters/{args.adapter}/runtime.py':
                 raise AssertionError(f'Worker imported a different checkout: {scope}')
             record.update(worker_config=config, actual_scope=scope,
                           ready_counters=_rpc(session, url, 'bench_memory_stats'))
             for entry in native['cases']:
                 case = entry['case']
-                payload = {'model': MODEL_ID, 'task': 'plugin', 'data': case['data']}
+                payload = {'model': get_adapter(args.adapter).model_id, 'task': 'plugin', 'data': case['data']}
                 encoded = json.dumps(payload, separators=(',', ':'), allow_nan=False).encode()
                 point = {'case': case['name'], 'payload_sha256': hashlib.sha256(encoded).hexdigest()}
                 record['points'].append(point)
@@ -108,6 +114,13 @@ def serve(args, monitor, owner, native, common, record, cache):
                         raise RuntimeError(f'Invalid timing point {label}: {guard.failure}')
                     if args.arm != 'eager' and after['dynamo']['unique_graphs'] <= record['ready_counters']['dynamo']['unique_graphs']:
                         raise AssertionError('No numerical compiler activity after readiness')
+                    response = session.post(
+                        url + '/pooling', data=encoded, headers={'Content-Type': 'application/json'},
+                        timeout=args.startup_timeout,
+                    )
+                    response.raise_for_status()
+                    point['timings'][-1]['post_parity'] = compare_response(response.json(), case, entry['expected'])
+                    guard.assert_owned()
                     print(f'{args.arm} {label}: {result["request_per_s"]:.2f} req/s; p95={result["p95_ms"]:.2f} ms', flush=True)
                     save(args.output / 'run.json', record)
     finally:
@@ -116,7 +129,8 @@ def serve(args, monitor, owner, native, common, record, cache):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--arm', required=True, choices=['eager', 'core', 'whole'])
+    parser.add_argument('--adapter', choices=SCOPE_ENVS, default='toto2')
+    parser.add_argument('--arm', required=True, choices=['eager', 'core', 'wide', 'whole'])
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--data-dir', type=Path, required=True)
     parser.add_argument('--shapes', nargs='+', type=shape, default=[(1, 2048, 96), (4, 512, 96)])
@@ -127,9 +141,11 @@ def main():
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--startup-timeout', type=int, default=1200)
     args = parser.parse_args()
+    if args.adapter == 'toto2' and args.arm == 'wide':
+        parser.error('The wide arm is only defined for TimesFM')
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=False)
-    record = {'arm': args.arm, 'status': 'running', 'points': [], 'started_utc_epoch': time.time(),
+    record = {'adapter': args.adapter, 'arm': args.arm, 'status': 'running', 'points': [], 'started_utc_epoch': time.time(),
               'revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
               'working_tree': subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT, text=True).strip()}
     # The owned-process context cleans up both reference and server on SIGTERM.
@@ -150,7 +166,7 @@ def main():
         reference_environment.update(VTSFM_FORECAST_EXECUTION='eager', VTSFM_PRECISION='fp32')
         reference_environment.pop(COMPILE_SCOPE_ENV, None)
         with OwnedProcesses(args.output) as owner, TemporaryDirectory(prefix='vtsfm-toto-compile-') as cache:
-            native = _reference(args, owner, monitor, cases, reference_environment, adapter='toto2')
+            native = _reference(args, owner, monitor, cases, reference_environment, adapter=args.adapter)
             serve(args, monitor, owner, native, common, record, cache)
         monitor.wait_idle()
         record['status'] = 'passed'
