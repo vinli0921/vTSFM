@@ -47,6 +47,13 @@ tensor scales kept on-device and legacy scalar identity scaling, compiling
 only the transformer missed 113 values at 12.00 ms, and compiling the outer
 forecast with the transformer eager missed 102 at 61.11 ms.
 
+Two more controls used the corrected stride-aware scaling policy. Keeping the
+causal scaler eager while compiling the whole forecast produced 132 misses at
+12.35 ms p50. Keeping forecast preparation and output processing eager while
+compiling just the full transformer produced 105 misses at 12.18 ms. Restoring
+the upstream scaler alone did not resolve the condenser mismatch. The tested
+wide scopes remain experimental.
+
 ## End-to-end qualification and serving throughput
 
 Two eager inference modes (`native-layout` and `stride-aware`) matched the
