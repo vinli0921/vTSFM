@@ -25,12 +25,12 @@ def execution_mode(value=None):
 
 
 def compile_core(core, native_calls):
-    """Compile one adapter-selected forward, retaining native numerical calls.
+    """Compile an adapter's neural core and keep its checkpoint keys intact."""
+    compile_method(core, 'forward', native_calls)
 
-    ``native_calls`` contains (object, callable attribute name) pairs owned by
-    this model instance. No modules/parameters are replaced, so checkpoint keys
-    remain unchanged. Lazy compilation and execution errors propagate normally.
-    """
+
+def compile_method(owner, method, native_calls=(), *, inductor_options=INDUCTOR_OPTIONS):
+    """Compile one bound method, retaining selected instance-local native calls."""
     if os.environ.get('TRITON_DEFAULT_FP_FUSION') != '0':
         raise ValueError('Compiled forecasts require TRITON_DEFAULT_FP_FUSION=0 before importing Torch')
 
@@ -46,16 +46,16 @@ def compile_core(core, native_calls):
     # still propagate because suppress_errors stays disabled.
     config.fail_on_recompile_limit_hit = False
     config.suppress_errors = False
-
     originals = []
     try:
-        for owner, attribute in native_calls:
-            original = getattr(owner, attribute)
-            local = attribute in vars(owner)
-            setattr(owner, attribute, torch.compiler.disable(original, recursive=True))
-            originals.append((owner, attribute, original, local))
-        core.forward = torch.compile(core.forward, backend='inductor', dynamic=False,
-                                     fullgraph=False, options=dict(INDUCTOR_OPTIONS))
+        for module, attribute in native_calls:
+            original = getattr(module, attribute)
+            local = attribute in vars(module)
+            setattr(module, attribute, torch.compiler.disable(original, recursive=True))
+            originals.append((module, attribute, original, local))
+        compiled = torch.compile(getattr(owner, method), backend='inductor', dynamic=False,
+                                 fullgraph=False, options=dict(inductor_options))
+        setattr(owner, method, compiled)
     except BaseException:
         for owner, attribute, original, local in reversed(originals):
             if local:

@@ -65,3 +65,14 @@ class MemoryMetrics:
     def bench_timesfm_forecast(self):
         """Experimental fixed-owner counters from the model that serves /pooling."""
         return self.model_runner.get_model().fixed_forecast_snapshot()
+
+    def bench_toto_compile_scope(self):
+        """Get the worker's actual Toto compile target for an untimed diagnostic."""
+        import inspect
+        from vtsfm.adapters.toto2 import fast_scaling
+
+        runtime = self.model_runner.get_model().runtime
+        wrapped = {'whole': runtime._forecast, 'core': runtime.model.transformer.forward}
+        targets = [name for name, method in wrapped.items() if hasattr(method, '_torchdynamo_orig_callable')]
+        return {'compile_targets': targets, 'fast_unit_scaling': runtime.fast_unit_scaling,
+                'installed_shims': sorted(fast_scaling._installed), 'runtime_file': inspect.getfile(type(runtime))}

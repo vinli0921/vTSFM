@@ -9,15 +9,17 @@ from toto2.configuration import Toto2ModelConfig
 
 from vtsfm.execution import ExecutionResult, PreparedBatch
 from vtsfm.precision import configure_precision
-from vtsfm.compilation import compile_core, execution_mode
+from vtsfm.compilation import compile_core, compile_method, execution_mode
 
 from . import fast_scaling
-from .spec import DECODE_BLOCK_SIZE, FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TOTO2
+from .spec import DECODE_BLOCK_SIZE, FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TOTO2, compile_scope
 
 
 class TotoRuntime:
     def __init__(self, config):
-        self.precision = configure_precision('toto2')
+        mode = execution_mode()
+        scope = compile_scope(os.environ, mode, os.environ.get('VTSFM_PRECISION'))
+        self.precision = configure_precision('toto2', 'fp32' if scope == 'whole' else None)
         self.model = Toto2Model(Toto2ModelConfig(**config))
         if self.precision == 'bf16':
             from dd_unit_scaling import RMSNorm
@@ -34,10 +36,15 @@ class TotoRuntime:
             prepare_native_rotary_tables(self.model, RotaryProjection)
         # Inference-only unit-scaling shims (#74); set
         # VTSFM_TOTO_FAST_UNIT_SCALING=0 to keep the upstream autograd wrappers.
-        self.fast_unit_scaling = os.environ.get('VTSFM_TOTO_FAST_UNIT_SCALING', '1') != '0'
+        self.unit_scaling_mode = os.environ.get('VTSFM_TOTO_FAST_UNIT_SCALING', '1')
+        self.fast_unit_scaling = self.unit_scaling_mode != '0'
         if self.fast_unit_scaling:
             fast_scaling.install()
-        if execution_mode() == 'compile':
+        if scope == 'whole':
+            # Both single-request forecast() and cross-request execute() call this
+            # tensor boundary, including mask preparation and recursive decoding.
+            compile_method(self, '_forecast')
+        elif mode == 'compile':
             compile_model(self.model)
 
     @torch.inference_mode()
@@ -82,7 +89,7 @@ class TotoRuntime:
         # One variate per batch element keeps every row an independent series.
         inputs = {'target': target.unsqueeze(1), 'target_mask': mask.unsqueeze(1),
                   'series_ids': torch.zeros((len(target), 1), dtype=torch.long, device=target.device)}
-        with fast_scaling.fast_unit_scaling(self.fast_unit_scaling):
+        with fast_scaling.fast_unit_scaling(self.fast_unit_scaling, mode=self.unit_scaling_mode):
             quantiles = self.model.forecast(inputs, horizon=horizon, decode_block_size=DECODE_BLOCK_SIZE)
         # Upstream returns [9 quantiles, rows, variates, horizon].
         # Public transport is FP32 and owns only the requested horizon, even

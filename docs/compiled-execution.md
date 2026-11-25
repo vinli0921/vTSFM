@@ -51,8 +51,11 @@ epilogue fusion to preserve recursive forecast parity. These eager boundaries
 can limit the compiled work. Inductor CUDA Graphs are disabled; explicit graph
 capture and replay are not implemented.
 
-The worker sets Dynamo's per-frame/accumulated recompilation limits to 64/256.
-TimesFM's decode phases exceeded the default eight specializations. When a legal
+The adapter constructor requests Dynamo per-frame/accumulated recompilation
+limits of 64/256. The effective limits can differ once vLLM starts the worker.
+The [Toto A100 study](baselines/2026-11-25-toto-whole-compile/README.md) observed
+a per-frame limit of 16. TimesFM's decode phases exceeded the default eight
+specializations. When a legal
 new shape exhausts the cache, normal Dynamo warnings and eager fallback keep it
 serviceable; retained compiled entries remain usable. Other compiler/model errors
 propagate. No shape bucketing or eviction policy is added. See the pinned
@@ -82,6 +85,48 @@ attention forwards, so the unqualified combination fails with a configuration
 error before either patch is attempted.
 
 ## Validation
+
+### Wider FP32 scopes and native arithmetic
+
+TimesFM can opt into `VTSFM_TIMESFM_COMPILE_SCOPE=wide` or `whole` with `--forecast-execution compile` for whole-forecast serving. Whole compilation substantially improved warm HTTP throughput for repeated MetroPT shapes. Chiller condenser flow still exceeded the strict native tolerance, including with separate flip passes. Eager with `VTSFM_TIMESFM_FLIP_LAYOUT=split` matched native on the five-signal and integration suites. [TimesFM A100 study](baselines/2026-11-25-timesfm-compile/README.md)
+
+Toto can opt into `VTSFM_TOTO_FAST_UNIT_SCALING=stride-aware`. In eager FP32 it keeps the scalar identity shortcut for contiguous inputs and executes the original multiplication on strided inputs or tensor-valued scales. That mode passed the tested stress signals and integration cases. Whole compilation still exceeded tolerance on condenser flow. [Toto A100 follow-up](baselines/2026-11-25-toto-native-layout/README.md)
+
+### Experimental whole-forecast scope for Toto FP32
+
+The default compiled Toto path wraps `model.transformer.forward` and keeps
+selected submodules eager. Set `VTSFM_TOTO_COMPILE_SCOPE=whole` with
+`--forecast-execution compile --forecast-precision fp32` to compile the common
+tensor forecast method instead. Both the single-request and fused execution
+paths call it. This scope includes masked input preparation, the native forecast
+loop and the owned nine-quantile output. It uses the same bounded static
+specialization policy, Inductor options and disabled CUDA Graphs as guarded
+compilation. The number of resulting compiler graphs can exceed one.
+
+Run the focused comparison on an idle, pinned Linux GPU with the prepared
+AssetOpsBench data directory. Start each arm with a fresh output directory and
+reverse the arm and shape orders for a second block. Each run uses an
+independent native oracle, one serving slot and a fresh worker. The benchmark
+reports startup, first call per shape, compiler counters, warm HTTP p50/p95,
+requests/s, allocator peaks and sampled device residency separately.
+
+```bash
+.venv-toto2/bin/python -m benchmarks.toto_compile --arm eager --data-dir data --output results/toto72/1-eager
+.venv-toto2/bin/python -m benchmarks.toto_compile --arm core --data-dir data --output results/toto72/1-core
+.venv-toto2/bin/python -m benchmarks.toto_compile --arm whole --data-dir data --output results/toto72/1-whole
+VTSFM_TOTO_COMPILE_SCOPE=whole ./scripts/test-models.sh --adapter toto2 --profile integration --forecast-execution compile --forecast-precision fp32
+VTSFM_TOTO_COMPILE_SCOPE=whole ./scripts/test-models.sh --adapter toto2 --profile accuracy --forecast-execution compile --forecast-precision fp32
+```
+
+Each serving arm keeps the default fast unit-scaling shims active. Their
+source pin and both the neural-core and full-forecast compile targets are
+checked through the loopback benchmark RPC before timing. First-use costs
+include fresh per-arm Inductor and Triton disk caches. Optional `--shapes`
+arguments are ordered `rows,context,horizon` triples. With four clients the
+reported throughput includes time queued behind the one serving slot. See the
+[A100 measurements and qualification](baselines/2026-11-25-toto-whole-compile/README.md).
+
+### Shared model checks
 
 Use the existing manual profiles on an idle GPU:
 

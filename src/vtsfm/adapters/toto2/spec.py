@@ -15,6 +15,19 @@ FORECAST_SETTINGS = ForecastSettings(
 )
 DECODE_BLOCK_SIZE = 768
 PATCH_SIZE = 32  # From config.json at MODEL_REVISION; GPU tests check the loaded model.
+COMPILE_SCOPE_ENV = 'VTSFM_TOTO_COMPILE_SCOPE'
+
+
+def compile_scope(environment, execution, precision):
+    """Select the experimental FP32 whole forecast or the established guarded core."""
+    scope = environment.get(COMPILE_SCOPE_ENV, 'core')
+    if scope not in ('core', 'whole'):
+        raise ValueError(f'{COMPILE_SCOPE_ENV} must be core or whole, got {scope!r}')
+    if scope == 'whole' and (execution != 'compile' or precision not in (None, 'fp32')):
+        raise ValueError('Toto whole compilation requires --forecast-execution compile and FP32')
+    return scope
+
+
 TOTO2 = AdapterSpec(
     name='toto2', model_id=MODEL_ID, model_revision=MODEL_REVISION,
     architectures=('VTSFMTotoForForecasting',),

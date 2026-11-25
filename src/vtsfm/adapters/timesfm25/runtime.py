@@ -9,22 +9,50 @@ from torch.nn import functional as F
 
 from vtsfm.execution import ExecutionResult, PreparedBatch
 from vtsfm.precision import PRECISION_ENV, configure_precision
-from vtsfm.compilation import compile_core, execution_mode
+from vtsfm.compilation import compile_core, compile_method, execution_mode
+from vtsfm.config import FORECAST_BATCH_ROWS_ENV
+from vtsfm.stepping import CONTINUOUS_ENV
 
 from .graph_config import FORECAST_MODE_ENV, validate_fixed_forecast_execution
-from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TIMESFM25
+from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TIMESFM25, compile_scope, flip_layout
+
+
+# Keep explicit graph replay under the adapter’s separate buffer owner.
+_WIDER_INDUCTOR_OPTIONS = {'triton.cudagraphs': False}
 
 
 class TimesFMRuntime:
     def __init__(self, config):
         execution = execution_mode()
+        scope = compile_scope(os.environ, execution, os.environ.get(PRECISION_ENV),
+                              continuous=os.environ.get(CONTINUOUS_ENV) == '1')
         if FORECAST_MODE_ENV in os.environ:
             validate_fixed_forecast_execution(os.environ.get(PRECISION_ENV), execution)
-        self.precision = configure_precision('timesfm25')
+            if scope != 'core':
+                raise ValueError('TimesFM positioned forecasts require the standard whole-forecast serving path')
+        self.compile_scope = 'eager' if scope == 'core' and execution == 'eager' else scope
+        self.flip_layout = flip_layout(os.environ, os.environ.get(PRECISION_ENV),
+            independent_whole_forecast=(
+                FORECAST_MODE_ENV not in os.environ and os.environ.get(CONTINUOUS_ENV) != '1'
+                and os.environ.get(FORECAST_BATCH_ROWS_ENV, '0') == '0'
+                and scope not in ('positioned', 'positioned-eager')
+            ))
+        self.precision = configure_precision(
+            'timesfm25', 'fp32' if scope != 'core' or self.flip_layout == 'split' else None)
         self.model = timesfm.TimesFM_2p5_200M_torch(torch_compile=False).model
         self.fixed_forecast = None
-        if execution == 'compile':
+        self.positioned_forecast = None
+        if self.compile_scope == 'core':
             compile_model(self.model)
+        elif self.compile_scope == 'wide':
+            compile_method(self.model, 'forward', inductor_options=_WIDER_INDUCTOR_OPTIONS)
+        elif self.compile_scope == 'whole':
+            compile_method(self, '_forecast', inductor_options=_WIDER_INDUCTOR_OPTIONS)
+        elif self.compile_scope in ('positioned-eager', 'positioned'):
+            from .positioned_compile import PositionedForecast
+
+            self.positioned_forecast = PositionedForecast(self, compiled=self.compile_scope == 'positioned')
+
 
     @torch.inference_mode()
     def forecast(self, context, horizon):
@@ -40,6 +68,8 @@ class TimesFMRuntime:
     @torch.inference_mode()
     def execute(self, batch: PreparedBatch) -> ExecutionResult:
         """Collate prepared independent rows with a common dense history length."""
+        if getattr(self, 'flip_layout', 'packed') == 'split' and len(batch.requests) > 1:
+            raise ValueError('TimesFM split flips require one independent forecast request per model call')
         key = batch.plan.key
         if (key.adapter, key.model_id, key.model_revision) != ('timesfm25', MODEL_ID, MODEL_REVISION):
             raise ValueError('Batch key does not match the TimesFM checkpoint')
@@ -78,6 +108,9 @@ class TimesFMRuntime:
             raise ValueError('TimesFM model is owned by a paged stepper. Close it before running a whole forecast.')
         if not 1 <= horizon <= self.model.os:
             raise ValueError(f'TimesFM forecast horizon must be in [1,{self.model.os}]')
+        positioned = getattr(self, 'positioned_forecast', None)
+        if positioned is not None:
+            return positioned.run(context, observed, horizon)
         # Follow the pinned Google TimesFM 2.5 forecast closure (Apache-2.0).
         # Its outer normalization includes zero left padding to the next patch.
         left = -context.shape[-1] % self.model.p
@@ -88,14 +121,17 @@ class TimesFMRuntime:
         std = values.std(dim=-1, keepdim=True)
         normalized = revin(values, mean, std, reverse=False)
 
-        # Flip invariance decodes x and -x. Upstream runs two decode calls; the
-        # rows are independent, so one stream-major [x; -x] call (as in block
-        # mode) computes the same per-row values with half the kernel launches.
-        rows = normalized.shape[0]
-        both, both_spread = self._decode_quantiles(
-            torch.cat((normalized, -normalized)), padding.repeat(2, 1), horizon)
-        forecast, flipped_forecast = both[:rows], both[rows:]
-        spread, flipped_spread = both_spread[:rows], both_spread[rows:]
+        if getattr(self, 'flip_layout', 'packed') == 'split':
+            # Use the same batch size as upstream for both x and -x. Packing
+            # the passes can change FP32 reductions in geometry-sensitive GEMMs.
+            forecast, spread = self._decode_quantiles(normalized, padding, horizon)
+            flipped_forecast, flipped_spread = self._decode_quantiles(-normalized, padding, horizon)
+        else:
+            rows = normalized.shape[0]
+            both, both_spread = self._decode_quantiles(
+                torch.cat((normalized, -normalized)), padding.repeat(2, 1), horizon)
+            forecast, flipped_forecast = both[:rows], both[rows:]
+            spread, flipped_spread = both_spread[:rows], both_spread[rows:]
         forecast = (forecast - flipped_forecast.flip(-1)) / 2
         spread = (spread - flipped_spread.flip(-1)) / 2
 

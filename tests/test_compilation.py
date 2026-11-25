@@ -59,6 +59,20 @@ def test_invalid_mode_and_missing_adapter_hook_fail_before_launch():
         build_vllm_command(adapter='chronos2', forecast_execution='compile')
 
 
+def test_toto_whole_compile_requires_fp32_without_tf32(monkeypatch):
+    monkeypatch.setenv('VTSFM_TOTO_COMPILE_SCOPE', 'whole')
+    for mode, precision in [('eager', 'fp32'), ('compile', 'tf32'), ('compile', 'bf16')]:
+        with pytest.raises(ValueError, match='whole.*FP32'):
+            build_vllm_command(adapter='toto2', forecast_execution=mode, forecast_precision=precision)
+    _, child = build_vllm_command(adapter='toto2', forecast_execution='compile')
+    assert child['VTSFM_TOTO_COMPILE_SCOPE'] == 'whole'
+    assert child['VTSFM_PRECISION'] == 'fp32'
+    assert child['NVIDIA_TF32_OVERRIDE'] == '0'
+    monkeypatch.setenv('VTSFM_TOTO_COMPILE_SCOPE', 'typo')
+    with pytest.raises(ValueError, match='VTSFM_TOTO_COMPILE_SCOPE'):
+        build_vllm_command(adapter='toto2', forecast_execution='compile')
+
+
 def test_dry_run_records_selection_and_native_rejects_unimplemented_compile(capsys):
     assert main(['serve', '--adapter', 'toto2', '--forecast-execution', 'compile', '--dry-run']) == 0
     result = json.loads(capsys.readouterr().out)
