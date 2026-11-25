@@ -31,7 +31,7 @@ def test_repeated_rounds_match_native(model, horizon):
     device = next(model.model.parameters()).device
     history = torch.sin(torch.arange(134, device=device).reshape(2, 67) / 8)
     history[0, :14] = float('nan')
-    expected = model.forecast(history, horizon)
+    expected = torch.cat([model.forecast(history[:1,14:], horizon), model.forecast(history[1:], horizon)])
     stepper = MoiraiStepper(model)
     state = stepper.initialize(history, horizon)
     assert state.blocks_done == 0
@@ -60,7 +60,7 @@ def test_shared_round_survives_peer_release_and_new_arrival(model):
     cancelled, survivor = stepper.initialize(x[:1], 143), stepper.initialize(x[1:], 143)
     stepper.prefill([cancelled, survivor])
     stepper.advance([survivor, cancelled])
-    ref = weakref.ref(cancelled.inputs[0])
+    ref = weakref.ref(cancelled.groups[0].inputs[0])
     enabled = gc.isenabled()
     try:
         gc.disable()
@@ -80,7 +80,8 @@ def test_shared_round_survives_peer_release_and_new_arrival(model):
 
 @pytest.mark.skipif(not os.environ.get('VTSFM_MOIRAI_BLOCK_CHECKPOINT'),
                     reason='Set VTSFM_MOIRAI_BLOCK_CHECKPOINT=cpu or cuda in the pinned model environment')
-def test_real_checkpoint_shared_recursion_against_independent_native():
+@pytest.mark.parametrize('horizon', [147, 1024])
+def test_real_checkpoint_scheduled_recursion_against_independent_native(horizon):
     """An actual weight-parity check that can run with CUDA hidden as a separate CPU control."""
     import json
     from pathlib import Path
@@ -102,15 +103,46 @@ def test_real_checkpoint_shared_recursion_against_independent_native():
     model.model.to(device).eval()
     stepper = MoiraiStepper(model)
     ref_model = Moirai2Module.from_pretrained(snap).to(device).eval()
-    histories = [torch.sin(torch.arange(61) / 17), torch.cos(torch.arange(63) / 13)]
+    if horizon == 1024:
+        # This specific unequal-length forecast failed at Q0.1/step 688 on A100
+        # when independently submitted rows were merged/padded into one larger call.
+        from test_timesfm_http_batching import _case
+        requests = [_case('peer',(79,81),-1.,horizon), _case('other',(81,),1.,horizon)]
+        batches = [[torch.tensor(row['target']) for row in req['inputs']] for req in requests]
+    else:
+        batches = [[torch.sin(torch.arange(61)/17)], [torch.cos(torch.arange(63)/13)]]
     with torch.inference_mode():
-        states = [stepper.initialize(x.to(device)[None], 147) for x in histories]
+        states = []
+        for batch in batches:
+            lengths = tuple(len(x) for x in batch)
+            context = torch.full((len(batch),max(lengths)),float('nan'),device=device)
+            for row,x in zip(context,batch,strict=True):
+                row[-len(x):] = x
+            states.append(stepper.initialize(context,horizon,context_lengths=lengths))
         stepper.prefill(states)
         while not all(stepper.complete(s) for s in states):
             stepper.advance(states)
-        for x, state in zip(histories, states, strict=True):
-            reference = Moirai2Forecast(module=ref_model, context_length=len(x), prediction_length=147,
-                target_dim=1, feat_dynamic_real_dim=0, past_feat_dynamic_real_dim=0).to(device).eval()
-            official = torch.from_numpy(reference.predict([x.numpy()])).to(device)
-            torch.testing.assert_close(stepper.finalize(state), official, atol=1e-4, rtol=1e-4)
+        for batch, state in zip(batches, states, strict=True):
+            actual = stepper.finalize(state)
+            for row,x in zip(actual,batch,strict=True):
+                reference = Moirai2Forecast(module=ref_model, context_length=len(x), prediction_length=horizon,
+                    target_dim=1, feat_dynamic_real_dim=0, past_feat_dynamic_real_dim=0).to(device).eval()
+                official = torch.from_numpy(reference.predict([x.numpy()])).to(device)
+                torch.testing.assert_close(row, official[0], atol=1e-4, rtol=1e-4)
             stepper.release(state)
+
+
+def test_supplied_lengths_validate_padding_and_observations(model):
+    import torch
+    from vtsfm.adapters.moirai2.stepping import MoiraiStepper
+
+    stepper = MoiraiStepper(model)
+    x = torch.zeros(2, 4, device=next(model.model.parameters()).device)
+    x[1, 1] = torch.nan
+    with pytest.raises(ValueError, match='padding'):
+        stepper.initialize(x, 65, context_lengths=(4, 4))
+    x[1, 1] = 1
+    with pytest.raises(ValueError, match='padding'):
+        stepper.initialize(x, 65, context_lengths=(4, 3))
+    x[1, 0] = torch.nan
+    stepper.release(stepper.initialize(x, 65, context_lengths=(4, 3)))

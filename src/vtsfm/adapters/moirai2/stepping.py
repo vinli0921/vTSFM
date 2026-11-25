@@ -1,6 +1,6 @@
 """Resumable eager FP32 Moirai 2 quantile forecasts for independent univariate rows.
 
-The native module runs on the full packed sequence each round. The first call
+Each owner keeps the native true-length batch geometries. The first call
 has one trajectory per row; subsequent calls carry nine and reduce all 81
 candidates. No attention KV or token-prefix reuse is assumed.
 """
@@ -19,28 +19,35 @@ _FORWARD_SHA256 = 'eb826593fd54756927e4e15a5bab8dce97c43e905ca8dc2ce8520bea82d2a
 
 
 @dataclass
+class LengthGroup:
+    indices: tuple[int, ...]
+    context_tokens: int
+    prediction_tokens: int
+    inputs: tuple
+    output: torch.Tensor
+
+
+@dataclass
 class MoiraiBlockState:
     rows: int
     context_length: int
-    context_tokens: int
-    prediction_tokens: int
     horizon: int
-    inputs: tuple
-    output: torch.Tensor | None
+    groups: tuple[LengthGroup, ...]
     blocks_done: int = 0
     cache_bytes = 0
     cache_position = None
 
     @property
     def bucket(self):
-        # Every row uses the same padded sequence geometry and prediction index.
-        return (self.context_tokens, self.prediction_tokens, self.blocks_done)
+        # Even equal-shape *additional* rows can change GEMM rounding enough to
+        # diverge after 16 autoregressive rounds. Preserve each native batch.
+        return (id(self),)
 
     @property
     def tensor_bytes(self):
         sizes = {}
-        for tensor in (*self.inputs, self.output):
-            if tensor is not None:
+        for group in self.groups:
+            for tensor in (*group.inputs, group.output):
                 storage = tensor.untyped_storage()
                 sizes[storage.data_ptr()] = storage.nbytes()
         return sum(sizes.values())
@@ -66,7 +73,7 @@ class MoiraiStepper:
         self.quantiles = None
 
     @torch.inference_mode()
-    def initialize(self, context, horizon):
+    def initialize(self, context, horizon, *, context_lengths=None):
         model_device = next(self.runtime.model.parameters()).device
         if context.ndim != 2 or context.dtype != torch.float32 or context.device != model_device:
             raise ValueError('Moirai block input must be FP32 [rows, context] on the model device')
@@ -74,24 +81,37 @@ class MoiraiStepper:
         if (not 1 <= rows <= DEFAULT_LIMITS.max_request_rows or not 1 <= width <= DEFAULT_LIMITS.max_context
                 or type(horizon) is not int or not 1 <= horizon <= DEFAULT_LIMITS.max_horizon):
             raise ValueError('Moirai block shape exceeds the admission envelope')
-        key = (width, horizon, context.device)
-        cached = self.runtime._cached_runner
-        if cached is not None and cached[0] == key and cached[1].module is self.runtime.model:
-            runner = cached[1]
-        else:
-            runner = self.runtime._forecast_runner(key, cached)
-        if self.runtime.model.training:
-            runner.eval()
-        observed = torch.isfinite(context)
-        inputs = runner._convert(PATCH_SIZE, context.masked_fill(~observed, 0).unsqueeze(-1),
-                                 observed.unsqueeze(-1), ~observed)
-        # Store the requested future only. The native prefix in quantile_prediction
-        # is copied from the input but is never read by the decoder or public output.
-        n = runner.prediction_token_length(PATCH_SIZE)
-        out = context.new_empty((rows, n, 9, PATCH_SIZE))
+        if context_lengths is None:  # Direct numerical callers lack the transport's CPU lengths.
+            context_lengths = torch.isfinite(context).sum(dim=1).tolist()
+        if (len(context_lengths) != rows or any(type(n) is not int or not 1 <= n <= width for n in context_lengths)):
+            raise ValueError('Moirai block lengths must match the numerical rows')
+        lengths = torch.tensor(context_lengths, device=context.device)
+        padding = torch.arange(width, device=context.device) < (width - lengths[:, None])
+        if not torch.where(padding, context.isnan(), context.isfinite()).all():
+            raise ValueError('Moirai block rows require NaN left padding and finite observed histories')
+
+        groups = []
+        for length in sorted(set(context_lengths)):
+            indices = tuple(i for i, n in enumerate(context_lengths) if n == length)
+            # Uniform requests (including the eight-row maximum) need no gather.
+            values = context[:, -length:] if len(indices) == rows else context[list(indices), -length:]
+            key = (length, horizon, context.device)
+            cached = self.runtime._cached_runner
+            if cached is not None and cached[0] == key and cached[1].module is self.runtime.model:
+                runner = cached[1]
+            else:
+                runner = self.runtime._forecast_runner(key, cached)
+            if self.runtime.model.training:
+                runner.eval()
+            inputs = runner._convert(PATCH_SIZE, values.unsqueeze(-1),
+                                     torch.ones_like(values, dtype=torch.bool).unsqueeze(-1),
+                                     torch.zeros_like(values, dtype=torch.bool))
+            n = runner.prediction_token_length(PATCH_SIZE)
+            output = values.new_empty((len(indices), n, 9, PATCH_SIZE))
+            groups.append(LengthGroup(indices, runner.context_token_length(PATCH_SIZE), n, inputs, output))
         if self.quantiles is None or self.quantiles.device != context.device:
             self.quantiles = context.new_tensor(self.runtime.model.quantile_levels)
-        return MoiraiBlockState(rows, width, runner.context_token_length(PATCH_SIZE), n, horizon, inputs, out)
+        return MoiraiBlockState(rows, width, horizon, tuple(groups))
 
     @torch.inference_mode()
     def prefill(self, states):
@@ -102,55 +122,53 @@ class MoiraiStepper:
         self._step(states, recursive=True)
 
     def _step(self, states, *, recursive):
-        first = states[0]
-        if any(s.bucket != first.bucket or s.output is None or self.complete(s) for s in states):
-            raise ValueError('Moirai block calls require live, compatible request states')
-        if recursive != (first.blocks_done > 0):
-            raise ValueError('Moirai forecast stage does not match request progress')
-        if len(states) == 1:
-            inputs = first.inputs
-        else:
-            inputs = tuple(torch.cat(field, dim=0) for field in zip(*(s.inputs for s in states), strict=True))
-        predictions = self.runtime.model(*inputs, training_mode=False)
+        for state in states:
+            if not state.groups or self.complete(state) or recursive != (state.blocks_done > 0):
+                raise ValueError('Moirai forecast stage does not match live request progress')
+            for group in state.groups:
+                self._advance_group(group, state.blocks_done)
+            state.blocks_done += 1
+
+    def _advance_group(self, group, round_index):
+        predictions = self.runtime.model(*group.inputs, training_mode=False)
         per_call = self.runtime.model.num_predict_token
-        start = first.blocks_done * per_call
-        count = min(per_call, first.prediction_tokens - start)
-        absolute = first.context_tokens + start
-        # Select the upstream prediction source token before reshaping the head.
-        # Shape: [rows, (prev trajectories), future patches, quantiles, patch].
+        start = round_index * per_call
+        count = min(per_call, group.prediction_tokens - start)
+        absolute = group.context_tokens + start
+        # Shape [rows, (previous trajectories), future patches, quantiles, patch].
         block = predictions[..., absolute - 1, :].unflatten(-1, (per_call, 9, PATCH_SIZE))[..., :count, :, :]
-        if recursive:
-            # [B,Qprev,K,Qnew,P] -> [B,K,Qprev*Qnew,P] -> [B,K,Qout,P].
+        if round_index:
             candidates = block.permute(0, 2, 1, 3, 4).flatten(2, 3)
             block = torch.quantile(candidates, self.quantiles, dim=2).permute(1, 2, 0, 3)
-        for state, values in zip(states, block.split([s.rows for s in states]), strict=True):
-            state.output[:, start:start + count].copy_(values)
-            state.blocks_done += 1
-            if self.complete(state):
-                state.inputs = ()
-                continue
-            if not recursive:
-                # Immutable masks and IDs can share their owner's base storage.
-                # Target and prediction_mask are changed as forecasts become observed.
-                expanded = tuple(field.unsqueeze(1).expand(-1, 9, *field.shape[1:]) for field in state.inputs)
-                state.inputs = (expanded[0].clone(), *expanded[1:5], expanded[5].clone())
-            state.inputs[0][:, :, absolute:absolute + count].copy_(values.transpose(1, 2))
-            state.inputs[5][:, :, absolute:absolute + count] = False
+        group.output[:, start:start + count].copy_(block)
+        if start + count == group.prediction_tokens:
+            group.inputs = ()
+            return
+        if not round_index:
+            # Only targets and prediction masks are modified by future rounds.
+            expanded = tuple(field.unsqueeze(1).expand(-1, 9, *field.shape[1:]) for field in group.inputs)
+            group.inputs = (expanded[0].clone(), *expanded[1:5], expanded[5].clone())
+        group.inputs[0][:, :, absolute:absolute + count].copy_(block.transpose(1, 2))
+        group.inputs[5][:, :, absolute:absolute + count] = False
 
     def model_call_work(self, states):
-        s = states[0]
-        # Model attention pair count for the active native pass. Whole-horizon
-        # work is also reserved across every active owner by the V1 scheduler.
-        return sum(x.rows for x in states) * (9 if s.blocks_done else 1) * (s.context_tokens + s.prediction_tokens)**2
+        return sum(len(group.indices) * (9 if state.blocks_done else 1)
+                   * (group.context_tokens + group.prediction_tokens)**2
+                   for state in states for group in state.groups)
 
     def complete(self, state):
         return state.blocks_done * self.block_size >= state.horizon
 
     def finalize(self, state):
-        if not self.complete(state) or state.output is None:
+        if not self.complete(state) or not state.groups:
             raise ValueError('Cannot finalize an unfinished or released Moirai forecast')
-        return state.output.transpose(1, 2).flatten(2)[..., :state.horizon].clone(memory_format=torch.contiguous_format)
+        if len(state.groups) == 1:
+            values = state.groups[0].output.transpose(1, 2).flatten(2)[..., :state.horizon]
+            return values.clone(memory_format=torch.contiguous_format)
+        out = state.groups[0].output.new_empty((state.rows, 9, state.horizon))
+        for group in state.groups:
+            out[list(group.indices)] = group.output.transpose(1, 2).flatten(2)[..., :state.horizon]
+        return out
 
     def release(self, state):
-        state.inputs = ()
-        state.output = None
+        state.groups = ()

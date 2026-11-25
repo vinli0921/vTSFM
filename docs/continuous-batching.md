@@ -330,8 +330,12 @@ active univariate rows in total. The scheduler reserves whole-horizon work under
 the ordinary Moirai admission limits. Each virtual marker represents 64 forecast
 samples (four patches of 16). The first native module call processes one trajectory
 per series. Each subsequent round processes nine per series, then reduces all 81
-quantile candidates and feeds the nine resulting trajectories back. Calls fuse
-owners with matching context patch count, prediction patch count and round.
+quantile candidates and feeds the nine resulting trajectories back. The scheduler
+can interleave requests between rounds. For each request the model executes rows
+grouped by true history length, exactly as in the native reference. Concatenating
+rows from independent requests changed FP32 native quantiles over 16 recursive
+rounds on the A100, including for equal-length inputs. This prototype therefore
+keeps model calls isolated per owner.
 There is no attention KV state. Requests own their expanded targets, masks and
 output buffers until completion or cancellation. This mode is experimental.
 Ordinary Moirai serving still runs complete forecasts.

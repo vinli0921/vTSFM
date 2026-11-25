@@ -51,7 +51,7 @@ def test_native_parity_staggered_arrivals_cancellation_and_capacity(gpu, tmp_pat
 
         ctl, url = server['control'], server['url']
         # Start equal-round owners together, then enqueue short work behind the first
-        # block. The trace records both fusion and independent short completion.
+        # block. The trace records interleaving and independently sized native calls.
         _arm(server, 'prefill')
         with ThreadPoolExecutor(max_workers=3) as clients:
             ctl.post(url + '/pause', params={'mode':'keep'}, timeout=10).raise_for_status()
@@ -73,7 +73,9 @@ def test_native_parity_staggered_arrivals_cancellation_and_capacity(gpu, tmp_pat
         _empty(server)
         steps = [e for e in _events(server['trace']) if e['event'] == 'step']
         parents = {'pooling-join-peer', 'pooling-join-other'}
-        assert any(e['stage'] == 'decode' and set(e['request_ids']) == parents for e in steps)
+        assert all(len(e['request_ids']) == 1 for e in steps)
+        assert parents <= {e['request_ids'][0] for e in steps if e['stage'] == 'decode'}
+        assert any(e['active_rows'] >= 3 for e in steps)
         ends = {wire:e['end_ns'] for e in steps for wire in e['finished_ids']}
         assert ends['pooling-join-short'] < min(ends[k] for k in parents)
 

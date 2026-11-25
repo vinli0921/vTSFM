@@ -114,7 +114,8 @@ class BlockExecutor:
             raise ValueError('Block scheduler exceeded the active numerical capacity')
 
         for slot, request, cost in new:
-            self.states[slot.request_id] = self.stepper.initialize(request.context, request.horizon)
+            self.states[slot.request_id] = self.stepper.initialize(
+                request.context, request.horizon, context_lengths=request.context_lengths)
             self.metadata[slot.request_id] = _ResponseMetadata(request.request_id, request.item_ids,
                                                               request.horizon, request.quantile_levels, cost)
         calls = plan_block_calls([

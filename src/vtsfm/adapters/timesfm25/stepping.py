@@ -130,7 +130,7 @@ class TimesFMStepper:
         validate_block_decode_source(self.model)
 
     @torch.inference_mode()
-    def initialize(self, context, horizon):
+    def initialize(self, context, horizon, *, context_lengths=None):
         if (not isinstance(context, torch.Tensor) or context.ndim != 2
                 or not context.shape[0] or not 1 <= context.shape[1] <= 8192):
             raise ValueError('TimesFM block context must be nonempty [series, history<=8192]')
