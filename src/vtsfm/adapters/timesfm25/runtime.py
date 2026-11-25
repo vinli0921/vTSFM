@@ -10,10 +10,11 @@ from torch.nn import functional as F
 from vtsfm.execution import ExecutionResult, PreparedBatch
 from vtsfm.precision import PRECISION_ENV, configure_precision
 from vtsfm.compilation import compile_core, compile_method, execution_mode
+from vtsfm.config import FORECAST_BATCH_ROWS_ENV
 from vtsfm.stepping import CONTINUOUS_ENV
 
 from .graph_config import FORECAST_MODE_ENV, validate_fixed_forecast_execution
-from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TIMESFM25, compile_scope
+from .spec import FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TIMESFM25, compile_scope, flip_layout
 
 
 # Keep explicit graph replay under the adapter’s separate buffer owner.
@@ -30,7 +31,14 @@ class TimesFMRuntime:
             if scope != 'core':
                 raise ValueError('TimesFM positioned forecasts require the standard whole-forecast serving path')
         self.compile_scope = 'eager' if scope == 'core' and execution == 'eager' else scope
-        self.precision = configure_precision('timesfm25', 'fp32' if scope != 'core' else None)
+        self.flip_layout = flip_layout(os.environ, os.environ.get(PRECISION_ENV),
+            independent_whole_forecast=(
+                FORECAST_MODE_ENV not in os.environ and os.environ.get(CONTINUOUS_ENV) != '1'
+                and os.environ.get(FORECAST_BATCH_ROWS_ENV, '0') == '0'
+                and scope not in ('positioned', 'positioned-eager')
+            ))
+        self.precision = configure_precision(
+            'timesfm25', 'fp32' if scope != 'core' or self.flip_layout == 'split' else None)
         self.model = timesfm.TimesFM_2p5_200M_torch(torch_compile=False).model
         self.fixed_forecast = None
         self.positioned_forecast = None
@@ -60,6 +68,8 @@ class TimesFMRuntime:
     @torch.inference_mode()
     def execute(self, batch: PreparedBatch) -> ExecutionResult:
         """Collate prepared independent rows with a common dense history length."""
+        if getattr(self, 'flip_layout', 'packed') == 'split' and len(batch.requests) > 1:
+            raise ValueError('TimesFM split flips require one independent forecast request per model call')
         key = batch.plan.key
         if (key.adapter, key.model_id, key.model_revision) != ('timesfm25', MODEL_ID, MODEL_REVISION):
             raise ValueError('Batch key does not match the TimesFM checkpoint')
@@ -111,14 +121,17 @@ class TimesFMRuntime:
         std = values.std(dim=-1, keepdim=True)
         normalized = revin(values, mean, std, reverse=False)
 
-        # Flip invariance decodes x and -x. Upstream runs two decode calls; the
-        # rows are independent, so one stream-major [x; -x] call (as in block
-        # mode) computes the same per-row values with half the kernel launches.
-        rows = normalized.shape[0]
-        both, both_spread = self._decode_quantiles(
-            torch.cat((normalized, -normalized)), padding.repeat(2, 1), horizon)
-        forecast, flipped_forecast = both[:rows], both[rows:]
-        spread, flipped_spread = both_spread[:rows], both_spread[rows:]
+        if getattr(self, 'flip_layout', 'packed') == 'split':
+            # Use the same batch size as upstream for both x and -x. Packing
+            # the passes can change FP32 reductions in geometry-sensitive GEMMs.
+            forecast, spread = self._decode_quantiles(normalized, padding, horizon)
+            flipped_forecast, flipped_spread = self._decode_quantiles(-normalized, padding, horizon)
+        else:
+            rows = normalized.shape[0]
+            both, both_spread = self._decode_quantiles(
+                torch.cat((normalized, -normalized)), padding.repeat(2, 1), horizon)
+            forecast, flipped_forecast = both[:rows], both[rows:]
+            spread, flipped_spread = both_spread[:rows], both_spread[rows:]
         forecast = (forecast - flipped_forecast.flip(-1)) / 2
         spread = (spread - flipped_spread.flip(-1)) / 2
 
