@@ -50,6 +50,7 @@ def native_assembly(parts, horizon):
     forecast, flipped_forecast, spread, flipped_spread = parts
     spread = (spread - flip_quantiles(flipped_spread)) / 2
     forecast = (forecast - flip_quantiles(flipped_forecast)) / 2
+    spread = spread[:, :forecast.shape[1], :]
     for index in (1, 2, 3, 4, 6, 7, 8, 9):
         forecast[..., index] = spread[..., index] - spread[..., 5] + forecast[..., 5]
     forecast = forecast[:, :horizon, :]
