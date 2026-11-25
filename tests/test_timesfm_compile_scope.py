@@ -49,3 +49,54 @@ def test_non_timesfm_adapters_ignore_timesfm_scope(monkeypatch):
     monkeypatch.setenv(SCOPE_ENV, 'whole')
     _, env = build_vllm_command(adapter='moirai2')
     assert SCOPE_ENV not in env
+
+
+@pytest.mark.parametrize('scope,mode', [('positioned-eager', 'eager'), ('positioned', 'compile')])
+def test_positioned_comparison_uses_matching_fp32_whole_forecast_paths(monkeypatch, scope, mode):
+    monkeypatch.delenv('VTSFM_PRECISION', raising=False)
+    monkeypatch.setenv(SCOPE_ENV, scope)
+    _, environment = build_vllm_command(adapter='timesfm25', forecast_execution=mode)
+    assert environment['VTSFM_PRECISION'] == 'fp32'
+    assert environment['NVIDIA_TF32_OVERRIDE'] == '0'
+    with pytest.raises(ValueError, match='whole-forecast'):
+        build_vllm_command(adapter='timesfm25', forecast_execution=mode, continuous_batching=True)
+    with pytest.raises(ValueError, match='requires'):
+        build_vllm_command(adapter='timesfm25',
+                           forecast_execution='eager' if mode == 'compile' else 'compile')
+
+
+def test_positioned_control_rejects_combining_with_fixed_cuda_graph(monkeypatch):
+    monkeypatch.setenv(SCOPE_ENV, 'positioned-eager')
+    with pytest.raises(ValueError, match='standard whole-forecast'):
+        build_vllm_command(adapter='timesfm25', forecast_execution='eager',
+                           timesfm_forecast_mode='dense-graph')
+
+
+def test_positioned_forecast_matches_eager_with_ragged_histories_and_reuse():
+    torch = pytest.importorskip('torch')
+    pytest.importorskip('timesfm')
+    from types import SimpleNamespace
+
+    from test_timesfm_block_decode import tiny_model
+    from vtsfm.adapters.timesfm25.positioned_compile import PositionedForecast
+    from vtsfm.adapters.timesfm25.runtime import TimesFMRuntime
+
+    model = tiny_model()
+    eager = object.__new__(TimesFMRuntime)
+    eager.model = model
+    student = PositionedForecast(SimpleNamespace(model=model), compiled=False)
+    a = torch.arange(97, dtype=torch.float32).sin().unsqueeze(0)
+    b = torch.arange(2 * 163, dtype=torch.float32).reshape(2, 163).cos() + 1
+    b[0, :66] = torch.nan
+    workloads = [(a, 96), (b, 257), (b - 2, 257), (a, 96)]
+    preserved = first = None
+    with torch.inference_mode():
+        for context, horizon in workloads:
+            original = context.clone()
+            observed = torch.isfinite(context)
+            prediction = student.run(context, observed, horizon)
+            if first is None:
+                first, preserved = prediction, prediction.clone()
+            torch.testing.assert_close(prediction, eager.forecast(context, horizon), rtol=1e-5, atol=1e-5)
+            torch.testing.assert_close(context, original, rtol=0, atol=0, equal_nan=True)
+    torch.testing.assert_close(first, preserved, rtol=0, atol=0)

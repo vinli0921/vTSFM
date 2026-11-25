@@ -23,20 +23,28 @@ _WIDER_INDUCTOR_OPTIONS = {'triton.cudagraphs': False}
 class TimesFMRuntime:
     def __init__(self, config):
         execution = execution_mode()
-        if FORECAST_MODE_ENV in os.environ:
-            validate_fixed_forecast_execution(os.environ.get(PRECISION_ENV), execution)
         scope = compile_scope(os.environ, execution, os.environ.get(PRECISION_ENV),
                               continuous=os.environ.get(CONTINUOUS_ENV) == '1')
-        self.compile_scope = scope if execution == 'compile' else 'eager'
+        if FORECAST_MODE_ENV in os.environ:
+            validate_fixed_forecast_execution(os.environ.get(PRECISION_ENV), execution)
+            if scope != 'core':
+                raise ValueError('TimesFM positioned forecasts require the standard whole-forecast serving path')
+        self.compile_scope = 'eager' if scope == 'core' and execution == 'eager' else scope
         self.precision = configure_precision('timesfm25', 'fp32' if scope != 'core' else None)
         self.model = timesfm.TimesFM_2p5_200M_torch(torch_compile=False).model
         self.fixed_forecast = None
+        self.positioned_forecast = None
         if self.compile_scope == 'core':
             compile_model(self.model)
         elif self.compile_scope == 'wide':
             compile_method(self.model, 'forward', inductor_options=_WIDER_INDUCTOR_OPTIONS)
         elif self.compile_scope == 'whole':
             compile_method(self, '_forecast', inductor_options=_WIDER_INDUCTOR_OPTIONS)
+        elif self.compile_scope in ('positioned-eager', 'positioned'):
+            from .positioned_compile import PositionedForecast
+
+            self.positioned_forecast = PositionedForecast(self, compiled=self.compile_scope == 'positioned')
+
 
     @torch.inference_mode()
     def forecast(self, context, horizon):
@@ -90,6 +98,9 @@ class TimesFMRuntime:
             raise ValueError('TimesFM model is owned by a paged stepper. Close it before running a whole forecast.')
         if not 1 <= horizon <= self.model.os:
             raise ValueError(f'TimesFM forecast horizon must be in [1,{self.model.os}]')
+        positioned = getattr(self, 'positioned_forecast', None)
+        if positioned is not None:
+            return positioned.run(context, observed, horizon)
         # Follow the pinned Google TimesFM 2.5 forecast closure (Apache-2.0).
         # Its outer normalization includes zero left padding to the next patch.
         left = -context.shape[-1] % self.model.p

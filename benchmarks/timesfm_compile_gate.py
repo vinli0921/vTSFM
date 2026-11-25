@@ -21,11 +21,11 @@ from benchmarks.model_evaluation import QUANTILES, signal_cases
 from benchmarks.run import GpuMonitor, OwnedProcesses
 from benchmarks.timesfm_graph_http import _GuardedMonitor, _reference
 from benchmarks.timesfm_native_kv import _source_metadata, _write
-from vtsfm.adapters.timesfm25.spec import COMPILE_SCOPE_ENV
+from vtsfm.adapters.timesfm25.spec import COMPILE_SCOPE_ENV, COMPILE_SCOPES
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCOPES = ('eager', 'core', 'wide', 'whole')
+SCOPES = ('eager', *COMPILE_SCOPES)
 TOLERANCE = 1e-4
 
 
@@ -130,7 +130,7 @@ def worker(args):
     _write(args.output / 'candidate.json', result)
     if not numerics_ok:
         return 3
-    if args.scope != 'eager' and graphs < 1:
+    if args.scope not in ('eager', 'positioned-eager') and graphs < 1:
         raise RuntimeError('No active compilation observed')
     return 0
 
@@ -158,7 +158,9 @@ def run(args):
             result['reference_sha256'] = hashlib.sha256((args.output / 'native-reference.json').read_bytes()).hexdigest()
             result['cases_sha256'] = hashlib.sha256((args.output / 'cases.json').read_bytes()).hexdigest()
             if args.scope != 'eager':
-                env.update({COMPILE_SCOPE_ENV: args.scope, 'VTSFM_FORECAST_EXECUTION': 'compile'})
+                env[COMPILE_SCOPE_ENV] = args.scope
+                if args.scope != 'positioned-eager':
+                    env['VTSFM_FORECAST_EXECUTION'] = 'compile'
             command = [sys.executable, '-m', 'benchmarks.timesfm_compile_gate', *sys.argv[1:], '--worker']
             monitor.assert_idle()
             child = owner.spawn(command, env, 'candidate')
