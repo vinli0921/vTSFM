@@ -13,7 +13,7 @@ from vllm.multimodal.parse import DictEmbeddingItems, MultiModalDataItems, Multi
 from vllm.multimodal.processing import BaseDummyInputsBuilder, BaseMultiModalProcessor, BaseProcessingInfo
 
 from .transport import decode_metadata, encode_metadata
-from vtsfm.stepping import CONTINUOUS_ENV
+from vtsfm.stepping import CONTINUOUS_ENV, forecast_blocks
 
 MODALITY = 'timeseries'
 
@@ -74,7 +74,7 @@ class ForecastMultiModalProcessor(BaseMultiModalProcessor):
         values = {name: MultiModalFieldElem(data=data[name], field=config.field)
                   for name, config in fields().items()}
         # In block mode each marker is one forecast block, never a numeric value.
-        blocks = ((decode_metadata(data['request_metadata'])['horizon'] + 127) // 128
+        blocks = (forecast_blocks(decode_metadata(data['request_metadata'])['horizon'])
                   if os.environ.get(CONTINUOUS_ENV) == '1' else 1)
         return mm_input(
             prompt_token_ids=[1] * blocks,

@@ -77,7 +77,7 @@ def _empty(server):
 
 
 @contextmanager
-def _server(directory, monitor, *, continuous=True, slots=3, queue_limit=16, fusion_rows=8):
+def _server(directory, monitor, *, continuous=True, slots=3, queue_limit=16, fusion_rows=8, adapter='timesfm25'):
     import requests
     from benchmarks.run import OwnedProcesses, ensure_port_free, wait_ready
     from vtsfm.adapters import get_adapter
@@ -90,7 +90,7 @@ def _server(directory, monitor, *, continuous=True, slots=3, queue_limit=16, fus
         port = listener.getsockname()[1]
     ensure_port_free('127.0.0.1', port)
     command, environment = build_vllm_command(
-        adapter='timesfm25', port=port, benchmark=True, max_num_seqs=slots,
+        adapter=adapter, port=port, benchmark=True, max_num_seqs=slots,
         forecast_batch_rows=fusion_rows if slots > 1 else None,
         continuous_batching=continuous, forecast_queue_limit=queue_limit)
     if continuous:
@@ -105,7 +105,7 @@ def _server(directory, monitor, *, continuous=True, slots=3, queue_limit=16, fus
         child = owner.spawn(command, environment, 'continuous-server')
         wait_ready(child, url, control, timeout=180)
         server = {'url': url, 'control': control, 'child': child, 'trace': trace,
-                  'model': get_adapter('timesfm25').model_id,
+                  'model': get_adapter(adapter).model_id,
                   'log': directory / 'continuous-server.log', 'gate': directory / 'gate'}
         if continuous:
             _rpc(server, 'continuous_install', str(server['gate']))

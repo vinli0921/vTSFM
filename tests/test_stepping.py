@@ -140,3 +140,11 @@ def test_resumable_adapter_late_arrival_completion_reordering_and_cancellation()
     assert 'e' not in results and set(results) == {'a', 'short', 'later'}
     assert results['a'] == tuple(tuple(('a', row, block) for row in range(2)) for block in range(4))
     assert results['later'] == ((('later', 0, 0),), (('later', 0, 1),))
+
+
+def test_moirai_forecast_markers_match_native_64_sample_rounds(monkeypatch):
+    from vtsfm.stepping import forecast_blocks
+
+    monkeypatch.setenv('VTSFM_ADAPTER', 'moirai2')
+    monkeypatch.setenv('VTSFM_EXPERIMENTAL_MOIRAI_BLOCKS', '1')
+    assert [forecast_blocks(h) for h in (1, 64, 65, 96, 128, 129, 1024)] == [1, 1, 2, 2, 2, 3, 16]

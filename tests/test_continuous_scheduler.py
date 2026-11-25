@@ -341,3 +341,16 @@ def test_whole_forecast_diagnostic_trace_preserves_native_schedule(scheduler_mod
     assert all(event['engine_request_ids'] == ['engine-a-suffix'] for event in events)
     assert all(not event['truncated'] for event in events)
     assert expected.num_scheduled_tokens == {'engine-a-suffix': 8}
+
+
+def test_moirai_reserves_its_recursive_numerical_work(monkeypatch, scheduler_module):
+    from vtsfm.adapters.moirai2.admission import DEFAULT_LIMITS as MOIRAI_LIMITS, forecast_cost as moirai_cost
+
+    monkeypatch.setenv('VTSFM_ADAPTER', 'moirai2')
+    monkeypatch.setenv('VTSFM_EXPERIMENTAL_MOIRAI_BLOCKS', '1')
+    scheduler = scheduler_module.ForecastBlockScheduler(_config())
+    assert scheduler.forecast_limits == MOIRAI_LIMITS
+    assert scheduler.forecast_cost(1, 512, 1024) == moirai_cost(1, 512, 1024)
+    monkeypatch.setenv('VTSFM_PREFILL_GROUP_STEPS','1')
+    with pytest.raises(ValueError, match='only for TimesFM'):
+        scheduler_module.ForecastBlockScheduler(_config())

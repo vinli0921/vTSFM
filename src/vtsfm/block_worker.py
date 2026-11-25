@@ -9,6 +9,7 @@ from vtsfm.adapters.multimodal import MODALITY
 from vtsfm.adapters.transport import decode_metadata
 from vtsfm.block_pooling import BlockSlot
 from vtsfm.worker import ForecastWorker
+from vtsfm.stepping import forecast_blocks
 
 
 def block_slots(runner):
@@ -27,7 +28,7 @@ def block_slots(runner):
         if len(features) != 1 or features[0].data is None:
             raise ValueError('Each forecast block slot must retain one numerical payload')
         metadata = decode_metadata(features[0].data['request_metadata'].data)
-        blocks = (metadata['horizon'] + 127) // 128
+        blocks = forecast_blocks(metadata['horizon'])
         if (state.num_prompt_tokens != blocks
                 or not 0 <= state.num_computed_tokens < blocks):
             raise ValueError('Forecast block markers/progress do not match the numerical horizon')
@@ -43,7 +44,7 @@ class ForecastBlockWorker(ForecastWorker):
         super().load_model(load_dummy_weights=load_dummy_weights)
         model = self.model_runner.get_model()
         if getattr(model, 'block_executor', None) is None:
-            raise ValueError('ForecastBlockWorker requires the TimesFM block executor')
+            raise ValueError('ForecastBlockWorker requires an adapter block executor')
         model.block_executor.set_slots(lambda: block_slots(self.model_runner))
 
     def execute_model(self, scheduler_output):

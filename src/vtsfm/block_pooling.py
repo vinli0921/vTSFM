@@ -10,7 +10,7 @@ from vllm.model_executor.layers.pooler import Pooler
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 
 from vtsfm.admission import forward_resident_bytes
-from vtsfm.stepping import BlockRequest, CONTINUOUS_TRACE_ENV, plan_block_calls
+from vtsfm.stepping import BlockRequest, CONTINUOUS_TRACE_ENV, forecast_blocks, plan_block_calls
 from vtsfm.adapters.result_transport import encode_result_metadata, pack_result
 from vtsfm.adapters.transport import decode_requests
 
@@ -98,7 +98,7 @@ class BlockExecutor:
                 request = transported.pop(slot.wire_id)
                 cost = self.cost_for_shape(len(request.item_ids), request.context.shape[1], request.horizon)
                 self.limits.validate_request(cost)
-                if slot.blocks != (request.horizon + 127) // 128:
+                if slot.blocks != forecast_blocks(request.horizon):
                     raise ValueError('Block marker count does not match forecast horizon')
                 new.append((slot, request, cost))
             else:
@@ -133,6 +133,7 @@ class BlockExecutor:
             cache_position = cache_positions[0] if cache_positions and len(set(cache_positions)) == 1 else None
             records = [self.metadata[identity] for identity in identities]
             start = time.monotonic_ns() if self.trace_path else 0
+            call_work = self.stepper.model_call_work(states) if self.trace_path else None
             if stage == 'prefill':
                 self.stepper.prefill(states)
             else:
@@ -157,7 +158,7 @@ class BlockExecutor:
                            active_rows=sum(state.rows for state in self.states.values()),
                            cache_bytes=sum(state.cache_bytes for state in self.states.values()),
                            tensor_bytes=sum(state.tensor_bytes for state in self.states.values()),
-                           execution_work=self.stepper.model_call_work(states))
+                           execution_work=call_work)
             self.forget([identity for identity in identities if identity in completed], reason='complete')
         self.outputs = [completed.get(slot.request_id) for slot in slots]
         return torch.empty((len(slots), 0), device=positions.device)

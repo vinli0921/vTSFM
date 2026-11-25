@@ -71,9 +71,9 @@ class ForecastModel(nn.Module, IsAttentionFree, SupportsMultiModal):
 
     def __init__(self, *, vllm_config, prefix=''):
         super().__init__()
-        from vtsfm.stepping import CONTINUOUS_ENV
-        if os.environ.get(CONTINUOUS_ENV) == '1' and (self.batch_spec is None or self.batch_spec.name != 'timesfm25'):
-            raise ValueError('Forecast-block execution currently supports only TimesFM')
+        from vtsfm.stepping import CONTINUOUS_ENV, block_spec
+        if os.environ.get(CONTINUOUS_ENV) == '1' and self.batch_spec != block_spec():
+            raise ValueError('Forecast-block execution requires the selected block adapter')
         defaults = self.batch_spec.admission_limits if self.batch_spec is not None else None
         self.forecast_limits = resolve_limits(defaults, os.environ.get(FORECAST_LIMITS_ENV)) if defaults else None
         if self.forecast_limits is not None:
@@ -176,9 +176,9 @@ class ForecastIOProcessor(IOProcessor):
 
     def __init__(self, vllm_config, renderer):
         super().__init__(vllm_config, renderer)
-        from vtsfm.stepping import CONTINUOUS_ENV
-        if os.environ.get(CONTINUOUS_ENV) == '1' and (self.admission_spec is None or self.admission_spec.name != 'timesfm25'):
-            raise ValueError('Forecast-block IO currently supports only TimesFM')
+        from vtsfm.stepping import CONTINUOUS_ENV, block_spec
+        if os.environ.get(CONTINUOUS_ENV) == '1' and self.admission_spec != block_spec():
+            raise ValueError('Forecast-block IO requires the selected block adapter')
         defaults = self.admission_spec.admission_limits if self.admission_spec is not None else None
         self.forecast_limits = resolve_limits(defaults, os.environ.get(FORECAST_LIMITS_ENV)) if defaults else None
 
@@ -210,8 +210,8 @@ class ForecastIOProcessor(IOProcessor):
         identity = f'{request_id or "vtsfm"}:{uuid.uuid4().hex}'
         metadata = encode_metadata(identity, item_ids,
             [len(item['target']) for item in inputs], horizon, levels)
-        from vtsfm.stepping import CONTINUOUS_ENV
-        blocks = (horizon + 127) // 128 if os.environ.get(CONTINUOUS_ENV) == '1' else 1
+        from vtsfm.stepping import CONTINUOUS_ENV, forecast_blocks
+        blocks = forecast_blocks(horizon) if os.environ.get(CONTINUOUS_ENV) == '1' else 1
         return {'prompt_token_ids': [1] * blocks, 'multi_modal_data': {
             MODALITY: {'context': [context],
                        'request_metadata': [torch.tensor(list(metadata), dtype=torch.uint8)]}}}

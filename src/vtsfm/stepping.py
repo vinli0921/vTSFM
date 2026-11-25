@@ -2,12 +2,38 @@
 
 from collections import OrderedDict
 from dataclasses import dataclass
+import os
 from typing import Protocol, Sequence
 
 
 CONTINUOUS_ENV = 'VTSFM_CONTINUOUS_BATCHING'
 CONTINUOUS_TRACE_ENV = 'VTSFM_CONTINUOUS_TRACE'
 PREFILL_GROUP_STEPS_ENV = 'VTSFM_PREFILL_GROUP_STEPS'
+MOIRAI_BLOCKS_ENV = 'VTSFM_EXPERIMENTAL_MOIRAI_BLOCKS'
+
+
+BLOCK_ADAPTERS = ('timesfm25', 'moirai2')
+
+
+def block_spec():
+    from vtsfm.adapters import get_adapter
+
+    name = os.environ.get('VTSFM_ADAPTER', 'timesfm25')
+    if name == 'moirai2':
+        require_moirai_block_opt_in()
+    if name not in BLOCK_ADAPTERS:
+        raise ValueError(f'Forecast blocks are unsupported for {name}')
+    return get_adapter(name)
+
+
+def require_moirai_block_opt_in():
+    if os.environ.get(MOIRAI_BLOCKS_ENV) != '1':
+        raise ValueError(f'Experimental Moirai block serving requires {MOIRAI_BLOCKS_ENV}=1')
+
+
+def forecast_blocks(horizon):
+    size = block_spec().execution_capabilities.output_block_size
+    return (horizon + size - 1) // size
 
 
 def validate_block_configuration(config):
@@ -22,7 +48,7 @@ def validate_block_configuration(config):
             or config.speculative_config is not None
             or parallel.tensor_parallel_size != 1 or parallel.pipeline_parallel_size != 1
             or parallel.data_parallel_size != 1):
-        raise ValueError('TimesFM block mode requires ForecastBlockWorker, ForecastBlockScheduler, '
+        raise ValueError('Forecast block mode requires ForecastBlockWorker, ForecastBlockScheduler, '
                          'synchronous V1 pooling, chunked prefill and eager execution on one GPU')
 
 
