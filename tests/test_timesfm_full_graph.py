@@ -195,3 +195,26 @@ def test_paged_capture_body_failure_releases_real_cuda_arena(runtimes, monkeypat
     assert not owner.stepper.arena.plans
     with FixedForecast(candidate, example, 129, backend='paged', warmups=1) as retry:
         assert retry.run(example).shape == (1, 9, 129)
+
+
+@pytest.mark.gpu
+@full_graph
+def test_chiller_shape_split_graph_preserves_native_layout_and_owned_output(runtimes):
+    import torch
+    from vtsfm.adapters.timesfm25.full_graph import FixedForecast
+
+    reference, candidate = runtimes
+    time = torch.arange(512, device='cuda', dtype=torch.float32)
+    a = torch.stack([torch.sin(time / period) + time * .03 for period in range(7, 12)])
+    b = a.clone()
+    b[1] = b[1] * -.75 + .23
+    with torch.inference_mode():
+        expected = [reference._forecast(x, torch.isfinite(x), 96, split_flips=True) for x in (a, b)]
+        for capture in (False, True):
+            with FixedForecast(candidate, torch.zeros_like(a), 96, capture=capture,
+                               warmups=1, split_flips=True) as owner:
+                first = owner.run(a)
+                torch.testing.assert_close(owner.run(b), expected[1], rtol=1e-4, atol=1e-4)
+                torch.testing.assert_close(owner.run(a), expected[0], rtol=1e-4, atol=1e-4)
+                torch.testing.assert_close(first, expected[0], rtol=1e-4, atol=1e-4)
+                assert owner.replay_count == (3 if capture else 0)

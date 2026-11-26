@@ -17,7 +17,8 @@ from vtsfm.config import (
 from vtsfm.adapters import get_adapter, list_adapters
 from vtsfm.adapters.moirai2.spec import MOIRAI_ATTENTION_ENV, resolve_attention_config
 from vtsfm.adapters.timesfm25.graph_config import (
-    FORECAST_GRAPH_SHAPE, FORECAST_MODE_ENV, FORECAST_MODES, validate_fixed_forecast_execution,
+    FORECAST_GRAPH_SHAPE, FORECAST_MODE_ENV, FORECAST_MODES, FORECAST_SHAPE_ENV,
+    resolve_fixed_forecast_shape, validate_fixed_forecast_execution,
 )
 from vtsfm.admission import FORECAST_LIMITS_ENV, resolve_cost, resolve_limits
 from vtsfm.compilation import EXECUTION_ENV, EXECUTION_MODES, execution_mode
@@ -40,6 +41,7 @@ def _environment(benchmark: bool = False) -> dict[str, str]:
     environment['HF_HUB_DISABLE_TELEMETRY'] = '1'
     environment.pop('VLLM_SERVER_DEV_MODE', None)
     environment.pop(FORECAST_MODE_ENV, None)
+    environment.pop(FORECAST_SHAPE_ENV, None)
     return environment
 
 
@@ -53,6 +55,7 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
                        forecast_precision: str | None = None,
                        forecast_execution: str | None = None,
                        timesfm_forecast_mode: str | None = None,
+                       timesfm_forecast_shape: tuple[int, int, int] | None = None,
                        ) -> tuple[list[str], dict[str, str]]:
     selected = get_adapter(adapter)
     if timesfm_forecast_mode is not None:
@@ -67,6 +70,7 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
         if max_num_seqs is not None and (type(max_num_seqs) is not int or max_num_seqs != 1):
             raise ValueError('--timesfm-forecast-mode requires exactly one scheduled request (--max-num-seqs 1)')
         max_num_seqs = 1
+    fixed_shape = resolve_fixed_forecast_shape(timesfm_forecast_mode, timesfm_forecast_shape)
     if forecast_precision is None:
         forecast_precision = os.environ.get(PRECISION_ENV)
     validate_precision(adapter, forecast_precision)
@@ -117,6 +121,7 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
                '--io-processor-plugin', plugin, *selected.vllm_args]
     if timesfm_forecast_mode is not None:
         environment[FORECAST_MODE_ENV] = timesfm_forecast_mode
+        environment[FORECAST_SHAPE_ENV] = ','.join(map(str, fixed_shape))
         environment[TF32_OVERRIDE_ENV] = '0'
         if timesfm_forecast_mode.startswith('paged-'):
             environment['TRITON_F32_DEFAULT'] = 'ieee'
@@ -142,6 +147,8 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
         slots = int(command[command.index('--max-num-seqs') + 1])
         # The adapter owns this cost; its descriptor imports no model runtime.
         forecast_cost = resolve_cost(selected)
+        if timesfm_forecast_mode is not None:
+            limits.validate_request(forecast_cost(*fixed_shape))
         limits.validate_launch(slots, forecast_cost(
             limits.max_request_rows, limits.max_context, limits.max_horizon))
         # Resolve a file once so frontend/worker see the exact same policy.
@@ -235,6 +242,8 @@ def main(argv: list[str] | None = None) -> int:
     rows, context, horizon = FORECAST_GRAPH_SHAPE
     serve.add_argument('--timesfm-forecast-mode', choices=FORECAST_MODES,
                        help=f'Experimental TimesFM/vtsfm whole forecast at B{rows}/C{context}/H{horizon}; one scheduled request')
+    serve.add_argument('--timesfm-forecast-shape', nargs=3, type=int, metavar=('ROWS', 'CONTEXT', 'HORIZON'),
+                       help='Fixed TimesFM mode geometry; 5 512 96 is supported in dense modes')
     serve.add_argument('--forecast-precision', choices=PRECISIONS,
                        help='Select FP32, TF32 matmuls, or native BF16 (Toto/Moirai)')
     serve.add_argument('--forecast-execution', choices=EXECUTION_MODES,
@@ -267,8 +276,11 @@ def main(argv: list[str] | None = None) -> int:
             kwargs['continuous_batching'] = args.continuous_batching
             kwargs['forecast_queue_limit'] = args.forecast_queue_limit
             kwargs['timesfm_forecast_mode'] = args.timesfm_forecast_mode
+            kwargs['timesfm_forecast_shape'] = args.timesfm_forecast_shape
             kwargs['forecast_precision'] = args.forecast_precision
             kwargs['forecast_execution'] = args.forecast_execution
+        elif args.timesfm_forecast_shape is not None:
+            raise ValueError('--timesfm-forecast-shape applies to the vLLM backend')
         elif args.timesfm_forecast_mode is not None:
             raise ValueError('--timesfm-forecast-mode applies to the vLLM backend')
         elif args.max_num_seqs is not None:
@@ -289,7 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         keys = ('VTSFM_ADAPTER', 'VLLM_PLUGINS', 'VLLM_USE_V2_MODEL_RUNNER', 'VLLM_SERVER_DEV_MODE',
                 'OMP_NUM_THREADS', 'HF_HUB_DISABLE_TELEMETRY', FORECAST_BATCH_ROWS_ENV, FORECAST_LIMITS_ENV,
-                CONTINUOUS_ENV, FORECAST_MODE_ENV, PRECISION_ENV, TF32_OVERRIDE_ENV,
+                CONTINUOUS_ENV, FORECAST_MODE_ENV, FORECAST_SHAPE_ENV, PRECISION_ENV, TF32_OVERRIDE_ENV,
                 EXECUTION_ENV, MOIRAI_ATTENTION_ENV, 'TRITON_F32_DEFAULT', 'TRITON_DEFAULT_FP_FUSION')
         print(json.dumps({'command': command, 'environment': {
             key: environment[key] for key in keys if key in environment}}, indent=2))

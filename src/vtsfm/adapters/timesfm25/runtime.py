@@ -35,6 +35,8 @@ class TimesFMRuntime:
             output = policy.try_forecast(context, horizon)
             if output is not None:
                 return output
+            if policy.split_flips:
+                return self._forecast(context, torch.isfinite(context), horizon, split_flips=True)
         return self._forecast(context, torch.isfinite(context), horizon)
 
     @torch.inference_mode()
@@ -73,7 +75,7 @@ class TimesFMRuntime:
         # Channel zero is the point head. The public API returns quantiles 1–9.
         return torch.cat(blocks, dim=1)[:, :horizon, 1:], spread[:, :horizon, 1:]
 
-    def _forecast(self, context, observed, horizon):
+    def _forecast(self, context, observed, horizon, *, split_flips=False, decode_quantiles=None):
         if getattr(self.model, '_vtsfm_paged_stepper_mode', None) == 'patched':
             raise ValueError('TimesFM model is owned by a paged stepper. Close it before running a whole forecast.')
         if not 1 <= horizon <= self.model.os:
@@ -88,14 +90,18 @@ class TimesFMRuntime:
         std = values.std(dim=-1, keepdim=True)
         normalized = revin(values, mean, std, reverse=False)
 
-        # Flip invariance decodes x and -x. Upstream runs two decode calls; the
-        # rows are independent, so one stream-major [x; -x] call (as in block
-        # mode) computes the same per-row values with half the kernel launches.
-        rows = normalized.shape[0]
-        both, both_spread = self._decode_quantiles(
-            torch.cat((normalized, -normalized)), padding.repeat(2, 1), horizon)
-        forecast, flipped_forecast = both[:rows], both[rows:]
-        spread, flipped_spread = both_spread[:rows], both_spread[rows:]
+        # Keep native GEMM batch geometry when strict parity requires separate
+        # sign passes. The original serving mode keeps its packed execution.
+        if split_flips:
+            decode = self._decode_quantiles if decode_quantiles is None else decode_quantiles
+            forecast, spread = decode(normalized, padding, horizon)
+            flipped_forecast, flipped_spread = decode(-normalized, padding, horizon)
+        else:
+            rows = normalized.shape[0]
+            both, both_spread = self._decode_quantiles(
+                torch.cat((normalized, -normalized)), padding.repeat(2, 1), horizon)
+            forecast, flipped_forecast = both[:rows], both[rows:]
+            spread, flipped_spread = both_spread[:rows], both_spread[rows:]
         forecast = (forecast - flipped_forecast.flip(-1)) / 2
         spread = (spread - flipped_spread.flip(-1)) / 2
 

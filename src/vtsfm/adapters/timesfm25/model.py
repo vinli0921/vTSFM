@@ -8,7 +8,9 @@ from vtsfm.adapters.pooling import ForecastModel
 from .runtime import TimesFMRuntime
 from .spec import FORECAST_SETTINGS, TIMESFM25
 from .admission import forecast_cost
-from .graph_config import FORECAST_MODE_ENV, FORECAST_MODES, FORECAST_GRAPH_SHAPE
+from .graph_config import (
+    FORECAST_MODE_ENV, FORECAST_MODES, FORECAST_SHAPE_ENV, resolve_fixed_forecast_shape,
+)
 from vtsfm.stepping import CONTINUOUS_ENV, validate_block_configuration
 
 
@@ -43,8 +45,9 @@ class VTSFMTimesFMForForecasting(ForecastModel):
                 raise ValueError('TimesFM forecast mode requires whole forecasts in one slot')
             from .graph_serving import ServingFixedForecast
 
-            self.forecast_limits.validate_request(forecast_cost(*FORECAST_GRAPH_SHAPE))
-            self.runtime.fixed_forecast = ServingFixedForecast(mode)
+            shape = resolve_fixed_forecast_shape(mode, os.environ.get(FORECAST_SHAPE_ENV))
+            self.forecast_limits.validate_request(forecast_cost(*shape))
+            self.runtime.fixed_forecast = ServingFixedForecast(mode, shape)
         if continuous:
             from vtsfm.block_pooling import BlockExecutor, BlockForecastPooler
             from .stepping import TimesFMStepper
@@ -66,5 +69,5 @@ class VTSFMTimesFMForForecasting(ForecastModel):
         policy = self.runtime.fixed_forecast
         if policy is None:
             return {'mode': 'default', 'calls': 0, 'fallbacks': 0, 'graph_replays': 0,
-                    'capture_attempts': 0, 'setup': None, 'fixed_pool_bytes': 0, 'leased_cache_bytes': 0}
+                    'capture_attempts': 0, 'setup': None, 'shape': None, 'fixed_pool_bytes': 0, 'leased_cache_bytes': 0}
         return policy.snapshot()
