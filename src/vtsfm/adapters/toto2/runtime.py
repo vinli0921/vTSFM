@@ -12,6 +12,7 @@ from vtsfm.precision import configure_precision
 from vtsfm.compilation import compile_core, execution_mode
 
 from . import fast_scaling
+from .graph_config import FAST_SCALING_ENV, GRAPH_SCALING_MODE
 from .spec import DECODE_BLOCK_SIZE, FORECAST_SETTINGS, MODEL_ID, MODEL_REVISION, TOTO2
 
 
@@ -34,16 +35,21 @@ class TotoRuntime:
             prepare_native_rotary_tables(self.model, RotaryProjection)
         # Inference-only unit-scaling shims (#74); set
         # VTSFM_TOTO_FAST_UNIT_SCALING=0 to keep the upstream autograd wrappers.
-        self.fast_unit_scaling = os.environ.get('VTSFM_TOTO_FAST_UNIT_SCALING', '1') != '0'
+        self.fixed_forecast = None
+        self.fast_unit_scaling_mode = os.environ.get(FAST_SCALING_ENV, '1')
+        self.fast_unit_scaling = self.fast_unit_scaling_mode != '0'
         if self.fast_unit_scaling:
-            fast_scaling.install()
+            installed = fast_scaling.install()
+            if (self.fast_unit_scaling_mode == GRAPH_SCALING_MODE
+                    and set(installed) != set(fast_scaling.PINNED_SCALE_SOURCES)):
+                raise ValueError('Toto stride-aware scaling requires both pinned unit-scaling sources')
         if execution_mode() == 'compile':
             compile_model(self.model)
 
     @torch.inference_mode()
     def forecast(self, context, horizon):
         context = context.to(device=next(self.model.parameters()).device, dtype=torch.float32)
-        return self._forecast(context, torch.isfinite(context), horizon)
+        return self._run_forecast(context, torch.isfinite(context), horizon)
 
     @torch.inference_mode()
     def execute(self, batch: PreparedBatch) -> ExecutionResult:
@@ -68,9 +74,16 @@ class TotoRuntime:
         if not torch.isfinite(context[observed]).all():
             raise ValueError('Observed Toto history values must be finite')
 
-        quantiles = self._forecast(context, observed, key.prediction_length)
+        quantiles = self._run_forecast(context, observed, key.prediction_length)
         channels = [FORECAST_SETTINGS.quantiles.index(level) for level in key.quantile_levels]
         return ExecutionResult(batch, quantiles[:, channels])
+
+    def _run_forecast(self, context, observed, horizon):
+        if self.fixed_forecast is not None:
+            output = self.fixed_forecast.try_forecast(context, observed, horizon)
+            if output is not None:
+                return output
+        return self._forecast(context, observed, horizon)
 
     def _forecast(self, context, observed, horizon):
         """[rows, width] values and mask on the model device -> [rows, 9, horizon]."""
@@ -82,7 +95,7 @@ class TotoRuntime:
         # One variate per batch element keeps every row an independent series.
         inputs = {'target': target.unsqueeze(1), 'target_mask': mask.unsqueeze(1),
                   'series_ids': torch.zeros((len(target), 1), dtype=torch.long, device=target.device)}
-        with fast_scaling.fast_unit_scaling(self.fast_unit_scaling):
+        with fast_scaling.fast_unit_scaling(self.fast_unit_scaling, mode=self.fast_unit_scaling_mode):
             quantiles = self.model.forecast(inputs, horizon=horizon, decode_block_size=DECODE_BLOCK_SIZE)
         # Upstream returns [9 quantiles, rows, variates, horizon].
         # Public transport is FP32 and owns only the requested horizon, even

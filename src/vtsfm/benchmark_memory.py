@@ -65,3 +65,7 @@ class MemoryMetrics:
     def bench_timesfm_forecast(self):
         """Experimental fixed-owner counters from the model that serves /pooling."""
         return self.model_runner.get_model().fixed_forecast_snapshot()
+
+    def bench_toto_forecast(self):
+        """Experimental Toto CUDA graph counters from the model that serves /pooling."""
+        return self.model_runner.get_model().fixed_forecast_snapshot()

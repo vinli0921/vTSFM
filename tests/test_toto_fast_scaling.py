@@ -189,3 +189,21 @@ def test_concurrent_install_preserves_both_original_objects(monkeypatch):
         fast_scaling.uninstall()
         # Restore even if a faulty installation captured one of its own shims.
         dd_scale._ScaledGrad, gc_scale._scale = originals
+
+
+def test_stride_aware_scaling_keeps_native_layout_for_views(toto):
+    import torch
+    from dd_unit_scaling.scale import scale_fwd
+    from vtsfm.adapters.toto2.fast_scaling import fast_unit_scaling
+
+    contiguous = torch.arange(12, dtype=torch.float32)
+    strided = contiguous[::2]
+    tensor_scale = torch.tensor(1.0)
+    with torch.inference_mode():
+        native = scale_fwd(strided, 1.0)
+        with fast_unit_scaling(mode='stride-aware'):
+            assert scale_fwd(contiguous, 1.0) is contiguous
+            for scale in (1.0, tensor_scale):
+                result = scale_fwd(strided, scale)
+                assert result.stride() == native.stride()
+                torch.testing.assert_close(result, native, atol=0, rtol=0)

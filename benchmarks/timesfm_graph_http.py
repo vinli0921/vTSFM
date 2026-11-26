@@ -194,11 +194,11 @@ def _route_delta(before, after, mode, *, calls, fallbacks=0):
     return delta
 
 
-def _reference(args, owner, monitor, cases, environment):
+def _reference(args, owner, monitor, cases, environment, adapter='timesfm25'):
     from benchmarks.run import ensure_worker_gpu
     from vtsfm.adapters import get_adapter
 
-    spec = get_adapter('timesfm25')
+    spec = get_adapter(adapter)
     destination = args.output / 'native-reference.json'
     cases_file = args.output / 'cases.json'
     _write(cases_file, {'cases': cases})
@@ -210,7 +210,7 @@ def _reference(args, owner, monitor, cases, environment):
                  'torch.backends.cudnn.allow_tf32=False; '
                  'sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0],run_name="__main__")')
     command = [sys.executable, '-c', bootstrap, str(ROOT / 'tests/model_integration_support.py'),
-               '--adapter', 'timesfm25', '--cases', str(cases_file), '--output', str(destination)]
+               '--adapter', adapter, '--cases', str(cases_file), '--output', str(destination)]
     monitor.assert_idle()
     child = owner.spawn(command, environment, 'native-reference')
     record = {'status': 'running', 'command': command}
