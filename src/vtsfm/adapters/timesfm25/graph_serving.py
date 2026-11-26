@@ -5,12 +5,13 @@ import threading
 
 import torch
 
-from .graph_config import FORECAST_GRAPH_SHAPE
+from .graph_config import CHILLER_GRAPH_SHAPE, FORECAST_GRAPH_SHAPE
 
 
 class ServingFixedForecast:
-    def __init__(self, mode):
-        self.mode = mode
+    def __init__(self, mode, shape=FORECAST_GRAPH_SHAPE):
+        self.mode, self.shape = mode, shape
+        self.split_flips = shape == CHILLER_GRAPH_SHAPE
         self.backend, execution = mode.split('-')
         self.capture = execution == 'graph'
         self.owner = None
@@ -22,7 +23,7 @@ class ServingFixedForecast:
         with self.lock:
             # Ragged histories are represented by left NaNs. They need the
             # ordinary decoder even if the padded width matches the owner.
-            if ((*context.shape, horizon) != FORECAST_GRAPH_SHAPE
+            if ((*context.shape, horizon) != self.shape
                     or not torch.isfinite(context).all()):
                 self.fallbacks += 1
                 return None
@@ -56,15 +57,16 @@ class ServingFixedForecast:
         if free_bytes < 512 * 1024**2:
             raise RuntimeError('TimesFM fixed forecast setup requires at least 512 MiB free GPU memory')
         self.capture_attempts += int(self.capture)
-        rows, context_length, horizon = FORECAST_GRAPH_SHAPE
+        rows, context_length, horizon = self.shape
         context = torch.zeros((rows, context_length), dtype=parameter.dtype, device=parameter.device)
-        self.owner = FixedForecast(runtime, context, horizon, backend=self.backend, capture=self.capture)
+        self.owner = FixedForecast(runtime, context, horizon, backend=self.backend, capture=self.capture,
+                                   split_flips=self.split_flips)
         self.setup = dict(self.owner.setup, free_bytes_before=free_bytes)
 
     def snapshot(self):
         with self.lock:
             arena = self.owner.stepper.arena if self.owner is not None and self.backend == 'paged' else None
-            return {'mode': self.mode, 'calls': self.calls, 'fallbacks': self.fallbacks,
+            return {'mode': self.mode, 'shape': self.shape, 'calls': self.calls, 'fallbacks': self.fallbacks,
                     'graph_replays': self.graph_replays, 'capture_attempts': self.capture_attempts,
                     'setup': self.setup, 'fixed_pool_bytes': arena.cache_bytes if arena else 0,
                     'leased_cache_bytes': arena.leased_cache_bytes if arena else 0}

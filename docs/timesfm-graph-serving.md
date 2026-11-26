@@ -15,13 +15,24 @@ modes.
 Select `paged-graph` for the paged backend. The corresponding `dense-eager`
 and `paged-eager` modes use the same fixed forecast owner and numerical body
 with ordinary eager execution. The `POST /pooling` request and response schema
-is the standard TimesFM schema. A request with two finite, 512-value histories
-and a 1,024-point horizon qualifies, regardless of the requested quantile subset.
-Other shapes, including ragged histories, use the ordinary TimesFM forecast path.
+is the standard TimesFM schema. The fixed shape defaults to two finite,
+512-value histories and a 1,024-point horizon.
 
-Use this mode for traffic dominated by B2/C512/H1024 requests. A single-GPU
-V1 worker uses one scheduling slot and disables cross-request fusion, so a
-burst of other shapes runs one eager forecast at a time. Launch a separate
+To serve five finite 512-value histories with a 96-point horizon, select the
+dense mode with the new geometry:
+
+```bash
+./scripts/serve.sh --adapter timesfm25 --timesfm-forecast-mode dense-graph \
+  --timesfm-forecast-shape 5 512 96 --port 8001
+```
+
+This prefill-only shape runs the original and sign-flipped inputs in separate
+passes, which preserves the native batch geometry. `dense-eager` runs the same
+body without replay. Either geometry supports every quantile subset. Other
+shapes and ragged histories use eager execution. The B5/C512/H96 configuration
+also uses separate flip passes during fallback.
+
+Each single-GPU V1 worker uses one scheduling slot. Launch a separate
 configuration for cross-request fusion or forecast-block scheduling.
 
 The worker builds and warms one fixed owner after model loading
@@ -67,6 +78,18 @@ Each client keeps one connection and sends one request at a time. Start-to-ready
 time, worker setup and first-request latency are saved separately. The harness
 records Torch allocator counters and whole-device NVML memory throughout the
 steady-state measurements.
+
+For B5/C512/H96, use the TimesFM five-signal AssetOpsBench case manifest and
+its archived native FP32 outputs. The harness regenerates the official reference,
+runs changed-input and fallback probes at `atol=rtol=1e-4`, and reverses server
+and client-count order for the second repetition.
+
+```bash
+.venv-timesfm25/bin/python -m benchmarks.timesfm_chiller_graph_http \
+  --cases /path/to/archived-native/cases.json \
+  --archived-native /path/to/archived-native/native.json \
+  --clients 1 4 --requests 100 --warmups 5 --output results/timesfm-chiller-http-new
+```
 
 On the A100 at `06b018a`, dense and paged graphs both served a new request
 after a queued disconnect and after a disconnect inside the worker. Each also

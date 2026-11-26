@@ -306,3 +306,33 @@ def test_native_cli_rejects_forecast_mode_instead_of_ignoring_it():
     assert process.returncode == 2
     assert '--timesfm-forecast-mode applies to the vLLM backend' in process.stderr
     assert 'Traceback' not in process.stderr
+
+
+def test_timesfm_chiller_graph_selects_the_new_fixed_dense_geometry(monkeypatch):
+    from vtsfm.cli import build_vllm_command
+    from vtsfm.adapters.timesfm25.graph_config import FORECAST_SHAPE_ENV
+
+    monkeypatch.setenv(FORECAST_SHAPE_ENV, 'inherited')
+    for mode in ('dense-eager', 'dense-graph'):
+        command, environment = build_vllm_command(
+            adapter='timesfm25', timesfm_forecast_mode=mode, timesfm_forecast_shape=(5, 512, 96))
+        assert environment[FORECAST_SHAPE_ENV] == '5,512,96'
+        assert command[command.index('--max-num-seqs') + 1] == '1'
+        assert '--no-async-scheduling' in command
+
+    _, legacy = build_vllm_command(adapter='timesfm25', timesfm_forecast_mode='paged-graph')
+    assert legacy[FORECAST_SHAPE_ENV] == '2,512,1024'
+    _, normal = build_vllm_command(adapter='timesfm25')
+    assert FORECAST_SHAPE_ENV not in normal
+
+
+@pytest.mark.parametrize('mode,shape,reason', [
+    (None, (5, 512, 96), 'requires --timesfm-forecast-mode'),
+    ('paged-graph', (5, 512, 96), 'requires dense mode'),
+    ('dense-graph', (5, 512, 97), 'Supported TimesFM forecast shapes'),
+])
+def test_timesfm_chiller_graph_rejects_other_modes_or_geometry(mode, shape, reason):
+    from vtsfm.cli import build_vllm_command
+
+    with pytest.raises(ValueError, match=reason):
+        build_vllm_command(adapter='timesfm25', timesfm_forecast_mode=mode, timesfm_forecast_shape=shape)

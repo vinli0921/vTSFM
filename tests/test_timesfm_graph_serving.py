@@ -5,13 +5,15 @@ from unittest.mock import Mock
 import pytest
 
 torch = pytest.importorskip('torch')
-from vtsfm.adapters.timesfm25.graph_config import FORECAST_GRAPH_SHAPE  # noqa: E402
+from vtsfm.adapters.timesfm25.graph_config import CHILLER_GRAPH_SHAPE, FORECAST_GRAPH_SHAPE  # noqa: E402
 from vtsfm.adapters.timesfm25.graph_serving import ServingFixedForecast  # noqa: E402
 
 
-def test_ragged_and_unmatched_shapes_fall_back_before_a_fixed_replay():
-    rows, width, horizon = FORECAST_GRAPH_SHAPE
-    router = ServingFixedForecast('dense-graph')
+@pytest.mark.parametrize('shape', [FORECAST_GRAPH_SHAPE, CHILLER_GRAPH_SHAPE])
+def test_ragged_and_unmatched_shapes_fall_back_before_a_fixed_replay(shape):
+    rows, width, horizon = shape
+    router = ServingFixedForecast('dense-graph', shape)
+    assert router.split_flips == (shape == CHILLER_GRAPH_SHAPE)
     owner = Mock(replay_count=0)
     router.owner = owner
     # Matching non-contiguous inputs must reach the owner as contiguous rows.
@@ -36,6 +38,7 @@ def test_ragged_and_unmatched_shapes_fall_back_before_a_fixed_replay():
     owner.run.side_effect = replay
     assert router.try_forecast(context, horizon) is forecast
     owner.run.assert_called_once()
+    assert router.snapshot()['shape'] == shape
     assert (router.fallbacks, router.calls, router.graph_replays) == (4, 1, 1)
 
 

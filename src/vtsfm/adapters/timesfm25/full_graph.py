@@ -11,6 +11,7 @@ fixed shape.
 import time
 
 import torch
+from timesfm.torch.util import revin, update_running_stats
 
 from .block_decode import _decode_positions, block_decode_forward
 from .native_stepping import PagedTimesFMStepper, _run_cleanups
@@ -131,7 +132,7 @@ class FixedForecast:
     """
 
     @torch.inference_mode()
-    def __init__(self, runtime, example, horizon, *, backend='dense', capture=True, warmups=3):
+    def __init__(self, runtime, example, horizon, *, backend='dense', capture=True, warmups=3, split_flips=False):
         if backend not in ('dense', 'paged') or type(capture) is not bool:
             raise ValueError('Require dense/paged backend and boolean capture')
         if (not isinstance(example, torch.Tensor) or example.ndim != 2 or example.dtype != torch.float32
@@ -141,16 +142,19 @@ class FixedForecast:
             raise ValueError('Require finite nonempty contiguous CUDA FP32 example [rows,context]')
         if type(horizon) is not int or not 1 <= horizon <= 1024 or type(warmups) is not int or warmups < 1:
             raise ValueError('Require horizon 1..1024 and at least one warmup')
+        if split_flips and (backend != 'dense' or horizon > runtime.model.o):
+            raise ValueError('Split-flip capture requires dense, prefill-only forecasts')
         if next(runtime.model.parameters()).device != example.device:
             raise ValueError('Example and model must share a CUDA device')
         self.runtime, self.backend, self.horizon = runtime, backend, horizon
+        self.split_flips = split_flips
         self.shape, self.device = tuple(example.shape), example.device
         self.stream = torch.cuda.Stream(device=self.device)
         self.graph = self.stepper = self.static_output = self.input = None
         self.replay_count = 0
         self._closed = False
         self.setup = {'backend': backend, 'capture': capture, 'shape': self.shape, 'horizon': horizon,
-                      'warmups': warmups, 'scope': 'Fixed finite equal-length contiguous CUDA FP32 forecasts; no HTTP/runner integration. Both modes include input validation/copy and owned output clone. Cache leases/plans fixed for owner lifetime.'}
+                      'warmups': warmups, 'split_flips': split_flips, 'scope': 'Fixed finite equal-length contiguous CUDA FP32 forecasts; no HTTP/runner integration. Both modes include input validation/copy and owned output clone. Cache leases/plans fixed for owner lifetime.'}
         started = time.perf_counter()
         caller = torch.cuda.current_stream(self.device)
         self.stream.wait_stream(caller)
@@ -205,6 +209,9 @@ class FixedForecast:
             raise body_error
 
     def _body(self):
+        if self.split_flips:
+            return self.runtime._forecast(self.input, torch.isfinite(self.input), self.horizon,
+                                          split_flips=True, decode_quantiles=self._prefill_quantiles)
         state = self.stepper.initialize(self.input, self.horizon)
         try:
             self.stepper.prefill([state])
@@ -213,6 +220,32 @@ class FixedForecast:
             return self.stepper.finalize(state)
         finally:
             self.stepper.release(state)
+
+    def _prefill_quantiles(self, context, padding, horizon):
+        # Follow pinned TimesFM decode() up to the output of prefill. With no
+        # autoregressive steps the cache starts at Python-known position zero.
+        # The shared prefill helper removes that host scalar read and keeps
+        # native attention on the same batch and contiguous dense KV layout.
+        model = self.runtime.model
+        rows = context.shape[0]
+        inputs = context.reshape(rows, -1, model.p)
+        masks = padding.reshape(rows, -1, model.p)
+        patches = inputs.shape[1]
+        n = torch.zeros(rows, device=context.device)
+        mean = torch.zeros_like(n)
+        std = torch.zeros_like(n)
+        means, stds = [], []
+        for patch in range(patches):
+            (n, mean, std), _ = update_running_stats(n, mean, std, inputs[:, patch], masks[:, patch])
+            means.append(mean)
+            stds.append(std)
+        mean, std = torch.stack(means, dim=1), torch.stack(stds, dim=1)
+        normalized = torch.where(masks, 0.0, revin(inputs, mean, std, reverse=False))
+        caches = self.stepper._new_caches(rows, patches, context.device)
+        (_, _, point, spread), _ = self.stepper._prefill_forward(normalized, masks, caches)
+        point = revin(point, mean, std, reverse=True).reshape(rows, -1, model.o, model.q)
+        spread = revin(spread, mean, std, reverse=True).reshape(rows, -1, model.os, model.q)
+        return point[:, -1, :horizon, 1:], spread[:, -1, :horizon, 1:]
 
     @torch.inference_mode()
     def run(self, context, *, prevalidated=False):
