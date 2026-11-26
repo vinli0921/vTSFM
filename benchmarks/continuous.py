@@ -331,6 +331,7 @@ def _cases(data_dir, count):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--adapter', choices=('timesfm25', 'moirai2'), default='timesfm25')
     parser.add_argument('--data-dir', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--requests', type=int, default=100)
@@ -379,10 +380,10 @@ def main(argv=None):
     import requests
 
     monitor = GpuMonitor(args.gpu)
-    spec = get_adapter('timesfm25')
+    spec = get_adapter(args.adapter)
     metadata = {'model': spec.model_id, 'revision': spec.model_revision,
                 'gpu': monitor.metadata(), 'packages': {name: importlib.metadata.version(name)
-                    for name in ('torch', 'vllm', 'timesfm')},
+                    for name in ('torch', 'vllm', {'timesfm25': 'timesfm', 'moirai2': 'uni2ts'}[args.adapter])},
                 'cases': cases, 'modes': modes, 'scenarios': scenarios, 'queue_limit': args.queue_limit,
                 'arrival_offsets_s': offsets_by_scenario,
                 'arrival_case_indices': indices_by_scenario,
@@ -420,7 +421,7 @@ def main(argv=None):
         ensure_port_free('127.0.0.1', args.port)
         trace = directory / 'steps.jsonl'
         command, environment = build_vllm_command(
-            adapter='timesfm25', port=args.port, benchmark=True,
+            adapter=args.adapter, port=args.port, benchmark=True,
             max_num_seqs=1 if mode == 'single' else 4,
             forecast_batch_rows=None if mode == 'single' else 8,
             continuous_batching=mode == 'continuous', forecast_queue_limit=args.queue_limit)

@@ -13,11 +13,10 @@ import time
 import vllm
 from vllm.v1.core.sched.scheduler import Scheduler
 
-from vtsfm.admission import FORECAST_LIMITS_ENV, forward_resident_bytes, resolve_limits
-from vtsfm.adapters.timesfm25.admission import DEFAULT_LIMITS, forecast_cost
+from vtsfm.admission import FORECAST_LIMITS_ENV, forward_resident_bytes, resolve_cost, resolve_limits
 from vtsfm.adapters.transport import decode_metadata
 from vtsfm.config import FORECAST_BATCH_ROWS_ENV, MAX_FORECAST_BATCH_ROWS, VLLM_VERSION
-from vtsfm.stepping import CONTINUOUS_TRACE_ENV, PREFILL_GROUP_STEPS_ENV
+from vtsfm.stepping import CONTINUOUS_TRACE_ENV, PREFILL_GROUP_STEPS_ENV, block_spec
 
 
 def _request_metadata(request):
@@ -27,7 +26,7 @@ def _request_metadata(request):
     return decode_metadata(features[0].data['request_metadata'].data)
 
 
-def request_cost(request):
+def request_cost(request, forecast_cost):
     """Read immutable numerical metadata on CPU; never stage a context here."""
     metadata = _request_metadata(request)
     return forecast_cost(len(metadata['item_ids']), max(metadata['context_lengths']), metadata['horizon'])
@@ -130,15 +129,19 @@ class ForecastBlockScheduler(ForecastTraceMixin, Scheduler):
         # EngineCore mutation; restoring it also keeps both sides consistent.
         scheduler_config.enable_chunked_prefill = True
         super().__init__(*args, **kwargs)
-        self.forecast_limits = resolve_limits(DEFAULT_LIMITS, os.environ.get(FORECAST_LIMITS_ENV))
+        spec = block_spec()
+        self.forecast_cost = resolve_cost(spec)
+        self.forecast_limits = resolve_limits(spec.admission_limits, os.environ.get(FORECAST_LIMITS_ENV))
         limits = self.forecast_limits
-        limits.validate_launch(self.scheduler_config.max_num_seqs, forecast_cost(
+        limits.validate_launch(self.scheduler_config.max_num_seqs, self.forecast_cost(
             limits.max_request_rows, limits.max_context, limits.max_horizon))
         self._forecast_blocked_waiter = None
         try:
             self.prefill_group_steps = int(os.environ.get(PREFILL_GROUP_STEPS_ENV, '0'))
         except ValueError as error:
             raise ValueError(f'{PREFILL_GROUP_STEPS_ENV} must be 0, 1 or 2') from error
+        if self.prefill_group_steps and spec.name != 'timesfm25':
+            raise ValueError('Bounded prefill grouping is qualified only for TimesFM')
         if self.prefill_group_steps not in (0, 1, 2):
             raise ValueError(f'{PREFILL_GROUP_STEPS_ENV} must be 0, 1 or 2')
         self._forecast_group_waiter = None
@@ -223,7 +226,7 @@ class ForecastBlockScheduler(ForecastTraceMixin, Scheduler):
                 # Bound metadata work by the finite scheduled slot count. An
                 # incompatible entry ends the prefix; FCFS is never bypassed.
                 for waiter in islice(self.waiting, self.scheduler_config.max_num_seqs):
-                    cost = request_cost(waiter)
+                    cost = request_cost(waiter, self.forecast_cost)
                     if cost.horizon <= 128:
                         queued.clear()  # Do not add queueing ahead of a short job.
                         break
@@ -265,11 +268,11 @@ class ForecastBlockScheduler(ForecastTraceMixin, Scheduler):
             return 0
 
         limits = self.forecast_limits
-        candidate = request_cost(request)
+        candidate = request_cost(request, self.forecast_cost)
         # The frontend already checks this. Retain an assertion for direct
         # internal engine callers, rather than executing an invalid request.
         limits.validate_request(candidate)
-        active_costs = [request_cost(active) for active in self.running]
+        active_costs = [request_cost(active, self.forecast_cost) for active in self.running]
         costs = (*active_costs, candidate)
         if not self._fits_forecast_costs(costs):
             self._forecast_blocked_waiter = request.request_id

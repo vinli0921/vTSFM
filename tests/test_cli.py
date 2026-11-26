@@ -204,6 +204,16 @@ def test_continuous_mode_selects_its_pinned_bridge_and_bounded_queue(monkeypatch
     monkeypatch.setenv('VTSFM_CONTINUOUS_BATCHING', '1')
     _, normal = build_vllm_command(adapter='timesfm25')
     assert 'VTSFM_CONTINUOUS_BATCHING' not in normal
+    monkeypatch.delenv('VTSFM_EXPERIMENTAL_MOIRAI_BLOCKS', raising=False)
+    with pytest.raises(ValueError, match='VTSFM_EXPERIMENTAL_MOIRAI_BLOCKS'):
+        build_vllm_command(adapter='moirai2', continuous_batching=True)
+    monkeypatch.setenv('VTSFM_EXPERIMENTAL_MOIRAI_BLOCKS', '1')
+    moirai, settings = build_vllm_command(adapter='moirai2', continuous_batching=True)
+    assert settings['VTSFM_FORECAST_BATCH_ROWS'] == '8'
+    assert settings['VTSFM_PRECISION'] == 'fp32' and settings['NVIDIA_TF32_OVERRIDE'] == '0'
+    assert 'vtsfm.continuous_scheduler.ForecastBlockScheduler' in moirai
+    with pytest.raises(ValueError, match='Moirai block mode'):
+        build_vllm_command(adapter='moirai2', continuous_batching=True, forecast_precision='bf16')
     with pytest.raises(ValueError, match='only TimesFM'):
         build_vllm_command(adapter='toto2', continuous_batching=True)
     with pytest.raises(ValueError, match='positive integer'):

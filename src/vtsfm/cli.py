@@ -21,7 +21,7 @@ from vtsfm.adapters.timesfm25.graph_config import (
 )
 from vtsfm.admission import FORECAST_LIMITS_ENV, resolve_cost, resolve_limits
 from vtsfm.compilation import EXECUTION_ENV, EXECUTION_MODES, execution_mode
-from vtsfm.stepping import CONTINUOUS_ENV
+from vtsfm.stepping import BLOCK_ADAPTERS, CONTINUOUS_ENV, PREFILL_GROUP_STEPS_ENV, require_moirai_block_opt_in
 from vtsfm.precision import PRECISION_ENV, PRECISIONS, TF32_OVERRIDE_ENV, validate_precision
 
 
@@ -85,12 +85,19 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
     if mode == 'compile' and (selected.name == 'chronos2' or backend != 'vtsfm'):
         raise ValueError('Compiled forecasts support TimesFM, Toto and Moirai through vTSFM')
     if continuous_batching:
-        if selected.name != 'timesfm25' or backend != 'vtsfm':
-            raise ValueError('Forecast-block continuous batching currently supports only TimesFM/vtsfm')
+        if selected.name not in BLOCK_ADAPTERS or backend != 'vtsfm':
+            raise ValueError('Forecast-block continuous batching supports only TimesFM and Moirai through vTSFM')
+        if selected.name == 'moirai2':
+            require_moirai_block_opt_in()
+            if (mode != 'eager' or forecast_precision not in (None, 'fp32')
+                    or os.environ.get(MOIRAI_ATTENTION_ENV, 'upstream') != 'upstream'
+                    or os.environ.get(PREFILL_GROUP_STEPS_ENV, '0') != '0'):
+                raise ValueError('Moirai block mode requires eager FP32 upstream attention without prefill grouping')
+            forecast_precision = 'fp32'
         max_num_seqs = 4 if max_num_seqs is None else max_num_seqs
         if type(max_num_seqs) is not int or max_num_seqs < 2:
             raise ValueError('Forecast-block continuous batching requires at least two scheduled slots')
-        forecast_batch_rows = 16 if forecast_batch_rows is None else forecast_batch_rows
+        forecast_batch_rows = selected.admission_limits.max_execution_rows if forecast_batch_rows is None else forecast_batch_rows
         forecast_queue_limit = 16 if forecast_queue_limit is None else forecast_queue_limit
     environment = _environment(benchmark)
     environment[EXECUTION_ENV] = mode
@@ -229,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument('--forecast-limits', metavar='JSON_FILE',
                        help='Tighten the selected adapter\'s numerical limits using a JSON policy file')
     serve.add_argument('--continuous-batching', action='store_true',
-                       help='Enable experimental TimesFM forecast-block scheduling (default: 4 slots, 16 fused rows)')
+                       help='Enable experimental TimesFM or Moirai forecast-block scheduling (default: 4 slots)')
     serve.add_argument('--forecast-queue-limit', type=int,
                        help='Maximum numerical HTTP requests waiting/running (block default: 16; overflow: 503)')
     rows, context, horizon = FORECAST_GRAPH_SHAPE

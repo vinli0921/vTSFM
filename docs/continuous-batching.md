@@ -315,3 +315,48 @@ The [November 7 measured baseline](baselines/2026-11-07-continuous/README.md)
 records the first complete 900-request comparison of the original block path.
 That historical implementation was slower than whole-forecast batching under
 homogeneous saturation; it does not measure the decoder described here.
+
+## Experimental Moirai quantile rounds
+
+Moirai can opt into the same synchronous V1 worker, scheduler and block pooler.
+The research switch is required in addition to ordinary continuous batching.
+
+```bash
+VTSFM_EXPERIMENTAL_MOIRAI_BLOCKS=1 ./scripts/serve.sh --adapter moirai2 --continuous-batching
+```
+
+Moirai uses eager FP32, upstream attention, four slots by default and up to eight
+active univariate rows in total. The scheduler reserves whole-horizon work under
+the ordinary Moirai admission limits. Each virtual marker represents 64 forecast
+samples (four patches of 16). The first native module call processes one trajectory
+per series. Each subsequent round processes nine per series, then reduces all 81
+quantile candidates and feeds the nine resulting trajectories back. The scheduler
+can interleave requests between rounds. For each request the model executes rows
+grouped by true history length, exactly as in the native reference. Concatenating
+rows from independent requests changed FP32 native quantiles over 16 recursive
+rounds on the A100, including for equal-length inputs. This prototype therefore
+keeps model calls isolated per owner.
+There is no attention KV state. Requests own their expanded targets, masks and
+output buffers until completion or cancellation. This mode is experimental.
+Ordinary Moirai serving still runs complete forecasts. The [A100 benchmark](baselines/2026-11-25-moirai-forecast-blocks/README.md) reports throughput, p95 latency, memory and native parity for both modes.
+
+In the pinned Linux Moirai environment, exercise native parity without occupying
+a GPU, or run the HTTP lifecycle and maximum-shape check on an idle A100:
+
+```bash
+CUDA_VISIBLE_DEVICES='' VTSFM_MOIRAI_BLOCK_CHECKPOINT=cpu NVIDIA_TF32_OVERRIDE=0 \
+  PYTHONPATH=src:tests:. .venv-moirai2/bin/python -m pytest -q tests/test_moirai_stepping.py
+CUDA_VISIBLE_DEVICES=0 VTSFM_RUN_MOIRAI_CONTINUOUS=1 NVIDIA_TF32_OVERRIDE=0 \
+  PYTHONPATH=src:tests:. .venv-moirai2/bin/python -m pytest -q tests/test_moirai_continuous.py
+```
+
+The existing open-loop replay accepts `--adapter moirai2`. For example, use the
+same prepared MetroPT fixture and reverse the order of `--modes` on a repeat.
+The independent-native lifecycle test and the untraced HTTP replay answer
+different questions. Benchmarks exclude startup and record failures.
+
+```bash
+VTSFM_EXPERIMENTAL_MOIRAI_BLOCKS=1 PYTHONPATH=src:. .venv-moirai2/bin/python -m benchmarks.continuous \
+  --adapter moirai2 --data-dir data/model-integration --output results/moirai-block-a \
+  --modes whole,continuous --scenarios saturated,bursty --requests 100 --queue-limit 128
+```
