@@ -169,6 +169,19 @@ The [TimesFM HTTP graph mode](docs/timesfm-graph-serving.md) exposes this experi
 through `/pooling` on a single scheduled slot at batch 2, context 512 and horizon
 1024.
 
+Toto also supports an experimental fixed-shape CUDA graph in its vLLM worker.
+
+```bash
+./scripts/serve.sh --adapter toto2 --toto-forecast-graph 5 512 96 --port 8001
+```
+
+The three values are the series count, context width, and forecast horizon.
+The worker captures one FP32 graph at startup and uses eager execution for other
+shapes. The same `/pooling` schema accepts ragged histories if the widest
+history still matches the captured width. The graph uses stride-aware unit
+scaling with TF32 disabled. Its private CUDA memory stays resident until
+worker shutdown, including during eager fallback.
+
 Toto uses Python 3.12.12 and a pinned upstream revision. Moirai keeps its
 NumPy 1.26 dependencies and explicitly overrides its Torch
 upper bound and vLLM's OpenCV requirement in `scripts/moirai2-overrides.txt`.

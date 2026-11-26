@@ -306,3 +306,42 @@ def test_native_cli_rejects_forecast_mode_instead_of_ignoring_it():
     assert process.returncode == 2
     assert '--timesfm-forecast-mode applies to the vLLM backend' in process.stderr
     assert 'Traceback' not in process.stderr
+
+
+def test_toto_graph_is_opt_in_and_configures_the_existing_worker(monkeypatch):
+    from vtsfm.cli import build_vllm_command
+    from vtsfm.adapters.toto2.graph_config import FAST_SCALING_ENV, GRAPH_SHAPE_ENV
+
+    monkeypatch.delenv(GRAPH_SHAPE_ENV, raising=False)
+    _, eager = build_vllm_command(adapter='toto2')
+    assert GRAPH_SHAPE_ENV not in eager
+
+    command, graph = build_vllm_command(adapter='toto2', toto_forecast_graph=(5, 512, 96))
+    assert graph[GRAPH_SHAPE_ENV] == '5,512,96'
+    assert graph[FAST_SCALING_ENV] == 'stride-aware'
+    assert graph['VTSFM_PRECISION'] == 'fp32' and graph['NVIDIA_TF32_OVERRIDE'] == '0'
+    assert graph['VTSFM_FORECAST_EXECUTION'] == 'eager'
+    assert '--enforce-eager' in command and '--no-async-scheduling' in command
+    assert command[command.index('--worker-cls') + 1] == 'vtsfm.worker.ForecastWorker'
+
+    monkeypatch.setenv(GRAPH_SHAPE_ENV, '5,512,96')
+    _, inherited = build_vllm_command(adapter='toto2')
+    _, timesfm = build_vllm_command(adapter='timesfm25')
+    assert inherited[GRAPH_SHAPE_ENV] == '5,512,96'
+    assert GRAPH_SHAPE_ENV not in timesfm
+
+
+@pytest.mark.parametrize('settings, reason', [
+    ({'adapter': 'moirai2'}, 'applies to Toto'),
+    ({'forecast_execution': 'compile'}, 'requires eager FP32'),
+    ({'forecast_precision': 'bf16'}, 'requires eager FP32'),
+    ({'toto_forecast_graph': (0, 512, 96)}, 'positive integers'),
+    ({'toto_forecast_graph': (17, 512, 96)}, 'admission limits'),
+    ({'toto_forecast_graph': (5, 8193, 96)}, 'admission limits'),
+    ({'toto_forecast_graph': (5, 512, 1025)}, 'admission limits'),
+])
+def test_toto_graph_rejects_unqualified_configuration(settings, reason):
+    from vtsfm.cli import build_vllm_command
+
+    with pytest.raises(ValueError, match=reason):
+        build_vllm_command(**({'adapter': 'toto2', 'toto_forecast_graph': (5, 512, 96)} | settings))

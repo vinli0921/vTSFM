@@ -280,6 +280,8 @@ def test_toto_cropped_output_owns_compact_fp32_storage(dtype, rows):
         backing = torch.arange(9 * rows * 64, dtype=getattr(torch, dtype))
         native = backing.reshape(9, rows, 1, 64)[..., :horizon]
     runtime = TotoRuntime.__new__(TotoRuntime)
+    runtime.fast_unit_scaling = False
+    runtime.fast_unit_scaling_mode = '1'
     runtime.model = SimpleNamespace(config=SimpleNamespace(patch_size=32),
                                     forecast=lambda *args, **kwargs: native)
     context = torch.zeros(rows, 64)

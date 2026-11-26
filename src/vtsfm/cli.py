@@ -19,6 +19,10 @@ from vtsfm.adapters.moirai2.spec import MOIRAI_ATTENTION_ENV, resolve_attention_
 from vtsfm.adapters.timesfm25.graph_config import (
     FORECAST_GRAPH_SHAPE, FORECAST_MODE_ENV, FORECAST_MODES, validate_fixed_forecast_execution,
 )
+from vtsfm.adapters.toto2.graph_config import (
+    FAST_SCALING_ENV, GRAPH_SCALING_MODE, GRAPH_SHAPE_ENV,
+    parse_graph_shape, validate_graph_execution, validate_graph_shape,
+)
 from vtsfm.admission import FORECAST_LIMITS_ENV, resolve_cost, resolve_limits
 from vtsfm.compilation import EXECUTION_ENV, EXECUTION_MODES, execution_mode
 from vtsfm.stepping import CONTINUOUS_ENV
@@ -40,6 +44,7 @@ def _environment(benchmark: bool = False) -> dict[str, str]:
     environment['HF_HUB_DISABLE_TELEMETRY'] = '1'
     environment.pop('VLLM_SERVER_DEV_MODE', None)
     environment.pop(FORECAST_MODE_ENV, None)
+    environment.pop(GRAPH_SHAPE_ENV, None)
     return environment
 
 
@@ -53,8 +58,14 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
                        forecast_precision: str | None = None,
                        forecast_execution: str | None = None,
                        timesfm_forecast_mode: str | None = None,
+                       toto_forecast_graph: tuple[int, int, int] | None = None,
                        ) -> tuple[list[str], dict[str, str]]:
     selected = get_adapter(adapter)
+    if toto_forecast_graph is None and selected.name == 'toto2':
+        toto_forecast_graph = os.environ.get(GRAPH_SHAPE_ENV)
+    toto_graph_shape = parse_graph_shape(toto_forecast_graph)
+    if toto_graph_shape is not None and (selected.name != 'toto2' or backend != 'vtsfm'):
+        raise ValueError('--toto-forecast-graph applies to Toto through the vTSFM backend')
     if timesfm_forecast_mode is not None:
         if timesfm_forecast_mode not in FORECAST_MODES:
             raise ValueError(f'--timesfm-forecast-mode must be one of {", ".join(FORECAST_MODES)}')
@@ -82,6 +93,9 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
     mode = execution_mode(forecast_execution)
     if timesfm_forecast_mode is not None:
         validate_fixed_forecast_execution(forecast_precision, mode)
+    if toto_graph_shape is not None:
+        validate_graph_execution(forecast_precision, mode)
+        forecast_precision = 'fp32'
     if mode == 'compile' and (selected.name == 'chronos2' or backend != 'vtsfm'):
         raise ValueError('Compiled forecasts support TimesFM, Toto and Moirai through vTSFM')
     if continuous_batching:
@@ -122,6 +136,10 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
             environment['TRITON_F32_DEFAULT'] = 'ieee'
         # The adapter owns its CUDA graph; keep the pinned vLLM bridge synchronous.
         command += ['--no-async-scheduling', '--served-model-name', selected.model_id]
+    if toto_graph_shape is not None:
+        environment[GRAPH_SHAPE_ENV] = ','.join(map(str, toto_graph_shape))
+        environment[FAST_SCALING_ENV] = GRAPH_SCALING_MODE
+        command += ['--no-async-scheduling']
     if max_num_seqs is not None:
         if type(max_num_seqs) is not int or max_num_seqs < 1:
             raise ValueError('max_num_seqs must be a positive integer')
@@ -139,6 +157,8 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
     if selected.admission_limits is not None:
         encoded = Path(forecast_limits).read_text() if forecast_limits is not None else None
         limits = resolve_limits(selected.admission_limits, encoded)
+        if toto_graph_shape is not None:
+            validate_graph_shape(toto_graph_shape, limits)
         slots = int(command[command.index('--max-num-seqs') + 1])
         # The adapter owns this cost; its descriptor imports no model runtime.
         forecast_cost = resolve_cost(selected)
@@ -235,6 +255,8 @@ def main(argv: list[str] | None = None) -> int:
     rows, context, horizon = FORECAST_GRAPH_SHAPE
     serve.add_argument('--timesfm-forecast-mode', choices=FORECAST_MODES,
                        help=f'Experimental TimesFM/vtsfm whole forecast at B{rows}/C{context}/H{horizon}; one scheduled request')
+    serve.add_argument('--toto-forecast-graph', nargs=3, type=int, metavar=('ROWS', 'CONTEXT', 'HORIZON'),
+                       help='Opt in to one Toto/vtsfm CUDA graph; other forecast shapes run eager')
     serve.add_argument('--forecast-precision', choices=PRECISIONS,
                        help='Select FP32, TF32 matmuls, or native BF16 (Toto/Moirai)')
     serve.add_argument('--forecast-execution', choices=EXECUTION_MODES,
@@ -267,8 +289,11 @@ def main(argv: list[str] | None = None) -> int:
             kwargs['continuous_batching'] = args.continuous_batching
             kwargs['forecast_queue_limit'] = args.forecast_queue_limit
             kwargs['timesfm_forecast_mode'] = args.timesfm_forecast_mode
+            kwargs['toto_forecast_graph'] = args.toto_forecast_graph
             kwargs['forecast_precision'] = args.forecast_precision
             kwargs['forecast_execution'] = args.forecast_execution
+        elif args.toto_forecast_graph is not None:
+            raise ValueError('--toto-forecast-graph applies to the vLLM backend')
         elif args.timesfm_forecast_mode is not None:
             raise ValueError('--timesfm-forecast-mode applies to the vLLM backend')
         elif args.max_num_seqs is not None:
@@ -289,7 +314,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         keys = ('VTSFM_ADAPTER', 'VLLM_PLUGINS', 'VLLM_USE_V2_MODEL_RUNNER', 'VLLM_SERVER_DEV_MODE',
                 'OMP_NUM_THREADS', 'HF_HUB_DISABLE_TELEMETRY', FORECAST_BATCH_ROWS_ENV, FORECAST_LIMITS_ENV,
-                CONTINUOUS_ENV, FORECAST_MODE_ENV, PRECISION_ENV, TF32_OVERRIDE_ENV,
+                CONTINUOUS_ENV, FORECAST_MODE_ENV, GRAPH_SHAPE_ENV, FAST_SCALING_ENV, PRECISION_ENV, TF32_OVERRIDE_ENV,
                 EXECUTION_ENV, MOIRAI_ATTENTION_ENV, 'TRITON_F32_DEFAULT', 'TRITON_DEFAULT_FP_FUSION')
         print(json.dumps({'command': command, 'environment': {
             key: environment[key] for key in keys if key in environment}}, indent=2))
