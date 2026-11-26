@@ -6,7 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_routing_engine import gpu as gpu  # pytest fixture
+import test_routing_engine
+
+
+gpu = test_routing_engine.gpu
 
 
 @pytest.mark.gpu
