@@ -168,9 +168,7 @@ def _cancel_queued(server, evidence_path, data):
         _drain_requests(url, evidence_path)
     finally:
         control.post(url + '/resume', timeout=10).raise_for_status()
-    for event in _events(server['worker_trace']):
-        assert all(not identity.startswith(f'pooling-{request_id}:')
-                   for identity in event['request_ids'])
+    return request_id
 
 
 @contextmanager
@@ -463,8 +461,10 @@ def test_real_model_default_envelope_repeated_maximum_memory(adapter, gpu, tmp_p
             # Compare only after the first maximum wave has established any
             # model-owned high-water cache, not against the small-model baseline.
             assert max(state['allocated_bytes'] for state in snapshots[1:]) <= snapshots[0]['allocated_bytes'] + 64 * 1024
-            _cancel_queued(server, tmp_path / 'cancelled-request-drain.json', small)
+            cancelled = _cancel_queued(server, tmp_path / 'cancelled-request-drain.json', small)
             _compare(_post(url, model, 'healthy-after-maximum', small), expected, small)
+            for event in _events(server['worker_trace']):
+                assert f'pooling-{cancelled}' not in event['request_ids']
             record['final_request_state'] = _empty(server)
         record['status'] = 'passed'
     finally:

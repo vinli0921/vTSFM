@@ -173,6 +173,7 @@ def test_wider_admission_is_explicit_and_eager_fp32_only(adapter, tmp_path, monk
     from vtsfm.cli import build_vllm_command
 
     monkeypatch.delenv('VTSFM_MOIRAI_ATTENTION', raising=False)
+    monkeypatch.delenv('VTSFM_PRECISION', raising=False)
     spec = get_adapter(adapter)
     wider = spec.eager_fp32_admission_ceiling
     limits = tmp_path / 'wide.json'
@@ -180,15 +181,18 @@ def test_wider_admission_is_explicit_and_eager_fp32_only(adapter, tmp_path, monk
     options = dict(adapter=adapter, max_num_seqs=16, forecast_execution='eager')
     with pytest.raises(ValueError, match='scheduled requests'):
         build_vllm_command(**options, forecast_precision='fp32')
-    with pytest.raises(ValueError, match='exceeds validated ceiling'):
-        build_vllm_command(**options, forecast_precision='bf16', forecast_limits=limits)
+    for precision in (None, 'bf16', 'tf32'):
+        with pytest.raises(ValueError, match='Use --forecast-precision fp32 --forecast-execution eager'):
+            build_vllm_command(**options, forecast_precision=precision, forecast_limits=limits)
     _, environment = build_vllm_command(**options, forecast_precision='fp32', forecast_limits=limits)
     assert json.loads(environment[FORECAST_LIMITS_ENV]) == asdict(wider)
     assert resolve_adapter_limits(spec, environment) == wider
     assert wider.max_request_rows == spec.admission_limits.max_request_rows
 
-    limits.write_text(json.dumps({**asdict(wider), 'max_scheduled_requests': 17}))
-    with pytest.raises(ValueError, match='exceeds validated ceiling'):
+    limits.write_text(json.dumps({'max_scheduled_requests': 17}))
+    with pytest.raises(ValueError, match='exceeds validated ceiling 4$'):
+        build_vllm_command(**options, forecast_limits=limits)
+    with pytest.raises(ValueError, match='exceeds validated ceiling 16$'):
         build_vllm_command(**options, forecast_precision='fp32', forecast_limits=limits)
 
 
