@@ -11,6 +11,9 @@ import json
 from importlib import import_module
 from typing import Iterable
 
+from vtsfm.compilation import EXECUTION_ENV
+from vtsfm.precision import PRECISION_ENV, TF32_OVERRIDE_ENV
+
 FORECAST_LIMITS_ENV = 'VTSFM_FORECAST_LIMITS'
 
 
@@ -144,8 +147,10 @@ def _unique_object(pairs):
     return result
 
 
-def resolve_limits(defaults: ForecastLimits, encoded_json: str | None) -> ForecastLimits:
-    """Merge partial JSON overrides, allowing only tighter validated ceilings."""
+def resolve_limits(defaults: ForecastLimits, encoded_json: str | None, *,
+                   ceiling: ForecastLimits | None = None,
+                   inactive_eager_fp32_ceiling: ForecastLimits | None = None) -> ForecastLimits:
+    """Merge partial overrides within the selected validated ceiling."""
     if encoded_json is None:
         return defaults
     if not isinstance(encoded_json, str):
@@ -160,9 +165,29 @@ def resolve_limits(defaults: ForecastLimits, encoded_json: str | None) -> Foreca
     unknown = set(overrides) - names
     if unknown:
         raise ValueError(f'Unknown forecast limits: {", ".join(sorted(unknown))}')
+    bounds = defaults if ceiling is None else ceiling
     for name, value in overrides.items():
         _positive_integer(value, name)
-        ceiling = getattr(defaults, name)
-        if value > ceiling:
-            raise ValueError(f'{name} {value} exceeds validated ceiling {ceiling}')
+        maximum = getattr(bounds, name)
+        if value > maximum:
+            message = f'{name} {value} exceeds validated ceiling {maximum}'
+            if (inactive_eager_fp32_ceiling is not None
+                    and value <= getattr(inactive_eager_fp32_ceiling, name)):
+                message += ('. Wider limits require eager FP32 whole forecasts with TF32 disabled. '
+                            'Use --forecast-precision fp32 --forecast-execution eager.')
+            raise ValueError(message)
     return replace(defaults, **overrides)
+
+
+def resolve_adapter_limits(spec, environment) -> ForecastLimits | None:
+    """Resolve the same opt-in policy in the launcher, frontend and worker."""
+    if spec is None or spec.admission_limits is None:
+        return None
+    ceiling = None
+    if (environment.get(PRECISION_ENV) == 'fp32'
+            and environment.get(EXECUTION_ENV, 'eager') == 'eager'
+            and environment.get(TF32_OVERRIDE_ENV, '0') == '0'):
+        ceiling = spec.eager_fp32_admission_ceiling
+    inactive_ceiling = spec.eager_fp32_admission_ceiling if ceiling is None else None
+    return resolve_limits(spec.admission_limits, environment.get(FORECAST_LIMITS_ENV),
+                          ceiling=ceiling, inactive_eager_fp32_ceiling=inactive_ceiling)

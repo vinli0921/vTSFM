@@ -38,3 +38,4 @@ class AdapterSpec:
     # CPU-only module:function; serving can validate numerical budgets before
     # importing any model runtime or loading checkpoint weights.
     admission_cost: str | None = None
+    eager_fp32_admission_ceiling: ForecastLimits | None = None

@@ -50,8 +50,11 @@ def adapter():
 
 
 def _policy(adapter):
-    module = import_module(f'vtsfm.adapters.{adapter}.admission')
-    return module.DEFAULT_LIMITS, module.forecast_cost
+    from vtsfm.adapters import get_adapter
+    from vtsfm.admission import resolve_adapter_limits, resolve_cost
+
+    spec = get_adapter(adapter)
+    return resolve_adapter_limits(spec, os.environ), resolve_cost(spec)
 
 
 def test_direct_model_launch_rejects_before_runtime_construction(adapter, monkeypatch):
@@ -60,8 +63,9 @@ def test_direct_model_launch_rejects_before_runtime_construction(adapter, monkey
     from vtsfm.admission import FORECAST_LIMITS_ENV
     from vtsfm.stepping import CONTINUOUS_ENV
 
-    defaults, _ = _policy(adapter)
-    module, name = get_adapter(adapter).model_class.split(':')
+    spec = get_adapter(adapter)
+    defaults = spec.admission_limits
+    module, name = spec.model_class.split(':')
     model_class = getattr(import_module(module), name)
 
     def forbid_model_load(*args, **kwargs):
@@ -151,6 +155,22 @@ def _empty(server):
         time.sleep(.02)
 
 
+def _cancel_queued(server, evidence_path, data):
+    from benchmarks.continuous import _drain_requests
+    from test_timesfm_lifecycle import _disconnectable, _wait_log
+
+    url, model, control = server['url'], server['model'], server['control']
+    request_id = 'cancelled-while-queued'
+    control.post(url + '/pause', params={'mode': 'keep'}, timeout=10).raise_for_status()
+    try:
+        with _disconnectable(url, model, request_id, data):
+            _wait_log(server['log'], f'Added request pooling-{request_id}-')
+        _drain_requests(url, evidence_path)
+    finally:
+        control.post(url + '/resume', timeout=10).raise_for_status()
+    return request_id
+
+
 @contextmanager
 def _server(directory, monitor, adapter, *, limits=None):
     import requests
@@ -167,12 +187,14 @@ def _server(directory, monitor, adapter, *, limits=None):
     ensure_port_free('127.0.0.1', port)
     url = f'http://127.0.0.1:{port}'
     config = directory / 'limits.json'
+    policy = asdict(defaults)
     if limits is not None:
-        save_json(config, limits)
+        policy.update(limits)
+    save_json(config, policy)
     command, environment = build_vllm_command(
-        adapter=adapter, port=port, max_num_seqs=4,
+        adapter=adapter, port=port, max_num_seqs=policy['max_scheduled_requests'],
         forecast_batch_rows=defaults.max_execution_rows,
-        forecast_limits=str(config) if limits is not None else None, benchmark=True)
+        forecast_limits=str(config), benchmark=True)
     command[command.index('--worker-extension-cls') + 1] = 'admission_probe.AdmissionProbeExtension'
     command += ['--gpu-memory-utilization', '0.35', '--mm-processor-cache-gb', '0',
                 '--enable-log-requests', '--no-async-scheduling']
@@ -188,7 +210,8 @@ def _server(directory, monitor, adapter, *, limits=None):
         'command': command, 'adapter': adapter,
         'limits': json.loads(environment['VTSFM_FORECAST_LIMITS']),
         'model_id': selected.model_id, 'model_revision': selected.model_revision,
-        'precision': 'eager FP32; TF32 disabled; pinned upstream attention',
+        'precision': 'eager FP32, TF32 disabled',
+        'attention': os.environ.get('VTSFM_MOIRAI_ATTENTION', 'upstream'),
     })
     label = f'{adapter}-admission-server'
     with OwnedProcesses(directory) as owner, requests.Session() as control:
@@ -354,6 +377,7 @@ def test_real_model_default_envelope_repeated_maximum_memory(adapter, gpu, tmp_p
             rows -= 1
     assert rows, 'The published policy admits no row at its maximum context/horizon'
     maximum_cost = forecast_cost(rows, defaults.max_context, defaults.max_horizon)
+    slots = defaults.max_scheduled_requests
     assert defaults.max_execution_rows % 4 == 0
     fused_rows = defaults.max_execution_rows // 4
     assert 1 <= fused_rows <= defaults.max_request_rows
@@ -377,7 +401,8 @@ def test_real_model_default_envelope_repeated_maximum_memory(adapter, gpu, tmp_p
         'packages': {name: importlib.metadata.version(name) for name in packages},
         'source_sha256': {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
                           for path in sources},
-        'precision': 'eager FP32; TF32 disabled; pinned upstream attention',
+        'precision': 'eager FP32, TF32 disabled',
+        'attention': os.environ.get('VTSFM_MOIRAI_ATTENTION', 'upstream'),
         'nvml_interval_seconds': .02, 'status': 'failed', 'profiles': [],
         'notes': ['NVML samples may miss brief peaks; allocator and device memory differ.',
                   'The corner maximizes admitted rows at maximum context and horizon.',
@@ -422,13 +447,13 @@ def test_real_model_default_envelope_repeated_maximum_memory(adapter, gpu, tmp_p
             snapshots = []
             for index in range(3):
                 completed, profile = _measure(server, gpu,
-                    lambda: _wave(server, f'maximum-wave-{index}', ('maximum',) * 4, {'maximum': maximum}))
+                    lambda: _wave(server, f'maximum-wave-{index}', ('maximum',) * slots, {'maximum': maximum}))
                 forwards, executions = _bounded_calls(server, completed, asdict(defaults), forecast_cost)
-                assert len(forwards) == 1 and forwards[0]['rows'] == [rows] * 4
+                assert len(forwards) == 1 and forwards[0]['rows'] == [rows] * slots
                 for _, _, predictions in completed:
                     _compare(predictions, maximal, maximum)
                 profile['worker_forwards'], profile['model_calls'] = forwards, executions
-                record['profiles'].append(dict(name=f'four-concurrent-maximum-{index}', **profile))
+                record['profiles'].append(dict(name=f'{slots}-concurrent-maximum-{index}', **profile))
                 state = _empty(server)
                 snapshots.append(state)
                 record['empty_request_states'] = snapshots
@@ -436,7 +461,10 @@ def test_real_model_default_envelope_repeated_maximum_memory(adapter, gpu, tmp_p
             # Compare only after the first maximum wave has established any
             # model-owned high-water cache, not against the small-model baseline.
             assert max(state['allocated_bytes'] for state in snapshots[1:]) <= snapshots[0]['allocated_bytes'] + 64 * 1024
+            cancelled = _cancel_queued(server, tmp_path / 'cancelled-request-drain.json', small)
             _compare(_post(url, model, 'healthy-after-maximum', small), expected, small)
+            for event in _events(server['worker_trace']):
+                assert f'pooling-{cancelled}' not in event['request_ids']
             record['final_request_state'] = _empty(server)
         record['status'] = 'passed'
     finally:

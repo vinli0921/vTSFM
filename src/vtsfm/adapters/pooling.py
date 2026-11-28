@@ -13,7 +13,7 @@ from vllm.plugins.io_processors.interface import IOProcessor
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 
 from vtsfm.config import FORECAST_BATCH_ROWS_ENV, MAX_FORECAST_BATCH_ROWS
-from vtsfm.admission import FORECAST_LIMITS_ENV, forward_resident_bytes, resolve_limits
+from vtsfm.admission import forward_resident_bytes, resolve_adapter_limits
 
 from .execution_batch import execute_scheduled
 from .forecast import ForecastSettings, format_predictions, parse_request
@@ -74,8 +74,7 @@ class ForecastModel(nn.Module, IsAttentionFree, SupportsMultiModal):
         from vtsfm.stepping import CONTINUOUS_ENV
         if os.environ.get(CONTINUOUS_ENV) == '1' and (self.batch_spec is None or self.batch_spec.name != 'timesfm25'):
             raise ValueError('Forecast-block execution currently supports only TimesFM')
-        defaults = self.batch_spec.admission_limits if self.batch_spec is not None else None
-        self.forecast_limits = resolve_limits(defaults, os.environ.get(FORECAST_LIMITS_ENV)) if defaults else None
+        self.forecast_limits = resolve_adapter_limits(self.batch_spec, os.environ)
         if self.forecast_limits is not None:
             limits = self.forecast_limits
             # Check direct LLM/vllm launches too, before loading the checkpoint.
@@ -179,8 +178,7 @@ class ForecastIOProcessor(IOProcessor):
         from vtsfm.stepping import CONTINUOUS_ENV
         if os.environ.get(CONTINUOUS_ENV) == '1' and (self.admission_spec is None or self.admission_spec.name != 'timesfm25'):
             raise ValueError('Forecast-block IO currently supports only TimesFM')
-        defaults = self.admission_spec.admission_limits if self.admission_spec is not None else None
-        self.forecast_limits = resolve_limits(defaults, os.environ.get(FORECAST_LIMITS_ENV)) if defaults else None
+        self.forecast_limits = resolve_adapter_limits(self.admission_spec, os.environ)
 
     def _check_limits(self, inputs, horizon):
         if self.forecast_limits is not None:
