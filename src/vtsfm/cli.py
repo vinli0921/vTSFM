@@ -104,7 +104,7 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
             mode, forecast_precision, environment)
     if selected.name == 'timesfm25':
         scope = timesfm_compile_scope(environment, mode, forecast_precision, continuous=continuous_batching)
-        layout = timesfm_flip_layout(environment, forecast_precision, independent_whole_forecast=(
+        layout = timesfm_flip_layout(environment, mode, forecast_precision, independent_whole_forecast=(
             timesfm_forecast_mode is None and not continuous_batching and forecast_batch_rows is None
             and scope not in ('positioned', 'positioned-eager')
         ))
@@ -113,7 +113,7 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
                 raise ValueError('TimesFM positioned forecasts require the standard whole-forecast serving path')
             forecast_precision = 'fp32'
         if layout == 'split':
-            forecast_precision = 'fp32'
+            forecast_precision = forecast_precision or 'fp32'
     else:
         environment.pop(TIMESFM_COMPILE_SCOPE_ENV, None)
         environment.pop(TIMESFM_FLIP_LAYOUT_ENV, None)

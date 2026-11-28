@@ -30,13 +30,14 @@ def compile_scope(environment, execution, precision, *, continuous=False):
     return scope
 
 
-def flip_layout(environment, precision, *, independent_whole_forecast):
-    """Select the experimental upstream flip geometry for independent FP32 requests."""
+def flip_layout(environment, execution, precision, *, independent_whole_forecast):
+    """Select the experimental upstream flip geometry for independent requests."""
     layout = environment.get(FLIP_LAYOUT_ENV, 'packed')
     if layout not in ('packed', 'split'):
         raise ValueError(f"{FLIP_LAYOUT_ENV} must be 'packed' or 'split', got {layout!r}")
-    if layout == 'split' and (precision not in (None, 'fp32') or not independent_whole_forecast):
-        raise ValueError('TimesFM split flips require independent whole-forecast serving in FP32')
+    supported_precision = precision in (None, 'fp32') or (precision == 'tf32' and execution == 'eager')
+    if layout == 'split' and (not independent_whole_forecast or not supported_precision):
+        raise ValueError('TimesFM split flips require independent whole-forecast serving in FP32 or eager TF32')
     return layout
 
 

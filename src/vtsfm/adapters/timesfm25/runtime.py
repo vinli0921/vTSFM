@@ -24,21 +24,23 @@ _WIDER_INDUCTOR_OPTIONS = {'triton.cudagraphs': False}
 class TimesFMRuntime:
     def __init__(self, config):
         execution = execution_mode()
-        scope = compile_scope(os.environ, execution, os.environ.get(PRECISION_ENV),
+        precision = os.environ.get(PRECISION_ENV)
+        scope = compile_scope(os.environ, execution, precision,
                               continuous=os.environ.get(CONTINUOUS_ENV) == '1')
         if FORECAST_MODE_ENV in os.environ:
-            validate_fixed_forecast_execution(os.environ.get(PRECISION_ENV), execution)
+            validate_fixed_forecast_execution(precision, execution)
             if scope != 'core':
                 raise ValueError('TimesFM positioned forecasts require the standard whole-forecast serving path')
         self.compile_scope = 'eager' if scope == 'core' and execution == 'eager' else scope
-        self.flip_layout = flip_layout(os.environ, os.environ.get(PRECISION_ENV),
+        self.flip_layout = flip_layout(os.environ, execution, precision,
             independent_whole_forecast=(
                 FORECAST_MODE_ENV not in os.environ and os.environ.get(CONTINUOUS_ENV) != '1'
                 and os.environ.get(FORECAST_BATCH_ROWS_ENV, '0') == '0'
                 and scope not in ('positioned', 'positioned-eager')
             ))
-        self.precision = configure_precision(
-            'timesfm25', 'fp32' if scope != 'core' or self.flip_layout == 'split' else None)
+        if scope != 'core' or self.flip_layout == 'split':
+            precision = precision or 'fp32'
+        self.precision = configure_precision('timesfm25', precision)
         self.model = timesfm.TimesFM_2p5_200M_torch(torch_compile=False).model
         self.fixed_forecast = None
         self.positioned_forecast = None
