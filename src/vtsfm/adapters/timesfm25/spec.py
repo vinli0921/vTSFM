@@ -1,5 +1,6 @@
 """Pinned TimesFM checkpoint and pooling settings."""
 
+from dataclasses import replace
 import json
 from vtsfm.adapters.base import AdapterSpec, FORECAST_VLLM_ARGS
 from vtsfm.adapters.forecast import ForecastSettings
@@ -25,6 +26,9 @@ TIMESFM25 = AdapterSpec(
     ),
     supports_group_attention=False,
     admission_limits=DEFAULT_LIMITS,
+    # The A100 whole-forecast probe held sixteen maximum-size requests in one forward.
+    eager_fp32_admission_ceiling=replace(
+        DEFAULT_LIMITS, max_scheduled_requests=16, max_forward_bytes=88_081_408),
     admission_cost='vtsfm.adapters.timesfm25.admission:forecast_cost',
     execution_capabilities=ExecutionCapabilities(
         max_context=FORECAST_SETTINGS.max_context, max_horizon=FORECAST_SETTINGS.max_horizon,

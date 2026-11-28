@@ -136,6 +136,11 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
         if type(forecast_batch_rows) is not int or not 2 <= forecast_batch_rows <= MAX_FORECAST_BATCH_ROWS:
             raise ValueError(f'--forecast-batch-rows must be between 2 and {MAX_FORECAST_BATCH_ROWS}')
         environment[FORECAST_BATCH_ROWS_ENV] = str(forecast_batch_rows)
+    if continuous_batching:
+        environment[CONTINUOUS_ENV] = '1'
+        command[command.index('--worker-cls') + 1] = 'vtsfm.block_worker.ForecastBlockWorker'
+        command += ['--scheduler-cls', 'vtsfm.continuous_scheduler.ForecastBlockScheduler',
+                    '--enable-chunked-prefill', '--no-async-scheduling']
     if selected.admission_limits is not None:
         if forecast_limits is not None:
             environment[FORECAST_LIMITS_ENV] = Path(forecast_limits).read_text()
@@ -153,11 +158,6 @@ def build_vllm_command(backend: str = 'vtsfm', host: str = '127.0.0.1',
         if selected.admission_limits is None or type(forecast_queue_limit) is not int or forecast_queue_limit < 1:
             raise ValueError('--forecast-queue-limit requires a numerical admission policy and a positive integer')
         command += ['--max-num-queued-reqs', str(forecast_queue_limit)]
-    if continuous_batching:
-        environment[CONTINUOUS_ENV] = '1'
-        command[command.index('--worker-cls') + 1] = 'vtsfm.block_worker.ForecastBlockWorker'
-        command += ['--scheduler-cls', 'vtsfm.continuous_scheduler.ForecastBlockScheduler',
-                    '--enable-chunked-prefill', '--no-async-scheduling']
     if benchmark:
         environment['VLLM_SERVER_DEV_MODE'] = '1'
         command += ['--worker-extension-cls', 'vtsfm.benchmark_memory.MemoryMetrics']

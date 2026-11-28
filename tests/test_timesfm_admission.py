@@ -7,6 +7,7 @@ Synthetic inputs check correctness and the configured GPU envelope. The memory
 samples are shape probes, not a throughput benchmark or exact memory guarantee.
 """
 
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import hashlib
@@ -47,7 +48,7 @@ def _events(path):
 
 
 @contextmanager
-def _server(directory, monitor, limits=None):
+def _server(directory, monitor, limits=None, *, slots=4):
     import requests
     from benchmarks.run import OwnedProcesses, ensure_port_free, wait_ready
     from vtsfm.adapters import get_adapter
@@ -64,7 +65,8 @@ def _server(directory, monitor, limits=None):
     if limits is not None:
         config.write_text(json.dumps(limits, indent=2))
     command, environment = build_vllm_command(
-        adapter='timesfm25', port=port, max_num_seqs=4, forecast_batch_rows=16,
+        adapter='timesfm25', port=port, max_num_seqs=slots,
+        forecast_batch_rows=16 if slots > 1 else None,
         forecast_limits=str(config) if limits is not None else None, benchmark=True)
     command[command.index('--worker-extension-cls') + 1] = 'admission_probe.AdmissionProbeExtension'
     command += ['--gpu-memory-utilization', '0.35', '--mm-processor-cache-gb', '0',
@@ -184,11 +186,20 @@ def _measure(server, monitor, operation):
 def test_real_timesfm_default_envelope_peak_memory(gpu, tmp_path):
     from dataclasses import asdict
     from vtsfm.adapters import get_adapter
-    from vtsfm.adapters.timesfm25.admission import DEFAULT_LIMITS
+    from vtsfm.adapters.timesfm25.admission import forecast_cost
+    from vtsfm.admission import resolve_adapter_limits
 
     selected = get_adapter('timesfm25')
+    limits = resolve_adapter_limits(selected, os.environ)
+    slots = limits.max_scheduled_requests
+    context, horizon = limits.max_context, limits.max_horizon
+    work_per_row = forecast_cost(1, context, horizon).work_units
+    rows = min(limits.max_request_rows, limits.execution_row_cap(work_per_row))
+    if rows == 0:
+        pytest.skip('The work budget admits no row at the configured maximum context and horizon')
     record = {'kind': 'synthetic real-model HTTP memory envelope',
-              'limits': asdict(DEFAULT_LIMITS), 'model': selected.model_id,
+              'limits': asdict(limits), 'maximum_shape': [rows, context, horizon],
+              'model': selected.model_id,
               'revision': selected.model_revision, 'gpu': gpu.metadata(),
               'packages': {name: importlib.metadata.version(name) for name in ('torch', 'vllm', 'timesfm')},
               'source_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
@@ -201,10 +212,9 @@ def test_real_timesfm_default_envelope_peak_memory(gpu, tmp_path):
                         'Torch allocator and whole-device NVML memory are separate measures.',
                         'This is a finite envelope probe, not an exact memory guarantee or speedup benchmark.'],
               'profiles': []}
-    small = _case('baseline', (128,), -1.0, horizon=96)
-    maximum = _case('maximum', (DEFAULT_LIMITS.max_context,) * DEFAULT_LIMITS.max_request_rows,
-                    -1.0, horizon=DEFAULT_LIMITS.max_horizon)
-    with _server(tmp_path / 'default', gpu) as server:
+    small = _case('baseline', (min(128, context),), -1.0, horizon=min(96, horizon))
+    maximum = _case('maximum', (context,) * rows, -1.0, horizon=horizon)
+    with _server(tmp_path / 'envelope', gpu, asdict(limits), slots=slots) as server:
         url, model = server['url'], server['model']
         _post(url, model, 'warmup', small)
         expected, profile = _measure(server, gpu,
@@ -216,15 +226,24 @@ def test_real_timesfm_default_envelope_peak_memory(gpu, tmp_path):
         cases = {'maximum': maximum}
         completed, profile = _measure(server, gpu,
             lambda: _run_wave(url, server['control'], model, server['log'],
-                              'maximum-wave', ('maximum',) * 4, cases))
-        record['profiles'].append(dict(name='four-concurrent-maximum', **profile))
+                              'maximum-wave', ('maximum',) * slots, cases))
+        record['profiles'].append(dict(name=f'{slots}-concurrent-maximum', **profile))
         ids = {request_id for request_id, _, _ in completed}
         forwards = [event for event in _events(server['worker_trace']) if ids & set(event['request_ids'])]
-        assert len(forwards) == 1 and set(forwards[0]['request_ids']) == ids
-        assert forwards[0]['rows'] == [DEFAULT_LIMITS.max_request_rows] * 4
+        assert len(forwards) == 1 and Counter(forwards[0]['request_ids']) == Counter(ids)
+        assert forwards[0]['rows'] == [rows] * slots
         executions = [event for event in _events(server['execution_trace']) if ids & set(event['request_ids'])]
-        assert len(executions) == 4
-        assert all(event['rows'] == DEFAULT_LIMITS.max_request_rows for event in executions)
+        if slots == 1:
+            # Direct forecasts have only the worker forward trace.
+            assert not executions
+        else:
+            assert Counter(request_id for event in executions
+                           for request_id in event['request_ids']) == Counter(ids)
+            for event in executions:
+                assert event['rows'] == rows * len(event['request_ids'])
+                cost = forecast_cost(event['rows'], event['context_length'], event['horizon'])
+                assert cost.rows <= limits.max_execution_rows
+                assert cost.work_units <= limits.max_execution_work
         for _, _, predictions in completed:
             _compare(predictions, maximal, maximum)
         _compare(_post(url, model, 'healthy-after-maximum', small), expected, small)

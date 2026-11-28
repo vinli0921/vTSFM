@@ -196,6 +196,23 @@ def test_wider_admission_is_explicit_and_eager_fp32_only(adapter, tmp_path, monk
         build_vllm_command(**options, forecast_precision='fp32', forecast_limits=limits)
 
 
+def test_wider_timesfm_policy_is_only_for_eager_fp32_whole_forecasts(tmp_path):
+    from vtsfm.admission import FORECAST_LIMITS_ENV
+    from vtsfm.cli import build_vllm_command
+
+    profile = tmp_path / 'limits.json'
+    profile.write_text('{"max_scheduled_requests": 16, "max_forward_bytes": 88081408}')
+    options = {'adapter': 'timesfm25', 'max_num_seqs': 16, 'forecast_batch_rows': 16,
+               'forecast_limits': profile, 'forecast_precision': 'fp32', 'forecast_execution': 'eager'}
+    command, environment = build_vllm_command(**options)
+    assert command[command.index('--max-num-seqs') + 1] == '16'
+    assert json.loads(environment[FORECAST_LIMITS_ENV])['max_scheduled_requests'] == 16
+    for unsupported in ({'continuous_batching': True}, {'forecast_precision': 'tf32'},
+                        {'forecast_execution': 'compile'}):
+        with pytest.raises(ValueError, match='exceeds validated ceiling'):
+            build_vllm_command(**{**options, **unsupported})
+
+
 @pytest.mark.parametrize('adapter', ['timesfm25', 'toto2', 'moirai2'])
 def test_model_limits_dry_run_imports_no_runtime_packages(adapter):
     process = subprocess.run([sys.executable, '-c',
