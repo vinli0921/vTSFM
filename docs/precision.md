@@ -67,6 +67,10 @@ TimesFM native BF16 is outside #21; it is rejected by this option. TF32 keeps th
 existing FP32 transport/cache layout and is not prohibited with TimesFM block
 scheduling. That combination still needs its own GPU qualification.
 
+For independent eager TimesFM forecasts, set `VTSFM_TIMESFM_FLIP_LAYOUT=split`
+with `--forecast-precision tf32` to use the same two decode calls as native
+TimesFM. This preserves native batch shapes for flip invariance.
+
 ## Manual checks
 
 The existing manual runner forwards precision to both official native inference
